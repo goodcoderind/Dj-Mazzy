@@ -1,10 +1,11 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import path from "node:path";
-import { createReadStream, statSync, mkdirSync, copyFileSync, existsSync, readFileSync } from "node:fs";
+import { createReadStream, statSync, mkdirSync, copyFileSync, existsSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { privateEvaluationRoot } from "./tools/privateEvaluationPaths.mjs";
+import { writeOfflineAppShell } from "./tools/offlineAppShell.mjs";
 
 const workspaceRoot = path.dirname(fileURLToPath(import.meta.url));
 const htmlInputs = {
@@ -35,6 +36,8 @@ const contentTypes = {
 };
 const experimentAllowlist = new Set(["beat_this.onnx", "config.json", "mel-filterbank.bin"]);
 const includeEnhancedTiming = process.env.MAZZY_INCLUDE_ENHANCED_TIMING === "1";
+const includeDiagnostics = process.env.MAZZY_INCLUDE_DIAGNOSTICS === "1";
+const appBase = process.env.MAZZY_BASE_URL || "/";
 const buildOutputRoot = path.join(
   workspaceRoot,
   process.env.MAZZY_INCLUDE_DIAGNOSTICS === "1" ? "dist-diagnostics" : "dist"
@@ -152,10 +155,58 @@ const legalArtifacts = () => ({
   }
 });
 
+const offlineAppShell = () => ({
+  name: "mazzy-offline-app-shell",
+  apply: "build",
+  closeBundle() {
+    if (!includeDiagnostics) writeOfflineAppShell(buildOutputRoot, { base: appBase });
+  }
+});
+
+const diagnosticInstallBoundary = () => ({
+  name: "mazzy-diagnostic-install-boundary",
+  apply: "build",
+  transformIndexHtml(html, context) {
+    if (!includeDiagnostics || context.path !== "/index.html") return html;
+    return html.replace(/\s*<link rel="manifest"[^>]*>/, "");
+  },
+  closeBundle() {
+    if (!includeDiagnostics) return;
+    for (const relativePath of ["manifest.webmanifest", "mazzy-icon.svg", "icons"]) {
+      rmSync(path.join(buildOutputRoot, relativePath), { recursive: true, force: true });
+    }
+  }
+});
+
+const standardArtifactBoundary = () => ({
+  name: "mazzy-standard-artifact-boundary",
+  apply: "build",
+  closeBundle() {
+    if (includeEnhancedTiming || includeDiagnostics) return;
+    const assetsRoot = path.join(buildOutputRoot, "assets");
+    const forbidden = existsSync(assetsRoot)
+      ? readdirSync(assetsRoot).filter((name) => /^beatThisDiagnostic\.worker-|^ort-wasm-.*\.wasm$/.test(name))
+      : [];
+    if (forbidden.length) {
+      throw new Error(`Standard build unexpectedly contains enhanced timing runtime: ${forbidden.join(", ")}`);
+    }
+  }
+});
+
 export default defineConfig({
-  plugins: [privateEvaluationGuard(), react(), beatThisExperimentAssets(), beatThisProductionAssets(), legalArtifacts()],
+  base: appBase,
+  plugins: [privateEvaluationGuard(), react(), beatThisExperimentAssets(), beatThisProductionAssets(), legalArtifacts(), offlineAppShell(), diagnosticInstallBoundary(), standardArtifactBoundary()],
+  resolve: {
+    alias: {
+      "@mazzy/enhanced-rhythm": path.join(
+        workspaceRoot,
+        includeEnhancedTiming ? "src/analysis/enhancedRhythmRuntime.ts" : "src/analysis/enhancedRhythmUnavailable.ts"
+      )
+    }
+  },
   define: {
-    __MAZZY_ENHANCED_TIMING_INCLUDED__: JSON.stringify(includeEnhancedTiming)
+    __MAZZY_ENHANCED_TIMING_INCLUDED__: JSON.stringify(includeEnhancedTiming),
+    __MAZZY_OFFLINE_SHELL_INCLUDED__: JSON.stringify(!includeDiagnostics)
   },
   server: {
     fs: {

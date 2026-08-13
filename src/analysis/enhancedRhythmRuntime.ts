@@ -6,19 +6,37 @@ let analysisQueue: Promise<void> = Promise.resolve();
 let clientGeneration = 0;
 const pendingByKey = new Map<string, Promise<Awaited<ReturnType<BeatThisDiagnosticClient["analyzePcm"]>>>>();
 
-export type EnhancedRhythmAssetState = "stored" | "downloadable" | "not-included" | "unavailable";
+export type EnhancedRhythmAssetState = "stored" | "stored-unavailable" | "downloadable" | "not-included" | "unavailable";
 
-const packManifestUrl = "/models/beat-this-final0/v1/config.json";
+const packBaseUrl = `${import.meta.env.BASE_URL}models/beat-this-final0/v1/`;
+const packManifestUrl = `${packBaseUrl}config.json`;
+const timingCacheName = "mazzy-timing-model-v1";
+const requiredPackUrls = [
+  `${packBaseUrl}config.json`,
+  `${packBaseUrl}beat_this.onnx`,
+  `${packBaseUrl}mel-filterbank.bin`
+];
+
+const hasStoredPack = async () => {
+  const cache = await caches.open(timingCacheName);
+  return (await Promise.all(requiredPackUrls.map((url) => cache.match(url)))).every(Boolean);
+};
+
+const originTimingRuntimeReachable = async () => {
+  if (!navigator.onLine) return false;
+  try {
+    const response = await fetch(packManifestUrl, { method: "HEAD", cache: "no-store" });
+    return response.ok && response.headers.get("content-type")?.includes("application/json") === true;
+  } catch {
+    return false;
+  }
+};
 
 export const getEnhancedRhythmAssetState = async (): Promise<EnhancedRhythmAssetState> => {
   try {
-    const required = [
-      "/models/beat-this-final0/v1/config.json",
-      "/models/beat-this-final0/v1/beat_this.onnx",
-      "/models/beat-this-final0/v1/mel-filterbank.bin"
-    ];
-    const cached = await Promise.all(required.map((url) => caches.match(url)));
-    if (cached.every(Boolean)) return "stored";
+    const stored = await hasStoredPack();
+    if (stored && !(await originTimingRuntimeReachable())) return "stored-unavailable";
+    if (stored) return "stored";
     if (!__MAZZY_ENHANCED_TIMING_INCLUDED__) return "not-included";
     if (!navigator.onLine) return "unavailable";
     const manifest = await fetch(packManifestUrl, { cache: "no-store" });
@@ -35,7 +53,9 @@ export const hasEnhancedRhythmAssets = async () =>
 
 export const prepareEnhancedRhythm = async (onProgress?: (stage: string) => void) => {
   if (!sharedClient) sharedClient = new BeatThisDiagnosticClient();
-  return sharedClient.diagnose({ onProgress });
+  const result = await sharedClient.diagnose({ onProgress });
+  if (!(await hasStoredPack())) throw new Error("Enhanced timing assets were not stored in the timing cache.");
+  return result;
 };
 
 export const removeEnhancedRhythmModel = async () => {
@@ -43,7 +63,7 @@ export const removeEnhancedRhythmModel = async () => {
   sharedClient?.dispose();
   sharedClient = null;
   pendingByKey.clear();
-  return caches.delete("mazzy-timing-model-v1");
+  return caches.delete(timingCacheName);
 };
 
 export const disposeEnhancedRhythmClient = () => {

@@ -16,7 +16,7 @@ import BeatGridOverlay from "./BeatGridOverlay";
 import { startBeatGridAudition } from "../audio/BeatGridAudition";
 import { appendTap, applyTapTempo, estimateTapTempo, MIN_TAP_COUNT } from "../analysis/tapTempo";
 import { createTimingReview, isTimingReviewCurrent } from "../domain/timingReview";
-import { analyzeEnhancedRhythm } from "../analysis/enhancedRhythmRuntime";
+import { analyzeEnhancedRhythm } from "@mazzy/enhanced-rhythm";
 import { mergeEnhancedRhythm } from "../analysis/mergeEnhancedRhythm";
 import { hasCurrentEnhancedRhythm } from "../analysis/enhancedRhythmVersion";
 

@@ -1,7 +1,8 @@
 export const BEAT_THIS_EXPERIMENT_VERSION = "beat-this-onnx-final0/experiment-v2" as const;
-export const BEAT_THIS_MODEL_URL = "/models/beat-this-final0/v1/beat_this.onnx";
-export const BEAT_THIS_CONFIG_URL = "/models/beat-this-final0/v1/config.json";
-export const BEAT_THIS_MEL_FILTERBANK_URL = "/models/beat-this-final0/v1/mel-filterbank.bin";
+const BEAT_THIS_ASSET_BASE_URL = `${import.meta.env.BASE_URL}models/beat-this-final0/v1/`;
+export const BEAT_THIS_MODEL_URL = `${BEAT_THIS_ASSET_BASE_URL}beat_this.onnx`;
+export const BEAT_THIS_CONFIG_URL = `${BEAT_THIS_ASSET_BASE_URL}config.json`;
+export const BEAT_THIS_MEL_FILTERBANK_URL = `${BEAT_THIS_ASSET_BASE_URL}mel-filterbank.bin`;
 export const BEAT_THIS_MODEL_BYTES = 83_143_431;
 export const BEAT_THIS_MODEL_SHA256 = "078572af6ca47741e06a82d09525d13c793eaa8e311a8cf15e831dcd7e73f218";
 export const BEAT_THIS_CONFIG_SHA256 = "56cc961ddc588c57787c20c01ec6ab483b23af1049e65bd33d599a81803acd69";

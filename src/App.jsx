@@ -22,7 +22,7 @@ import {
   getEnhancedRhythmAssetState,
   prepareEnhancedRhythm,
   removeEnhancedRhythmModel
-} from "./analysis/enhancedRhythmRuntime";
+} from "@mazzy/enhanced-rhythm";
 import { mergeEnhancedRhythm } from "./analysis/mergeEnhancedRhythm";
 import { hasCurrentEnhancedRhythm } from "./analysis/enhancedRhythmVersion";
 import { sortAnalysisQueue } from "./analysis/analysisQueuePriority";
@@ -290,7 +290,15 @@ export default function App() {
     void getEnhancedRhythmAssetState().then((assetState) => {
       const stored = assetState === "stored";
       setEnhancedTimingAvailable(stored);
-      setEnhancedTimingState(stored ? "stored" : assetState === "downloadable" ? "not-downloaded" : assetState === "not-included" ? "not-included" : "offline");
+      setEnhancedTimingState(stored
+        ? "stored"
+        : assetState === "stored-unavailable"
+          ? "stored-unavailable"
+          : assetState === "downloadable"
+            ? "not-downloaded"
+            : assetState === "not-included"
+              ? "not-included"
+              : "offline");
     });
   }, []);
 
@@ -309,7 +317,9 @@ export default function App() {
   const removeTimingModel = async () => {
     await removeEnhancedRhythmModel();
     setEnhancedTimingAvailable(false);
-    setEnhancedTimingState(navigator.onLine ? "not-downloaded" : "offline");
+    setEnhancedTimingState(__MAZZY_ENHANCED_TIMING_INCLUDED__
+      ? navigator.onLine ? "not-downloaded" : "offline"
+      : "not-included");
   };
 
   useEffect(() => {
@@ -2075,7 +2085,7 @@ export default function App() {
             >
               {autoPilotEnabled ? "PARTY AUTOPILOT ON" : "START PARTY AUTOPILOT"}
             </button>
-            <a className="device-check-link" href="/device-soak.html" target="_blank" rel="noreferrer">
+            <a className="device-check-link" href={`${import.meta.env.BASE_URL}device-soak.html`} target="_blank" rel="noreferrer">
               RUN LOCAL DEVICE PARTY CHECK
             </a>
             <div className="party-energy-control">
@@ -2408,6 +2418,10 @@ export default function App() {
                     : "TIMING MODEL IS CACHED · IT WILL BE CHECKED DURING ANALYSIS"
                   : enhancedTimingState === "offline"
                     ? "CONNECT TO DOWNLOAD THE TIMING MODEL · CONSERVATIVE FADE IS AVAILABLE NOW"
+                    : enhancedTimingState === "stored-unavailable"
+                      ? __MAZZY_ENHANCED_TIMING_INCLUDED__
+                        ? "TIMING MODEL IS STORED · CONNECT TO THIS APP BEFORE USING IT · SAFE FADE IS READY"
+                        : "A TIMING MODEL IS STORED FROM ANOTHER BUILD · THIS BUILD WILL NOT USE IT"
                     : enhancedTimingState === "not-included"
                       ? "THIS BUILD DOES NOT INCLUDE ENHANCED TIMING · SAFE FADE IS READY"
                     : enhancedTimingState === "error"
@@ -2416,7 +2430,7 @@ export default function App() {
                         ? "PREPARING THE 109 MB AUTOMATIC TIMING TOOL…"
                         : "OPTIONAL: DOWNLOAD THE ~109 MB TIMING MODEL · BROWSER STORAGE MAY CLEAR IT"}
             </span>
-            {enhancedTimingAvailable ? (
+            {enhancedTimingAvailable || enhancedTimingState === "stored-unavailable" ? (
               <button type="button" onClick={() => void removeTimingModel()}>REMOVE TIMING MODEL</button>
             ) : (
               <button type="button" onClick={() => void prepareTimingModel()} disabled={enhancedTimingState === "downloading" || enhancedTimingState.includes("model") || enhancedTimingState.startsWith("inferring") || enhancedTimingState === "offline" || enhancedTimingState === "not-included"}>

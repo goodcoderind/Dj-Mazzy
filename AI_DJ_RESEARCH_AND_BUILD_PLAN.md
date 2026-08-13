@@ -1848,6 +1848,32 @@ These are the active backlog, not reasons to discard the prototype.
   bounded filter sweep, but it still cannot authorize timing, tempo stretch,
   phrase alignment, or a higher-ranked song choice and is never described as
   verified vocal detection.
+- **D-043 — Offline app-shell recovery is allowlisted and separate from user
+  data:** `mazzy-offline-app-shell/v2` is generated only for the normal
+  production artifact. After a successful online load, its content-derived
+  cache holds only the root HTML, exact hashed UI modules, the basic analysis
+  worker, manifest, and install icons. Each response body must match its
+  build-embedded SHA-256 before the worker can install; a failed or partial
+  deploy leaves the last healthy worker/cache in control. Updates do not use
+  `skipWaiting`, so old tabs retain their matching hashed assets until those
+  tabs close. Both standard and enhanced app shells exclude the separately
+  consented timing worker/runtime/model pack, and the standard artifact omits
+  the enhanced worker and ONNX runtime entirely. The standard build may detect
+  a nonempty timing cache left by a prior enhanced build only to expose its
+  deletion control; it cannot load or use that cached pack. The worker ignores all non-GET,
+  cross-origin, music, IndexedDB, model, diagnostic, private-evaluation, device
+  check, and arbitrary-route requests; navigation fallback is root-only.
+  Its paths and registration scope derive from the configured Vite base, so a
+  project-subpath build stays inside that project. Diagnostics builds do not
+  register or emit the worker, manifest, or install icons. A clean Chromium
+  profile installed the production worker online, then opened a new full Party
+  Mode tab after the preview server stopped. This is app-shell recovery
+  evidence, not storage permanence, session-state recovery, model availability,
+  decoder/audio continuity, or an offline-first-use guarantee.
+  Because optional worker/runtime code is not in this shell, the enhanced build
+  treats a model-only cache as unavailable whenever the same-origin timing
+  runtime cannot be reached; this prevents offline recovery from repeatedly
+  queueing an analysis whose executable is absent.
 
 ### Open questions
 

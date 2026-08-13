@@ -244,6 +244,26 @@ cached for later reuse; browser storage may evict it.
 Mazzy uses a local system monospace font stack and makes no third-party font
 request when the app opens.
 
+The production build also installs a versioned, same-origin offline app shell
+after one successful online load. It caches only the root UI, its exact hashed
+JavaScript/CSS modules, the basic analysis worker, and install icons. It does
+not intercept or cache music, IndexedDB records, optional timing-model files,
+device checks, private diagnostics, or arbitrary routes. A fresh Chromium
+profile reopened the full Party Mode after the production preview server was
+stopped. This proves app-shell reopening only: browser storage may evict it,
+imported music still follows the IndexedDB controls above, and first-time use
+still requires one online load. Every cached code file is SHA-256 checked before
+installation, and an update waits for existing Mazzy tabs to close instead of
+taking over an active party. Root and configured project-subpath deployments
+use the same build base. The standard build excludes the optional Beat This
+worker and ONNX runtime; even the enhanced build keeps that optional timing code
+and model pack outside the automatic app-shell cache. If a timing pack remains
+from a previously opened enhanced build, the lightweight build detects it only
+to offer removal; it cannot use that pack for analysis. The enhanced build also
+keeps timing unavailable when its same-origin runtime cannot be reached, even
+if model files remain cached, so offline shell recovery cannot trigger a failed
+analysis retry loop.
+
 The lightweight analyzer does not provide bar starts, so tracks using only that
 analyzer use Safe Fade. The optional enhanced detector can unlock a short local
 Bar Handoff automatically when both tracks expose qualified cue indices. Long
