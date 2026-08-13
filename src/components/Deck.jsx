@@ -239,6 +239,7 @@ const Deck = forwardRef(function Deck(
   const applyAnalysis = (result, trackId, reportToLibrary = true) => {
     const nextRecord = {
       ...result,
+      analysisStatus: "ready",
       analysisOverrides: normalizeBeatGridOverrides(result.analysisOverrides)
     };
     const grid = buildEffectiveBeatGrid(nextRecord);
