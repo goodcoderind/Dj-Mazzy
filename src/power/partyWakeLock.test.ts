@@ -41,4 +41,47 @@ describe("party wake lock", () => {
     await acquiring;
     expect(release).toHaveBeenCalledOnce();
   });
+
+  it("does not let an old release overwrite a newer active request", async () => {
+    let finishOldRelease!: () => void;
+    const statuses: string[] = [];
+    const oldSentinel = { release: () => new Promise<void>((resolve) => { finishOldRelease = resolve; }) };
+    const newSentinel = { release: vi.fn(async () => undefined) };
+    let requests = 0;
+    const controller = createPartyWakeLockController({
+      request: async () => ++requests === 1 ? oldSentinel : newSentinel,
+      visibility: () => "visible",
+      onStatus: (status) => statuses.push(status)
+    });
+    await controller.acquire();
+    const releasing = controller.release();
+    await controller.acquire();
+    finishOldRelease();
+    await releasing;
+    expect(statuses.at(-1)).toBe("active");
+  });
+
+  it("reacquires after a browser-released sentinel becomes visible", async () => {
+    let releaseListener: (() => void) | undefined;
+    let visible: DocumentVisibilityState = "hidden";
+    const first = {
+      released: false,
+      release: vi.fn(async () => undefined),
+      addEventListener: (_type: "release", listener: () => void) => { releaseListener = listener; }
+    };
+    const second = { release: vi.fn(async () => undefined) };
+    let requests = 0;
+    const controller = createPartyWakeLockController({
+      request: async () => ++requests === 1 ? first : second,
+      visibility: () => visible
+    });
+    visible = "visible";
+    await controller.acquire();
+    first.released = true;
+    controller.onVisibilityChange();
+    await Promise.resolve();
+    releaseListener?.();
+    await Promise.resolve();
+    expect(requests).toBe(2);
+  });
 });

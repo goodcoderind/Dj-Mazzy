@@ -18,40 +18,49 @@ export const createPartyWakeLockController = ({
   let wanted = false;
   let sentinel: WakeLockSentinelLike | null = null;
   let generation = 0;
+  let acquiring = false;
 
   const acquire = async () => {
     wanted = true;
     const owner = ++generation;
     if (visibility() !== "visible") return;
+    acquiring = true;
     onStatus("requesting");
     try {
       const acquired = await request();
       if (!wanted || owner !== generation) {
+        if (owner === generation) acquiring = false;
         await acquired.release().catch(() => undefined);
         return;
       }
+      acquiring = false;
       sentinel = acquired;
       acquired.addEventListener?.("release", () => {
-        if (sentinel === acquired) sentinel = null;
-        if (wanted) onStatus("unavailable");
+        if (sentinel !== acquired) return;
+        sentinel = null;
+        if (wanted && visibility() === "visible") void acquire();
       }, { once: true });
       onStatus("active");
     } catch {
+      if (owner === generation) acquiring = false;
       if (wanted && owner === generation) onStatus("unavailable");
     }
   };
 
   const release = async () => {
     wanted = false;
-    generation += 1;
+    const owner = ++generation;
+    acquiring = false;
     const active = sentinel;
     sentinel = null;
-    if (active && !active.released) await active.release().catch(() => undefined);
     onStatus("idle");
+    if (active && !active.released) await active.release().catch(() => undefined);
+    if (!wanted && owner === generation) onStatus("idle");
   };
 
   const onVisibilityChange = () => {
-    if (wanted && visibility() === "visible" && !sentinel) void acquire();
+    if (sentinel?.released) sentinel = null;
+    if (wanted && visibility() === "visible" && !sentinel && !acquiring) void acquire();
   };
 
   return { acquire, release, onVisibilityChange };
