@@ -70,9 +70,13 @@ export const evaluateKeyLockCrossfadeEvidence = (evidence: KeyLockCrossfadeEvide
   if (evidence.completionLatenessSeconds.length !== evidence.transitionCount ||
     evidence.completionLatenessSeconds.some((seconds) => seconds > 1)) failures.push("completion-late");
   const minimumExpectedFrames = Math.floor(evidence.expectedActiveSeconds * evidence.sampleRate * 0.95);
+  const promisedMinimumFrames = modeMinimums
+    ? Math.floor(modeMinimums.activeSeconds * evidence.sampleRate) - 128
+    : Number.POSITIVE_INFINITY;
   const maximumExpectedFrames = Math.ceil((evidence.expectedActiveSeconds + 0.25) * evidence.sampleRate);
   const maximumRenderedFrames = Math.ceil((evidence.expectedActiveSeconds + 1.5) * evidence.sampleRate);
-  if (health.expectedActiveFrames < minimumExpectedFrames || health.expectedActiveFrames > maximumExpectedFrames ||
+  if (health.expectedActiveFrames < Math.max(minimumExpectedFrames, promisedMinimumFrames) ||
+    health.expectedActiveFrames > maximumExpectedFrames ||
     health.renderedFrames < health.expectedActiveFrames || health.renderedFrames > maximumRenderedFrames ||
     health.reports < Math.max(1, Math.floor(evidence.expectedActiveSeconds) - 1) ||
     health.reports > Math.ceil(evidence.expectedActiveSeconds) + 2) failures.push("health-coverage");

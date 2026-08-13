@@ -1,12 +1,12 @@
 import type { AudioHealthSnapshot } from "../audio/AudioEngine";
 
-export const DEVICE_SOAK_REPORT_VERSION = "device-soak-report/v2" as const;
+export const DEVICE_SOAK_REPORT_VERSION = "device-soak-report/v3" as const;
 
 export type DeviceSoakMode = "smoke-1m" | "smoke-15m" | "acceptance-2h" | "endurance-4h";
 
 export type DeviceSoakInput = Readonly<{
   buildContract: string;
-  runnerContract: "mazzy-device-soak-runner/v2";
+  runnerContract: "mazzy-device-soak-runner/v3";
   mode: DeviceSoakMode;
   requestedDurationSeconds: number;
   wallElapsedSeconds: number;
@@ -14,6 +14,7 @@ export type DeviceSoakInput = Readonly<{
   scheduledTransitions: number;
   completedTransitions: number;
   cancelledTransitions: number;
+  transitionOwnershipFailures: number;
   maximumCompletionLatenessSeconds: number;
   uncaughtErrors: number;
   unhandledRejections: number;
@@ -33,11 +34,12 @@ const modeDurations: Record<DeviceSoakMode, number> = {
 const contextStates = new Set(["suspended", "running", "closed", "interrupted"]);
 
 export const buildDeviceSoakReport = (input: DeviceSoakInput) => {
-  if (input.buildContract !== "mazzy-audio-engine/v1" || input.runnerContract !== "mazzy-device-soak-runner/v2") {
+  if (input.buildContract !== "mazzy-audio-engine/v1" || input.runnerContract !== "mazzy-device-soak-runner/v3") {
     throw new RangeError("Device soak evidence requires an allowlisted build contract");
   }
   if (![input.requestedDurationSeconds, input.wallElapsedSeconds, input.audioElapsedSeconds,
     input.scheduledTransitions, input.completedTransitions, input.cancelledTransitions,
+    input.transitionOwnershipFailures,
     input.maximumCompletionLatenessSeconds, input.uncaughtErrors, input.unhandledRejections]
     .every(finiteNonNegative) || input.requestedDurationSeconds <= 0) {
     throw new RangeError("Device soak evidence must be finite and non-negative");
@@ -46,6 +48,7 @@ export const buildDeviceSoakReport = (input: DeviceSoakInput) => {
     throw new RangeError("Device soak mode must use its canonical wall-clock duration");
   }
   if (![input.scheduledTransitions, input.completedTransitions, input.cancelledTransitions,
+    input.transitionOwnershipFailures,
     input.uncaughtErrors, input.unhandledRejections].every(nonNegativeInteger)) {
     throw new RangeError("Device soak counters must be non-negative integers");
   }
@@ -75,6 +78,7 @@ export const buildDeviceSoakReport = (input: DeviceSoakInput) => {
   if (input.scheduledTransitions !== input.completedTransitions + input.cancelledTransitions) {
     failureCodes.push("orphan-transition");
   }
+  if (input.transitionOwnershipFailures) failureCodes.push("transition-ownership-lost");
   if (!input.health.supported) failureCodes.push("audio-health-unavailable");
   if (input.health.processorErrors) failureCodes.push("audio-health-processor-error");
   if (input.health.nonFiniteSamples) failureCodes.push("non-finite-audio");
@@ -121,6 +125,7 @@ export const buildDeviceSoakReport = (input: DeviceSoakInput) => {
     scheduledTransitions: input.scheduledTransitions,
     completedTransitions: input.completedTransitions,
     cancelledTransitions: input.cancelledTransitions,
+    transitionOwnershipFailures: input.transitionOwnershipFailures,
     maximumCompletionLatenessMs: Math.round(input.maximumCompletionLatenessSeconds * 1_000),
     audioHealth: Object.freeze({
       supported: input.health.supported,

@@ -194,7 +194,8 @@ fails closed on short/aborted duration, malformed or incomplete render evidence,
 worklet failure, orphan transitions, context interruption, non-finite output,
 post-limiter clipping, gaps over 100 ms, or completion lateness over 500 ms. It
 contains no audio, filenames, paths, track identifiers, exact timestamps, or
-device identifiers. The one-minute run is only a smoke check; only a visible,
+device identifiers. The current interval-authoritative report is
+`device-soak-report/v3`; the one-minute run is only a smoke check. Only a visible,
 awake two-hour run can pass this audio-engine gate. It still does not prove
 decoding, music analysis, complete Party Autopilot behavior, physical speaker
 output, or musical quality. A development-only synthetic transition-rehearsal

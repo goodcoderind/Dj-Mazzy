@@ -79,5 +79,21 @@ describe("key-lock crossfade evidence", () => {
         reports: 60
       }
     }).failures).toContain("mode-coverage");
+    expect(evaluateKeyLockCrossfadeEvidence({
+      ...evidence,
+      mode: "sustained-1m",
+      transitionCount: 37,
+      scheduledIds: Array.from({ length: 37 }, (_, index) => index + 1),
+      completedIds: Array.from({ length: 37 }, (_, index) => index + 1),
+      completionLatenessSeconds: Array.from({ length: 37 }, () => 0.01),
+      expectedActiveSeconds: 60,
+      health: {
+        ...evidence.health,
+        renderedFrames: 2_880_000,
+        expectedActiveFrames: 2_736_000,
+        renderQuanta: 22_500,
+        reports: 60
+      }
+    }).failures).toContain("health-coverage");
   });
 });

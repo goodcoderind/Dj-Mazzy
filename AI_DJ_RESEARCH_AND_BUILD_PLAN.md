@@ -1814,6 +1814,9 @@ These are the active backlog, not reasons to discard the prototype.
   clipped samples, or processor errors. Both results are synthetic render-path
   smoke evidence only. They do not satisfy the visible two-hour device gate,
   real-song listening, musical-quality, or live key-lock authority requirements.
+  These interval and completion-ownership semantics are versioned as
+  `device-soak-report/v3` / `mazzy-device-soak-runner/v3`; earlier v2 reports do
+  not constitute this evidence.
 
 ### Open questions
 

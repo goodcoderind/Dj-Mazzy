@@ -22,7 +22,7 @@ const health = (overrides = {}) => ({
 
 const valid = (overrides = {}) => ({
   buildContract: "mazzy-audio-engine/v1",
-  runnerContract: "mazzy-device-soak-runner/v2" as const,
+  runnerContract: "mazzy-device-soak-runner/v3" as const,
   mode: "smoke-1m" as const,
   requestedDurationSeconds: 60,
   wallElapsedSeconds: 60,
@@ -30,6 +30,7 @@ const valid = (overrides = {}) => ({
   scheduledTransitions: 8,
   completedTransitions: 8,
   cancelledTransitions: 0,
+  transitionOwnershipFailures: 0,
   maximumCompletionLatenessSeconds: 0.04,
   uncaughtErrors: 0,
   unhandledRejections: 0,
@@ -45,6 +46,7 @@ describe("device soak report", () => {
     expect(report.passed).toBe(true);
     expect(report.releaseGatePassed).toBe(false);
     expect(report.failureCodes).toEqual([]);
+    expect(report.schemaVersion).toBe("device-soak-report/v3");
     expect(Object.keys(report)).not.toContain("tracks");
     expect(JSON.stringify(report)).not.toMatch(/trackId|userAgent|\.mp3|\/Users\//);
   });
@@ -53,6 +55,7 @@ describe("device soak report", () => {
     ["unexpected-audio-gap", { health: health({ longestUnexpectedSilentSeconds: 0.101 }) }],
     ["post-limiter-clipping", { health: health({ clippedSamples: 1, peak: 1.01 }) }],
     ["orphan-transition", { scheduledTransitions: 8, completedTransitions: 7 }],
+    ["transition-ownership-lost", { transitionOwnershipFailures: 1 }],
     ["completion-late", { maximumCompletionLatenessSeconds: 0.501 }],
     ["audio-context-interrupted", { health: health({ contextStates: ["running", "suspended"] }) }]
   ])("fails closed for %s", (code, overrides) => {
@@ -66,6 +69,9 @@ describe("device soak report", () => {
     expect(() => buildDeviceSoakReport(valid({ completedTransitions: 7.5 }))).toThrow("integers");
     expect(() => buildDeviceSoakReport(valid({ requestedDurationSeconds: 61 }))).toThrow("canonical");
     expect(() => buildDeviceSoakReport(valid({ pageStayedVisible: "yes" as unknown as boolean }))).toThrow("malformed");
+    expect(() => buildDeviceSoakReport(valid({
+      runnerContract: "mazzy-device-soak-runner/v2" as unknown as "mazzy-device-soak-runner/v3"
+    }))).toThrow("allowlisted");
   });
 
   it("fails when monitoring coverage or its processor disappears", () => {

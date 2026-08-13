@@ -59,6 +59,7 @@ const runDeviceSoak = async (mode: DeviceSoakMode) => {
   let scheduledTransitions = 0;
   let completedTransitions = 0;
   let cancelledTransitions = 0;
+  let transitionOwnershipFailures = 0;
   let maximumCompletionLatenessSeconds = 0;
   let uncaughtErrors = 0;
   let unhandledRejections = 0;
@@ -163,7 +164,14 @@ const runDeviceSoak = async (mode: DeviceSoakMode) => {
         maximumCompletionLatenessSeconds,
         Math.max(0, activeEngine.clock.now() - currentSchedule.endTime)
       );
-      activeEngine.finishCrossfade(currentSchedule.id);
+      if (!activeEngine.finishCrossfade(currentSchedule.id)) {
+        transitionOwnershipFailures += 1;
+        uncaughtErrors += 1;
+        currentSchedule = null;
+        transitionCancel = null;
+        void finish?.(false);
+        return;
+      }
       activeEngine.getDeck(source).pause();
       activeEngine.getDeck(source).eject();
       completedTransitions += 1;
@@ -190,7 +198,7 @@ const runDeviceSoak = async (mode: DeviceSoakMode) => {
       await new Promise((resolve) => window.setTimeout(resolve, 1_050));
       const report = buildDeviceSoakReport({
         buildContract: "mazzy-audio-engine/v1",
-        runnerContract: "mazzy-device-soak-runner/v2",
+        runnerContract: "mazzy-device-soak-runner/v3",
         mode,
         requestedDurationSeconds,
         wallElapsedSeconds,
@@ -198,6 +206,7 @@ const runDeviceSoak = async (mode: DeviceSoakMode) => {
         scheduledTransitions,
         completedTransitions,
         cancelledTransitions,
+        transitionOwnershipFailures,
         maximumCompletionLatenessSeconds,
         uncaughtErrors,
         unhandledRejections,
