@@ -278,6 +278,16 @@ body {
   line-height: 1.35;
 }
 
+.library-storage-error {
+  margin: 0;
+  padding: 8px 10px;
+  border-bottom: 1px solid #5f2d2d;
+  color: #ffb5b5;
+  background: #251313;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 .library-data-controls {
   display: flex;
   align-items: center;

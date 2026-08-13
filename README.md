@@ -244,6 +244,30 @@ cached for later reuse; browser storage may evict it.
 Mazzy uses a local system monospace font stack and makes no third-party font
 request when the app opens.
 
+Before adding a selected folder, Mazzy sums the local audio-file sizes and uses
+the browser's coarse storage estimate when one is available. It keeps a 128 MB
+reserve and refuses only a selection that clearly cannot fit, with a plain
+message to choose less music or remove saved tracks. If the browser withholds
+or rejects the estimate, import remains available and the UI says capacity was
+unknown. Import owns the local-library mutation through its IndexedDB commit;
+Mazzy publishes rows and says “Saved” only after that transaction succeeds, and
+a quota/write failure leaves no session-only phantom tracks. No filename, path,
+or file size is stored in diagnostics or uploaded. Byte-identical files receive
+a versioned local SHA-256 content identity, computed one file at a time and kept
+only in the IndexedDB track record; re-imported and within-folder duplicates are
+skipped before storage and analysis. Import stays disabled until the saved
+library has finished hydrating, so startup restore cannot overwrite a new batch.
+The IndexedDB content-identity index is unique across Mazzy tabs. Routine
+analysis saves update existing rows only, and deletion is broadcast to other
+open tabs, so a stale tab cannot silently recreate music removed elsewhere.
+Cross-tab import/delete/clear transactions also use the browser's profile-wide
+Web Lock when available; a received clear invalidates any local import still
+hashing or waiting to publish.
+Automatic analysis updates preserve the separately committed content identity,
+manual timing overrides, and timing-review record; a later background save
+cannot roll those fields backward. Analysis-save failures stay visible until a
+subsequent analysis snapshot commits successfully.
+
 The production build also installs a versioned, same-origin offline app shell
 after one successful online load. It caches only the root UI, its exact hashed
 JavaScript/CSS modules, the basic analysis worker, and install icons. It does

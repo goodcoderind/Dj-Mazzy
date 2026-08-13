@@ -1874,6 +1874,37 @@ These are the active backlog, not reasons to discard the prototype.
   treats a model-only cache as unavailable whenever the same-origin timing
   runtime cannot be reached; this prevents offline recovery from repeatedly
   queueing an analysis whose executable is absent.
+- **D-044 — Folder import uses a local coarse-capacity preflight, not storage
+  telemetry:** before creating library records, Mazzy sums the selected audio
+  `File.size` values and compares them with `navigator.storage.estimate()` while
+  preserving a 128 MB reserve. A selection that clearly exceeds available
+  capacity is rejected before React or IndexedDB ownership; unknown, missing,
+  malformed, or permission-withheld estimates do not block import and remain a
+  visibly unknown state. The check retains and transmits no filename, path,
+  per-file size, or storage estimate; only the existing in-tab UI receives a
+  coarse formatted result. Import holds the shared local-library mutation lock
+  from estimate through one serialized IndexedDB transaction, and it publishes
+  library rows or a success announcement only after that transaction completes.
+  Concurrent import/remove/clear cannot pass against one stale estimate, and a
+  quota/write rejection leaves no in-memory phantom library. Browser eviction
+  after a successful commit remains external. Imports remain disabled through
+  initial IndexedDB hydration. Each selected file is hashed sequentially as
+  `file-content-sha256/v1`; the local record persists that identity so exact
+  byte duplicates within one selection or against the restored library are
+  skipped before capacity, storage, analysis, or queue ownership. The digest is
+  never placed in diagnostics, reports, URLs, logs, or network requests. A
+  unique IndexedDB identity index makes that invariant profile-wide across
+  concurrent Mazzy tabs. Ordinary analysis persistence is update-only; imports
+  are the only insertion path. Successful deletion is broadcast to other open
+  tabs so their stale state and workers cannot recreate a removed record.
+  Import/delete/clear share a profile-wide Web Lock where supported, and the
+  clear broadcast invalidates an import generation that is still hashing,
+  estimating, or waiting to publish in another tab.
+  Routine analysis writes merge into the current IndexedDB record and preserve
+  the fields owned by identity migration and timing-review/override patches;
+  unrelated stale snapshots cannot roll those fields backward. Import errors
+  and later analysis-save errors have separate UI ownership, and only a later
+  successful analysis snapshot clears the latter.
 
 ### Open questions
 

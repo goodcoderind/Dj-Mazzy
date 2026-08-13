@@ -1,7 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import Deck from "./components/Deck";
 import { getAudioEngine } from "./audioContext";
-import { clearTracksFromDb, deleteTrackFromDb, loadLibraryFromDb, saveTrackToDb, saveTracksToDb } from "./libraryDb";
+import {
+  clearTracksFromDb,
+  deleteTrackFromDb,
+  loadLibraryFromDb,
+  loadLibraryEpoch,
+  patchTrackInDb,
+  saveImportedTracksToDb,
+  saveTracksToDb,
+  subscribeToLibraryMutations
+} from "./libraryDb";
 import { equalPowerGains } from "./planning/transitionMath";
 import { disposeAnalysisClient, getAnalysisClient } from "./analysis/AnalysisClient";
 import { hasCurrentBasicAnalysis } from "./analysis/analysisVersion";
@@ -47,6 +56,8 @@ import {
   createPartyAutopilotTraceRecorder,
   evaluatePartyAutopilotTrace
 } from "./diagnostics/partyAutopilotTrace";
+import { assessImportCapacity, formatStorageSize } from "./storage/importCapacity";
+import { identifyLocalFile, normalizeContentIdentity } from "./storage/contentIdentity";
 
 const audioExt = [".mp3", ".wav", ".flac", ".aiff", ".m4a"];
 const stripExt = (name) => name.replace(/\.[^/.]+$/, "");
@@ -107,7 +118,8 @@ const persistedTrack = (track) => ({
   sampleRate: track.sampleRate ?? null,
   analysisOverrides: normalizeBeatGridOverrides(track.analysisOverrides),
   timingReview: normalizeTimingReview(track.timingReview),
-  analysisStatus: track.analysisStatus ?? "pending"
+  analysisStatus: track.analysisStatus ?? "pending",
+  contentIdentity: normalizeContentIdentity(track.contentIdentity)
 });
 
 export default function App() {
@@ -148,7 +160,12 @@ export default function App() {
   const [deckFlash, setDeckFlash] = useState({ a: false, b: false });
   const [toast, setToast] = useState("");
   const [librarySaveStatus, setLibrarySaveStatus] = useState("idle");
-  const [libraryMutationBusy, setLibraryMutationBusy] = useState(false);
+  const [libraryMutationBusy, setLibraryMutationBusy] = useState(true);
+  const [libraryStorageError, setLibraryStorageError] = useState("");
+  const [libraryAnalysisSaveError, setLibraryAnalysisSaveError] = useState("");
+  const [libraryTimingSaveErrors, setLibraryTimingSaveErrors] = useState({});
+  const [libraryRestoreAttempt, setLibraryRestoreAttempt] = useState(0);
+  const [importStorageStatus, setImportStorageStatus] = useState(null);
   const [dragIndex, setDragIndex] = useState(null);
   const [masterMeter, setMasterMeter] = useState({ peakDb: -Infinity, limiterReductionDb: 0 });
   const contextReadyRef = useRef(false);
@@ -194,7 +211,32 @@ export default function App() {
   const partyPlayedLoadsRef = useRef(new Set());
   const contextMenuRef = useRef(null);
   const contextMenuTriggerRef = useRef(null);
-  const libraryMutationBusyRef = useRef(false);
+  const libraryMutationBusyRef = useRef(true);
+  const libraryMutationModeRef = useRef("hydrating");
+  const libraryHydrationGenerationRef = useRef(0);
+  const libraryImportGenerationRef = useRef(0);
+
+  const stopRemoteLibraryPlayback = () => {
+    autoPilotPreloadGenerationRef.current += 1;
+    transitionArmGenerationRef.current += 1;
+    autoPilotTransitionKeyRef.current = null;
+    if (activeTransitionScheduleRef.current) rescueTransition();
+    transitionCompletionCancelRef.current?.();
+    transitionCompletionCancelRef.current = null;
+    activeTransitionScheduleRef.current = null;
+    transitionArmRef.current = false;
+    autoPilotEnabledRef.current = false;
+    finalTrackRef.current = null;
+    const engine = getAudioEngine();
+    partySessionClockRef.current = pausePartySessionClock(partySessionClockRef.current, engine.clock.now());
+    setPartyClockDisplay(partySessionClockSnapshot(partySessionClockRef.current, engine.clock.now()));
+    pausePartyDiagnostic("host-control");
+    setAutoPilotEnabled(false);
+    setPartyEndingFinalTrack(false);
+    setAutoPilotChoice(null);
+    setAutoMixing(false);
+    setAutoMixArming(false);
+  };
 
   useEffect(() => {
     autoPilotEnabledRef.current = autoPilotEnabled;
@@ -202,6 +244,45 @@ export default function App() {
     libraryRef.current = library;
     playedTrackIdsRef.current = playedTrackIds;
   }, [autoPilotEnabled, queue, library, playedTrackIds]);
+
+  useEffect(() => subscribeToLibraryMutations((message) => {
+    if (message?.type === "track-deleted" && typeof message.trackId === "string") {
+      const trackId = message.trackId;
+      const loadedOnA = deckARef.current?.getTrackId?.() === trackId;
+      const loadedOnB = deckBRef.current?.getTrackId?.() === trackId;
+      if (loadedOnA || loadedOnB) stopRemoteLibraryPlayback();
+      removedTrackIdsRef.current.add(trackId);
+      queuedAnalysisIdsRef.current.delete(trackId);
+      pendingAnalysisQueueRef.current = pendingAnalysisQueueRef.current.filter((track) => track.id !== trackId);
+      setLibrary((current) => current.filter((track) => track.id !== trackId));
+      setQueue((current) => current.filter((id) => id !== trackId));
+      if (loadedOnA) {
+        deckARef.current.eject?.();
+        setLoadedByDeck((current) => ({ ...current, a: null }));
+      }
+      if (loadedOnB) {
+        deckBRef.current.eject?.();
+        setLoadedByDeck((current) => ({ ...current, b: null }));
+      }
+      return;
+    }
+    if (message?.type === "library-cleared") {
+      stopRemoteLibraryPlayback();
+      libraryImportGenerationRef.current += 1;
+      if (libraryMutationModeRef.current === "importing") setLibraryMutationLock(false);
+      analysisGenerationRef.current += 1;
+      libraryRef.current.forEach((track) => removedTrackIdsRef.current.add(track.id));
+      queuedAnalysisIdsRef.current.clear();
+      pendingAnalysisQueueRef.current = [];
+      disposeAnalysisClient();
+      disposeEnhancedRhythmClient();
+      deckARef.current?.eject?.();
+      deckBRef.current?.eject?.();
+      setLoadedByDeck({ a: null, b: null });
+      setQueue([]);
+      setLibrary([]);
+    }
+  }), []);
 
   useEffect(() => {
     if (!partyTraceRecorderRef.current || !partyTraceRunningRef.current) return;
@@ -330,14 +411,13 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    const hydrationGeneration = ++libraryHydrationGenerationRef.current;
     const restore = async () => {
+      let restored = false;
       try {
         const records = await loadLibraryFromDb();
-        if (!records.length) {
-          return;
-        }
-        setLibrary(
-          records.map((track) => {
+        if (hydrationGeneration !== libraryHydrationGenerationRef.current) return;
+        const restoredLibrary = records.map((track) => {
             const timingReview = normalizeTimingReview(track.timingReview);
             const restored = {
             id: track.id,
@@ -372,6 +452,7 @@ export default function App() {
             analysisOverrides: normalizeBeatGridOverrides(track.analysisOverrides),
             timingReview: null,
             analysisStatus: hasCurrentBasicAnalysis(track) ? "ready" : "pending",
+            contentIdentity: normalizeContentIdentity(track.contentIdentity),
             loaded: false
             };
             return {
@@ -380,24 +461,38 @@ export default function App() {
                 ? timingReview
                 : null
             };
-          })
-        );
+          });
+        libraryRef.current = restoredLibrary;
+        setLibrary(restoredLibrary);
+        setLibraryStorageError("");
+        restored = true;
       } catch (_err) {
-        // Ignore failed restore.
+        if (hydrationGeneration !== libraryHydrationGenerationRef.current) return;
+        setLibraryStorageError("Saved music couldn't be opened. Close other Mazzy tabs, then retry opening local music.");
+      } finally {
+        if (hydrationGeneration === libraryHydrationGenerationRef.current && restored) {
+          setLibraryMutationLock(false);
+        }
       }
     };
     void restore();
-  }, []);
+    return () => {
+      if (hydrationGeneration === libraryHydrationGenerationRef.current) libraryHydrationGenerationRef.current += 1;
+    };
+  }, [libraryRestoreAttempt]);
 
   const dismissContextMenu = () => {
     if (contextMenuRef.current?.contains(document.activeElement)) contextMenuTriggerRef.current?.focus?.();
     setContextMenu(null);
   };
 
-  const setLibraryMutationLock = (locked) => {
+  const setLibraryMutationLock = (locked, mode = "destructive") => {
     libraryMutationBusyRef.current = locked;
+    libraryMutationModeRef.current = locked ? mode : "idle";
     setLibraryMutationBusy(locked);
   };
+
+  const libraryWritesBlocked = () => !["idle", "importing"].includes(libraryMutationModeRef.current);
 
   useEffect(() => {
     const closeMenu = () => dismissContextMenu();
@@ -694,11 +789,17 @@ export default function App() {
     let active = true;
     setLibrarySaveStatus("saving");
     void saveTracksToDb(
-      library.map(persistedTrack)
+      library.filter((track) => !removedTrackIdsRef.current.has(track.id)).map(persistedTrack)
     ).then(() => {
-      if (active) setLibrarySaveStatus("saved");
+      if (active) {
+        setLibrarySaveStatus("saved");
+        setLibraryAnalysisSaveError("");
+      }
     }).catch(() => {
-      if (active) setLibrarySaveStatus("error");
+      if (active) {
+        setLibrarySaveStatus("error");
+        setLibraryAnalysisSaveError("Your music is still stored, but the newest local analysis could not be saved. Free browser storage and reload to retry analysis.");
+      }
     });
     return () => { active = false; };
   }, [library]);
@@ -716,53 +817,158 @@ export default function App() {
   }, [library, enhancedTimingAvailable]);
 
   const handleImportFolder = async (event) => {
-    if (libraryMutationBusyRef.current) return;
+    if (libraryMutationBusyRef.current) {
+      if (importRef.current) importRef.current.value = "";
+      showToast("Local music is still updating · try again in a moment");
+      return;
+    }
     const files = Array.from(event.target.files || []);
     const audioFiles = files.filter((file) => {
       const lower = file.name.toLowerCase();
       return audioExt.some((ext) => lower.endsWith(ext));
     });
+    if (!audioFiles.length) {
+      if (importRef.current) importRef.current.value = "";
+      showToast("No supported MP3, WAV, FLAC, AIFF, or M4A files were selected");
+      return;
+    }
 
-    const tracks = audioFiles.map((file) => ({
-      id: crypto.randomUUID(),
-      name: stripExt(file.name),
-      file,
-      duration: null,
-      bpm: null,
-      key: null,
-      scale: null,
-      schemaVersion: TRACK_ANALYSIS_SCHEMA_VERSION,
-      analyzerVersion: null,
-      bpmCandidates: [],
-      beatsSeconds: [],
-      downbeatsSeconds: [],
-      meter: null,
-      tempoConfidence: 0,
-      beatConfidence: 0,
-      downbeatConfidence: 0,
-      keyConfidence: 0,
-      energyByBeat: [],
-      bandEnergyByBeat: [],
-      vocalProbabilityByBeat: [],
-      structureBoundaries: [],
-      phraseCandidates: [],
-      automaticRhythmTrust: null,
-      programLevel: null,
-      rhythmDetector: null,
-      rhythmAnalysisVersion: null,
-      rhythmModelSha256: null,
-      rhythmBackend: null,
-      sampleRate: null,
-      analysisOverrides: emptyBeatGridOverrides(),
-      timingReview: null,
-      analysisStatus: "pending",
-      loaded: false
-    }));
+    setLibraryMutationLock(true, "importing");
+    const importGeneration = ++libraryImportGenerationRef.current;
+    setLibrarySaveStatus("saving");
+    setLibraryStorageError("");
+    try {
+      const importEpoch = await loadLibraryEpoch();
+      const existingIdentities = new Set();
+      const legacyIdentityById = new Map();
+      for (const track of libraryRef.current) {
+        if (importGeneration !== libraryImportGenerationRef.current) return;
+        let identity = normalizeContentIdentity(track.contentIdentity);
+        if (!identity && track.file?.arrayBuffer) {
+          identity = await identifyLocalFile(track.file);
+          if (!existingIdentities.has(identity)) legacyIdentityById.set(track.id, identity);
+        }
+        if (identity) existingIdentities.add(identity);
+      }
 
-    for (const track of tracks) removedTrackIdsRef.current.delete(track.id);
-    setLibrary((prev) => [...prev, ...tracks]);
-    if (importRef.current) {
-      importRef.current.value = "";
+      const uniqueFiles = [];
+      let duplicatesSkipped = 0;
+      for (const file of audioFiles) {
+        if (importGeneration !== libraryImportGenerationRef.current) return;
+        const contentIdentity = await identifyLocalFile(file);
+        if (existingIdentities.has(contentIdentity)) {
+          duplicatesSkipped += 1;
+          continue;
+        }
+        existingIdentities.add(contentIdentity);
+        uniqueFiles.push({ file, contentIdentity });
+      }
+      if (!uniqueFiles.length) {
+        if (legacyIdentityById.size) {
+          await saveImportedTracksToDb([], [...legacyIdentityById].map(([id, contentIdentity]) => ({ id, contentIdentity })), importEpoch);
+          setLibrary((current) => {
+            const next = current.map((track) => legacyIdentityById.has(track.id)
+              ? { ...track, contentIdentity: legacyIdentityById.get(track.id) }
+              : track);
+            libraryRef.current = next;
+            return next;
+          });
+        }
+        setLibrarySaveStatus("saved");
+        showToast(`${duplicatesSkipped} duplicate ${duplicatesSkipped === 1 ? "track was" : "tracks were"} already in this library`);
+        return;
+      }
+
+      let storageEstimate = null;
+      try {
+        storageEstimate = await navigator.storage?.estimate?.();
+      } catch {
+        // Import remains available when the browser withholds a quota estimate.
+      }
+      if (libraryMutationModeRef.current !== "importing" || importGeneration !== libraryImportGenerationRef.current) return;
+      const capacity = assessImportCapacity(uniqueFiles.map(({ file }) => file.size), storageEstimate);
+      setImportStorageStatus(capacity);
+      if (capacity.status === "too-large") {
+        showToast("Not enough browser storage · choose a smaller folder or remove saved music");
+        setLibrarySaveStatus("idle");
+        return;
+      }
+
+      const tracks = uniqueFiles.map(({ file, contentIdentity }) => ({
+        id: crypto.randomUUID(),
+        name: stripExt(file.name),
+        file,
+        duration: null,
+        bpm: null,
+        key: null,
+        scale: null,
+        schemaVersion: TRACK_ANALYSIS_SCHEMA_VERSION,
+        analyzerVersion: null,
+        bpmCandidates: [],
+        beatsSeconds: [],
+        downbeatsSeconds: [],
+        meter: null,
+        tempoConfidence: 0,
+        beatConfidence: 0,
+        downbeatConfidence: 0,
+        keyConfidence: 0,
+        energyByBeat: [],
+        bandEnergyByBeat: [],
+        vocalProbabilityByBeat: [],
+        structureBoundaries: [],
+        phraseCandidates: [],
+        automaticRhythmTrust: null,
+        programLevel: null,
+        rhythmDetector: null,
+        rhythmAnalysisVersion: null,
+        rhythmModelSha256: null,
+        rhythmBackend: null,
+        sampleRate: null,
+        analysisOverrides: emptyBeatGridOverrides(),
+        timingReview: null,
+        analysisStatus: "pending",
+        contentIdentity,
+        loaded: false
+      }));
+
+      const importCommit = await saveImportedTracksToDb(
+        tracks.map(persistedTrack),
+        [...legacyIdentityById].map(([id, contentIdentity]) => ({ id, contentIdentity })),
+        importEpoch
+      );
+      if (importGeneration !== libraryImportGenerationRef.current) {
+        await Promise.all(importCommit.savedTrackIds.map(deleteTrackFromDb));
+        return;
+      }
+      const committedTrackIds = new Set(importCommit.savedTrackIds);
+      const committedTracks = tracks.filter((track) => committedTrackIds.has(track.id));
+      duplicatesSkipped += tracks.length - committedTracks.length;
+      for (const track of committedTracks) removedTrackIdsRef.current.delete(track.id);
+      setLibrary((current) => {
+        const next = [
+          ...current.map((track) => legacyIdentityById.has(track.id)
+            ? { ...track, contentIdentity: legacyIdentityById.get(track.id) }
+            : track),
+          ...committedTracks
+        ];
+        libraryRef.current = next;
+        return next;
+      });
+      setLibrarySaveStatus("saved");
+      showToast(capacity.status === "fits"
+        ? `Saved ${committedTracks.length} ${committedTracks.length === 1 ? "track" : "tracks"}${duplicatesSkipped ? ` · skipped ${duplicatesSkipped} duplicate${duplicatesSkipped === 1 ? "" : "s"}` : ""} · ${formatStorageSize(capacity.importBytes)} selected`
+        : `Saved ${committedTracks.length} ${committedTracks.length === 1 ? "track" : "tracks"}${duplicatesSkipped ? ` · skipped ${duplicatesSkipped} duplicate${duplicatesSkipped === 1 ? "" : "s"}` : ""} · storage estimate unavailable`);
+    } catch (error) {
+      setLibrarySaveStatus("error");
+      setImportStorageStatus((current) => current ? { ...current, status: "unknown" } : current);
+      const message = error?.name === "QuotaExceededError"
+        ? "Browser storage filled up. Nothing was added; remove saved music or choose a smaller folder."
+        : "Music couldn't be saved. Nothing was added; try again or check this browser's site-storage settings.";
+      setLibraryStorageError(message);
+      showToast(message);
+    } finally {
+      if (importRef.current) importRef.current.value = "";
+      if (importGeneration === libraryImportGenerationRef.current) setLibraryMutationLock(false);
     }
   };
 
@@ -848,7 +1054,7 @@ export default function App() {
   };
 
   const onAnalysisDetected = (trackId, result) => {
-    if (!trackId || libraryMutationBusyRef.current || removedTrackIdsRef.current.has(trackId)) return;
+    if (!trackId || libraryWritesBlocked() || removedTrackIdsRef.current.has(trackId)) return;
     setLibrary((prev) =>
       prev.map((track) =>
         track.id === trackId && !removedTrackIdsRef.current.has(trackId)
@@ -859,33 +1065,47 @@ export default function App() {
   };
 
   const onEnhancedRhythmDetected = (trackId, enhanced) => {
-    if (!trackId || libraryMutationBusyRef.current || removedTrackIdsRef.current.has(trackId)) return;
+    if (!trackId || libraryWritesBlocked() || removedTrackIdsRef.current.has(trackId)) return;
     setLibrary((previous) => previous.map((track) =>
       track.id === trackId ? mergeEnhancedRhythm(track, enhanced) : track
     ));
   };
 
   const onProgramLevelDetected = (trackId, programLevel) => {
-    if (!trackId || libraryMutationBusyRef.current || removedTrackIdsRef.current.has(trackId)) return;
+    if (!trackId || libraryWritesBlocked() || removedTrackIdsRef.current.has(trackId)) return;
     setLibrary((previous) => previous.map((track) =>
       track.id === trackId ? { ...track, programLevel } : track
     ));
   };
 
   const onAnalysisOverrideChange = (trackId, overrides) => {
-    if (!trackId || libraryMutationBusyRef.current || removedTrackIdsRef.current.has(trackId)) return;
+    if (!trackId || libraryWritesBlocked() || removedTrackIdsRef.current.has(trackId)) return;
+    const analysisOverrides = normalizeBeatGridOverrides(overrides);
     setLibrary((prev) =>
       prev.map((track) =>
         track.id === trackId
-          ? { ...track, analysisOverrides: normalizeBeatGridOverrides(overrides), timingReview: null }
+          ? { ...track, analysisOverrides, timingReview: null }
           : track
       )
     );
+    void patchTrackInDb(trackId, { analysisOverrides, timingReview: null }).then(() => {
+      setLibraryTimingSaveErrors((current) => {
+        const next = { ...current };
+        delete next[trackId];
+        return next;
+      });
+    }).catch(() => {
+      setLibrarySaveStatus("error");
+      setLibraryTimingSaveErrors((current) => ({
+        ...current,
+        [trackId]: "A timing change is visible now but could not be saved. Free browser storage and try that track again."
+      }));
+    });
   };
 
   const onTimingReviewSave = async (trackId, overrides, review) => {
-    if (!trackId || libraryMutationBusyRef.current || removedTrackIdsRef.current.has(trackId)) return;
-    const current = library.find((track) => track.id === trackId);
+    if (!trackId || libraryWritesBlocked() || removedTrackIdsRef.current.has(trackId)) return;
+    const current = libraryRef.current.find((track) => track.id === trackId);
     if (!current) throw new Error("The reviewed track is no longer in the library");
     const next = {
       ...current,
@@ -893,17 +1113,54 @@ export default function App() {
       timingReview: normalizeTimingReview(review)
     };
     if (!next.timingReview) throw new Error("The timing answers were invalid");
-    await saveTrackToDb(persistedTrack(next));
-    setLibrary((previous) => previous.map((track) => track.id === trackId ? next : track));
+    try {
+      await patchTrackInDb(trackId, {
+        analysisOverrides: next.analysisOverrides,
+        timingReview: next.timingReview
+      });
+      setLibraryTimingSaveErrors((current) => {
+        const nextErrors = { ...current };
+        delete nextErrors[trackId];
+        return nextErrors;
+      });
+    } catch (error) {
+      setLibraryTimingSaveErrors((current) => ({
+        ...current,
+        [trackId]: "A timing review could not be saved. Free browser storage and try that track again."
+      }));
+      throw error;
+    }
+    if (removedTrackIdsRef.current.has(trackId) || libraryWritesBlocked() ||
+      !libraryRef.current.some((track) => track.id === trackId)) return;
+    setLibrary((previous) => previous.map((track) => track.id === trackId
+      ? { ...track, analysisOverrides: next.analysisOverrides, timingReview: next.timingReview }
+      : track));
   };
 
   const onTimingReviewRemove = async (trackId) => {
-    if (!trackId || libraryMutationBusyRef.current || removedTrackIdsRef.current.has(trackId)) return;
-    const current = library.find((track) => track.id === trackId);
+    if (!trackId || libraryWritesBlocked() || removedTrackIdsRef.current.has(trackId)) return;
+    const current = libraryRef.current.find((track) => track.id === trackId);
     if (!current) return;
     const next = { ...current, timingReview: null };
-    await saveTrackToDb(persistedTrack(next));
-    setLibrary((previous) => previous.map((track) => track.id === trackId ? next : track));
+    try {
+      await patchTrackInDb(trackId, { timingReview: null });
+      setLibraryTimingSaveErrors((current) => {
+        const nextErrors = { ...current };
+        delete nextErrors[trackId];
+        return nextErrors;
+      });
+    } catch (error) {
+      setLibraryTimingSaveErrors((current) => ({
+        ...current,
+        [trackId]: "A timing review could not be removed from storage. Free browser storage and try that track again."
+      }));
+      throw error;
+    }
+    if (removedTrackIdsRef.current.has(trackId) || libraryWritesBlocked() ||
+      !libraryRef.current.some((track) => track.id === trackId)) return;
+    setLibrary((previous) => previous.map((track) => track.id === trackId
+      ? { ...track, timingReview: null }
+      : track));
   };
 
   const removeLibraryTrack = async (trackId) => {
@@ -1895,7 +2152,7 @@ export default function App() {
         </div>
         <p className="party-mode-status" role="status">{partyModeStatus}</p>
         <div className="party-mode-flow" aria-label="Party setup steps">
-          <button type="button" onClick={() => importRef.current?.click()}>
+          <button type="button" disabled={libraryMutationBusy} onClick={() => importRef.current?.click()}>
             <span>1</span><strong>IMPORT MUSIC</strong><small>Saved only in this browser</small>
           </button>
           <button type="button" onClick={() => void startCurrentSong()} disabled={!sourcePartyReady || sourcePartyPlaying || autoPilotEnabled}>
@@ -2321,10 +2578,10 @@ export default function App() {
           <div className="queue-header">
             <div className="queue-title">{`QUEUE (${queue.length} tracks)`}</div>
             <div className="library-top-spacer" />
-            <button className="library-top-btn" type="button" onClick={() => importRef.current?.click()}>
+            <button className="library-top-btn" type="button" disabled={libraryMutationBusy} onClick={() => importRef.current?.click()}>
               IMPORT
             </button>
-            <input ref={importRef} type="file" multiple accept=".mp3,.wav,.flac" onChange={handleImportFolder} hidden />
+            <input ref={importRef} type="file" multiple accept=".mp3,.wav,.flac,.aiff,.m4a" onChange={handleImportFolder} hidden />
             <button className="library-top-btn" type="button" onClick={() => setQueue([])}>
               CLEAR
             </button>
@@ -2332,7 +2589,29 @@ export default function App() {
 
           <p className="library-storage-notice">
             Imported music and analysis are saved in this browser profile until you remove them. Nothing is uploaded.
+            {importStorageStatus?.status === "too-large"
+              ? ` The last selection needed about ${formatStorageSize(importStorageStatus.requiredBytes)}, but only ${formatStorageSize(importStorageStatus.availableBytes)} was available.`
+              : importStorageStatus?.status === "fits"
+                ? ` The last selection was ${formatStorageSize(importStorageStatus.importBytes)}; Mazzy kept a storage reserve.`
+                : importStorageStatus?.status === "unknown"
+                  ? " This browser did not provide a storage estimate, so import capacity could not be checked in advance."
+                  : " Mazzy checks browser capacity before adding a folder when the browser provides an estimate."}
           </p>
+          {libraryStorageError && (
+            <div className="library-storage-error" role="alert">
+              <p>{libraryStorageError}</p>
+              {libraryMutationModeRef.current === "hydrating" && (
+                <button type="button" onClick={() => {
+                  setLibraryStorageError("");
+                  setLibraryRestoreAttempt((value) => value + 1);
+                }}>RETRY OPENING LOCAL MUSIC</button>
+              )}
+            </div>
+          )}
+          {libraryAnalysisSaveError && <p className="library-storage-error" role="alert">{libraryAnalysisSaveError}</p>}
+          {Object.values(libraryTimingSaveErrors).map((message, index) => (
+            <p key={`${message}-${index}`} className="library-storage-error" role="alert">{message}</p>
+          ))}
 
           <div className="queue-panel">
             {queueTracks.length ? (
