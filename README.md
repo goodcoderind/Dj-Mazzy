@@ -209,7 +209,7 @@ worklet failure, orphan transitions, context interruption, non-finite output,
 post-limiter clipping, gaps over 100 ms, or completion lateness over 500 ms. It
 contains no audio, filenames, paths, track identifiers, exact timestamps, or
 device identifiers. The current interval-authoritative report is
-`device-soak-report/v3`; the one-minute run is only a smoke check. Only a visible,
+`device-soak-report/v4`; the one-minute run is only a smoke check. Only a visible,
 awake two-hour run can pass this audio-engine gate. It still does not prove
 decoding, music analysis, complete Party Autopilot behavior, physical speaker
 output, or musical quality. A development-only synthetic transition-rehearsal
@@ -232,13 +232,18 @@ stereo, continuity, trim, and determinism passed in the same run. This is
 deterministic DSP evidence, not a claim that every song will sound artistically
 good.
 
-The current audio-engine/v2 production-built one-minute check completed 60.2
+The audio-engine/v2 production-built v3 one-minute check completed 60.2
 seconds on the wall clock and 60.1 seconds on the Web Audio clock. Its interval
 began only after the first scheduled audio frame and an acknowledged health
 reset, so browser startup was not misreported as party silence. It completed
 7/7 owned transitions with zero silence, invalid/clipped samples, processor
-errors, ownership failures, or warnings. This is useful smoke evidence only;
-the literal two-hour run remains open.
+errors, ownership failures, or warnings. This is useful smoke evidence only.
+A completed v3 two-hour run rendered 7,201 healthy seconds and completed 923/923
+transitions, but correctly remained failed evidence because its fixed one-second
+wall/audio-clock limit rejected the 1.6-second device-clock drift. V4 replaces
+that duration-independent limit with a reported, bounded 500 ppm clock-rate
+tolerance; it does not retroactively convert the v3 result into a pass, so the
+literal v4 two-hour run remains open.
 
 By default, queued songs retain first priority and Autopilot may continue from
 the remaining eligible library only when that queue is exhausted. The host can

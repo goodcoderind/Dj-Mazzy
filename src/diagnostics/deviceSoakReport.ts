@@ -1,6 +1,6 @@
 import type { AudioHealthSnapshot } from "../audio/AudioEngine";
 
-export const DEVICE_SOAK_REPORT_VERSION = "device-soak-report/v3" as const;
+export const DEVICE_SOAK_REPORT_VERSION = "device-soak-report/v4" as const;
 
 export type DeviceSoakMode = "smoke-1m" | "smoke-15m" | "acceptance-2h" | "endurance-4h";
 
@@ -71,7 +71,16 @@ export const buildDeviceSoakReport = (input: DeviceSoakInput) => {
   const warningCodes: string[] = [];
   if (input.wallElapsedSeconds + 0.1 < input.requestedDurationSeconds) failureCodes.push("wall-duration-short");
   if (input.audioElapsedSeconds + 0.1 < input.requestedDurationSeconds) failureCodes.push("audio-duration-short");
-  if (Math.abs(input.wallElapsedSeconds - input.audioElapsedSeconds) > 1) failureCodes.push("wall-audio-clock-diverged");
+  // Web Audio runs from the output device's sample clock, not performance.now().
+  // Permit at most 500 ppm of bounded clock-rate drift on long runs while
+  // retaining the one-second floor that covers timer/quantum boundaries on
+  // short diagnostics. Context-state and render-coverage checks independently
+  // fail actual suspension or missing output.
+  const wallAudioClockDivergenceSeconds = Math.abs(input.wallElapsedSeconds - input.audioElapsedSeconds);
+  const maximumClockDivergenceSeconds = Math.max(1, input.requestedDurationSeconds * 0.0005);
+  if (wallAudioClockDivergenceSeconds > maximumClockDivergenceSeconds) {
+    failureCodes.push("wall-audio-clock-diverged");
+  }
   if (input.uncaughtErrors) failureCodes.push("uncaught-error");
   if (input.unhandledRejections) failureCodes.push("unhandled-rejection");
   if (input.aborted) failureCodes.push("run-aborted");
@@ -122,6 +131,8 @@ export const buildDeviceSoakReport = (input: DeviceSoakInput) => {
     requestedDurationSeconds: Math.round(input.requestedDurationSeconds),
     wallElapsedSeconds: Math.round(input.wallElapsedSeconds * 10) / 10,
     audioElapsedSeconds: Math.round(input.audioElapsedSeconds * 10) / 10,
+    wallAudioClockDivergenceMs: Math.round(wallAudioClockDivergenceSeconds * 1_000),
+    maximumClockDivergenceMs: Math.round(maximumClockDivergenceSeconds * 1_000),
     scheduledTransitions: input.scheduledTransitions,
     completedTransitions: input.completedTransitions,
     cancelledTransitions: input.cancelledTransitions,

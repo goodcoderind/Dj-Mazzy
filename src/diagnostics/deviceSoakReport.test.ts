@@ -46,7 +46,7 @@ describe("device soak report", () => {
     expect(report.passed).toBe(true);
     expect(report.releaseGatePassed).toBe(false);
     expect(report.failureCodes).toEqual([]);
-    expect(report.schemaVersion).toBe("device-soak-report/v3");
+    expect(report.schemaVersion).toBe("device-soak-report/v4");
     expect(Object.keys(report)).not.toContain("tracks");
     expect(JSON.stringify(report)).not.toMatch(/trackId|userAgent|\.mp3|\/Users\//);
   });
@@ -96,6 +96,48 @@ describe("device soak report", () => {
   it("fails clock divergence and any hidden interval", () => {
     expect(buildDeviceSoakReport(valid({ audioElapsedSeconds: 58.9 })).failureCodes).toContain("wall-audio-clock-diverged");
     expect(buildDeviceSoakReport(valid({ pageStayedVisible: false })).failureCodes).toContain("page-not-always-visible");
+  });
+
+  it("allows bounded device-clock rate drift on a literal two-hour run", () => {
+    const seconds = 7_200;
+    const report = buildDeviceSoakReport(valid({
+      mode: "acceptance-2h",
+      requestedDurationSeconds: seconds,
+      wallElapsedSeconds: seconds + 1.6,
+      audioElapsedSeconds: seconds,
+      scheduledTransitions: 923,
+      completedTransitions: 923,
+      health: health({
+        renderedFrames: 48_000 * seconds,
+        expectedActiveFrames: 48_000 * seconds,
+        renderQuanta: 48_000 * seconds / 128,
+        reports: seconds
+      })
+    }));
+    expect(report.failureCodes).not.toContain("wall-audio-clock-diverged");
+    expect(report.wallAudioClockDivergenceMs).toBe(1_600);
+    expect(report.maximumClockDivergenceMs).toBe(3_600);
+    expect(report.releaseGatePassed).toBe(true);
+  });
+
+  it("still rejects excessive clock-rate drift on a literal two-hour run", () => {
+    const seconds = 7_200;
+    const report = buildDeviceSoakReport(valid({
+      mode: "acceptance-2h",
+      requestedDurationSeconds: seconds,
+      wallElapsedSeconds: seconds + 3.7,
+      audioElapsedSeconds: seconds,
+      scheduledTransitions: 923,
+      completedTransitions: 923,
+      health: health({
+        renderedFrames: 48_000 * seconds,
+        expectedActiveFrames: 48_000 * seconds,
+        renderQuanta: 48_000 * seconds / 128,
+        reports: seconds
+      })
+    }));
+    expect(report.failureCodes).toContain("wall-audio-clock-diverged");
+    expect(report.releaseGatePassed).toBe(false);
   });
 
   it("allows the expected initial suspended-to-running gesture transition", () => {

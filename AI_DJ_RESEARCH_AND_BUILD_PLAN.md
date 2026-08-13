@@ -1815,9 +1815,17 @@ These are the active backlog, not reasons to discard the prototype.
   clipped samples, or processor errors. Both results are synthetic render-path
   smoke evidence only. They do not satisfy the visible two-hour device gate,
   real-song listening, musical-quality, or live key-lock authority requirements.
-  These interval and completion-ownership semantics are versioned as
+  These interval and completion-ownership semantics were versioned as
   `device-soak-report/v3` / `mazzy-device-soak-runner/v3`; earlier v2 reports do
-  not constitute this evidence.
+  not constitute this evidence. A literal v3 two-hour run subsequently rendered
+  7,201 healthy seconds and completed 923/923 owned transitions with no gaps,
+  clipping, invalid samples, processor errors, ownership failures, or warnings,
+  but failed its fixed one-second wall/audio-clock divergence limit at 1.6
+  seconds. `device-soak-report/v4` therefore reports the measured divergence and
+  replaces that duration-independent limit with a bounded 500 ppm device-clock
+  rate tolerance (a one-second floor for short checks). Context-state and render
+  coverage gates remain unchanged, and the v3 result is not retroactively a
+  release pass; a fresh visible v4 two-hour run remains required.
 - **D-042 — Filtered Fade is a bounded fourth behavior, not a weaker safety
   ranking:** `transition-plan/v3` and `transition-dsp/v2` add a 4.5-second
   no-stretch equal-power handoff with one outgoing 20 kHz→420 Hz low-pass sweep.
