@@ -1,5 +1,6 @@
 node_modules/
 dist/
+dist-diagnostics/
 .DS_Store
 *.local
-
+.mazzy-private-evaluation/

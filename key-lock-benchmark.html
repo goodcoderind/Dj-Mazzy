@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Mazzy Key-Lock Browser Spike</title>
+    <style>
+      body { max-width: 760px; margin: 40px auto; padding: 0 20px; font: 16px/1.5 system-ui; background: #111; color: #eee; }
+      button { min-height: 44px; padding: 0 18px; font: inherit; }
+      pre { white-space: pre-wrap; background: #1d1d1d; padding: 16px; border: 1px solid #444; }
+    </style>
+  </head>
+  <body>
+    <h1>Experimental key-lock browser check</h1>
+    <p>This local developer check plays a quiet synthetic tone. It does not use or retain music.</p>
+    <button id="run" type="button" aria-describedby="check-description">Run local check</button>
+    <button id="stop" type="button" disabled>Stop check</button>
+    <p id="check-description">The check takes about ten seconds and can be stopped at any time.</p>
+    <p id="status" role="status" aria-live="polite">Not run.</p>
+    <details>
+      <summary>Machine details</summary>
+      <pre id="result" aria-label="Key-lock smoke-check machine details">No report.</pre>
+    </details>
+    <script type="module" src="/src/diagnostics/keyLockBenchmarkPage.ts"></script>
+  </body>
+</html>

@@ -12,31 +12,260 @@ navigation, tempo sync, three-band EQ, a music library, queue management, and
 beat-aligned automatic transitions. It runs entirely in the browser—there is no
 backend and your music is not uploaded to a server.
 
+## Project direction
+
+Mazzy is evolving from a two-deck prototype into a confidence-aware house-party
+autopilot. The research, musical rules, system architecture, implementation
+order, risks, and release gates are maintained in the canonical
+[AI DJ Research and Build Plan](./AI_DJ_RESEARCH_AND_BUILD_PLAN.md).
+
 ## Highlights
 
+- Plain-language Party Mode as the default surface, with the technical two-deck mixer collapsed under Advanced
 - Two fully independent playback decks
 - Interactive waveforms and animated platters
 - Automatic BPM and musical-key analysis
+- Background analysis in a transferable Web Worker
+- Beat-synchronous energy, frequency-band, vocal-likelihood proxy, and structural-change analysis
+- Waveform beat-grid markers with saved manual BPM, beat, and downbeat correction
+- Web Audio-clock metronome audition for grid review
+- Guided non-DJ timing repair with local click preview and tap-to-find-pulse
+- Versioned local timing-review answers that survive reload and can be removed
+- Automatic machine-only rhythm trust checks; manual review is optional and advanced
+- Role-aware cue ranking over trusted timing cues using aligned energy, structure, and vocal-likelihood proxies
+- Optional checksum-pinned Beat This `final0` browser model with WebGPU-to-WASM fallback
 - Tempo control from `0.5x` to `1.5x`
 - One-click BPM synchronization
 - High, mid, and low EQ with kill switches
+- Conservative per-track program-level trim, separate from crossfader automation
 - Equal-power crossfader
 - Folder-based library importing
 - Persistent local library powered by IndexedDB
+- Per-track local deletion that removes the stored audio, analysis, and timing review
 - Reorderable playback queue and “Play Next” controls
-- Automatic transitions with beat alignment, tempo matching, crossfading, and bass swapping
+- Confidence-gated automatic transitions with a visible safe fallback
+- Opt-in Party Autopilot that preloads the queue and arms the audited transition near track end
+- One-action Rescue that keeps the stronger side of an active transition and pauses Autopilot
+- Three-track safety-first lookahead with played-track exclusion and a host-selected energy journey
+- Queue ranking by transition safety, cue continuity, energy intent, confident key, and octave-aware tempo
+- Pre-party readiness check for source playback, next-track availability, queue analysis, and timing-tool state
 
 ## How auto mix works
 
 Mazzy treats the currently playing deck as the master. When **AUTO MIX** is
 triggered, it:
 
-1. Matches the target deck to the master deck's BPM.
-2. Finds the next 16-beat phrase boundary.
-3. Starts the target deck with a short pre-roll.
-4. Runs an eight-second equal-power crossfade.
-5. Gradually swaps the low-frequency energy between the decks.
-6. Stops the old deck, releases tempo sync, and prepares the next queued track.
+1. Builds an immutable transition plan from the two tracks and live deck state.
+2. Checks the exact candidate cue, detector/model provenance, local beat-line
+   residuals, bar grouping, and signal activity.
+3. For locally trusted automatic cues, performs a 0.35-second **Bar Handoff**
+   on the selected bar starts with no tempo stretch.
+4. For future calibrated grids, the same planner can perform an exact 32-beat
+   phrase blend with one deliberate bass handoff.
+5. Otherwise, performs a conservative 3.5-second **Safe Fade** with no tempo
+   stretch or long percussion overlap.
+6. Shows the selected template and the first reason a long blend was rejected.
+7. Schedules starts, gain curves, and EQ automation against the Web Audio
+   clock; animation frames only update the display.
+
+The approved plan is compiled into a versioned, immutable DSP description using
+the decks' actual trim and EQ state. Live scheduling consumes that description;
+the DSP compiler cannot change transition eligibility or silently substitute a
+different template.
+
+During an active transition, **STOP TRANSITION SAFELY** cancels pending gain automation,
+keeps whichever deck owns more of the mix, restores stable bass EQ, pauses the
+other deck, and turns Party Autopilot off until the host starts it again.
+Deck transport, loading, tempo, EQ, and the manual crossfader lock while Party
+Autopilot owns the decks or an automatic transition is being armed/performed,
+preventing a half-manual state from silently invalidating its plan or recovery
+checkpoint. Turning Autopilot off returns full manual control. The host's
+pre-transition bass EQ values are restored on completion, failure, or Rescue.
+
+Party Autopilot plans `current → next → after next`, rather than greedily
+choosing only the immediate song. The weakest transition across those two legs
+is considered first, so a tempting handoff cannot knowingly lead straight into
+a dead end. The host can choose **Steady**, **Build to a peak**, or **Warm up ·
+peak · cool down**. Energy remains a soft tie-break from normalized local
+analysis; it can never outrank transition safety, and already-played songs are
+excluded from automatic selection.
+
+Party Mode guides a first-time host through three large steps: import music,
+play the first song, and start Autopilot. While it runs, the primary controls use
+plain language—prefer later choices that are calmer or more energetic, change
+song using the current planned transition,
+pause Autopilot, or stop an automatic transition. The technical mixer remains
+available under **Show Advanced Mixer**. Library tracks and queue ordering are
+keyboard operable, and preflight focus moves to its result when opened.
+The host also chooses a one- to six-hour target and explicitly chooses whether
+Mazzy may continue beyond the queue; library continuation is off by default.
+Progress comes from accumulated
+active Party Autopilot time on the Web Audio clock, not from queue length or UI
+timers; pauses do not advance the storyline and overtime never stops playback.
+While Autopilot runs, **Energy Down** and **Energy Up** temporarily shift the
+next-song activity target by up to 30%. This remains a soft selection preference
+and cannot promote a weaker transition or bypass Safe Fade.
+**Skip Current Song Safely** immediately asks the same planner to perform the
+currently available Bar Handoff or Safe Fade; it never hard-stops the playing
+song or bypasses Rescue.
+
+Before a party, a stopped library-backed pair can be auditioned with **Hear
+Transition Rehearsal**. Mazzy locally renders a short stereo pre-master window
+using the same versioned playback rates, track trims, EQ/bass ramps, gain curves,
+and deck filter chain as the live transition, then plays it once through the real
+protected master chain and discards it. Live deck controls and Auto Mix are
+locked during rendering and playback. Its pre-master diagnostics catch
+non-finite audio, sample-peak excess, silence gaps, and large sample
+discontinuities; they do not certify musical quality, true-peak compliance,
+device stability, or human preference. No rehearsal audio or feedback is
+persisted.
+
+A deterministic three-hour Party Autopilot coordinator soak now drives the same
+pure decision function used by the live app. It therefore exercises the real
+queue-first two-song lookahead, library continuation, transition-plan arm
+windows, target cue offsets, no-repeat history, exact final-track ownership, and
+production trace evaluator. A Rescue correctly ends the unattended observation
+in a paused state. This is state/coordinator evidence only: it does not exercise
+browser decoding, Web Audio rendering, analysis workers, musical quality, or
+speaker output, and it does not replace the visible two-hour device check.
+
+Tempo-changing phrase blends also remain fail-closed until pitch-preserving
+playback is ready on the exact loaded decks. A developer-only Signalsmith
+AudioWorklet spike now passes local 44.1 and 48 kHz synthetic smoke checks at 0.94×,
+1.00×, and 1.06× through the isolated DeckEngine and protected stereo master:
+both channels change a 16 Hz timing marker with measured error below 0.09%, keep
+distinct 440/660 Hz carriers within one cent with 18–22 dB prominence, hold
+stereo level balance within 3.4 dB, and measure opposite-channel leakage below
+-48 dB. A diagnostics-only audio-frame observer ACKs at least 260 ms before the
+requested frame, then monitors the full cell: zero pre-start output, no invalid
+samples, and both channels beginning 5.9–9.1 ms late. This `key-lock-smoke/v6` result is deliberately
+not production approval or a musical-quality result. The smoke page, worklet,
+and package chunk are excluded from the normal build; runtime preparation state
+is load-bound, failures leave ordinary Safe Fade playback available, and the
+live app still grants no key-lock capability.
+The dormant planner contract now also requires a capability to match the exact
+current AudioContext sample rate, source/target runtime load keys, and the
+Signalsmith backend on both decks. A document-shaped or stale capability cannot
+authorize a phrase blend, and the App still supplies none.
+
+A separate `key-lock-crossfade-smoke/v1` built-diagnostics run exercises two
+simultaneous prepared stretch processors at 0.94×/1.06× through Mazzy's real
+equal-power crossfade and post-limiter health monitor. Its first deterministic
+handoff completed under exact schedule ownership with 274,176 expected-active
+frames, no silent frames, invalid samples, clipping, or processor errors. This
+is render-path evidence only and still does not authorize live phrase blends.
+A later `key-lock-crossfade-smoke/v2` stress run alternated 12 transitions
+between the two prepared decks. All 12 completed exactly once across 967,680
+expected-active frames; the longest measured silence was one sample (0.021 ms),
+with zero invalid/clipped samples or processor errors. It remains synthetic and
+does not replace real-song listening or the sustained device gate.
+The executable diagnostic is now `key-lock-crossfade-smoke/v3`: it adds a Stop
+path, bounded completion timeouts, exact schedule/completion IDs and lateness,
+context-continuity checks, and internally consistent expected/rendered-frame
+coverage. The v2 measurements above remain historical evidence. A fresh v3
+built-diagnostics browser run passed all 12 transitions with 967,680
+expected-active frames and zero silent frames, invalid samples, clipping, or
+processor errors after an acknowledged interval reset. Stop during a transition
+and immediate restart also completed without a stale schedule or browser error.
+
+The diagnostics artifact now also includes `/key-lock-listening.html`, an
+advanced private listening lab. The host chooses two local songs; Mazzy keeps
+only anonymous 12-second in-memory excerpts, clears the filename inputs, and
+offers original, 0.94×, 1.06×, and two-song handoff comparisons. Clean / artifact
+/ not-sure counts stay in tab memory with no filenames, timestamps, persistence,
+or upload. It reuses one bounded two-deck graph, rejects excerpts too short to
+finish a trial, resumes and watches the browser audio context, cancels owned
+fades on Stop, and enables rating only after a healthy natural completion. The
+workflow has been exercised on two files from the private local crate, but no
+subjective rating has been inferred or recorded automatically.
+
+Party setup also offers an opt-in **private Autopilot activity check**. It watches
+the production preload, handoff, Rescue, repeat, and final-track ownership state
+using bounded session-local numbers only. It stays in tab memory, records no song
+names, files, library IDs, BPM/key data, wall-clock listening times, or audio, and
+is never uploaded. Its “healthy so far” result covers Autopilot state invariants
+only; refresh, overflow, incomplete identity, or impossible ordering fails closed.
+
+Advanced Mixer now links to **Run Local Device Party Check**. This opens a
+copyright-free wall-clock diagnostic using the production `AudioEngine`, real
+Web Audio transitions, and a post-limiter AudioWorklet health tap. The report
+fails closed on short/aborted duration, malformed or incomplete render evidence,
+worklet failure, orphan transitions, context interruption, non-finite output,
+post-limiter clipping, gaps over 100 ms, or completion lateness over 500 ms. It
+contains no audio, filenames, paths, track identifiers, exact timestamps, or
+device identifiers. The one-minute run is only a smoke check; only a visible,
+awake two-hour run can pass this audio-engine gate. It still does not prove
+decoding, music analysis, complete Party Autopilot behavior, physical speaker
+output, or musical quality. A development-only synthetic transition-rehearsal
+page verifies browser cue timing, 1.25× source playback, stereo isolation,
+continuity, deterministic rendering, and trim at 48 kHz without playing or
+saving its generated signals; it is excluded from the production build.
+
+By default, queued songs retain first priority and Autopilot may continue from
+the remaining eligible library only when that queue is exhausted. The host can
+turn that option off before starting; played, loaded, duplicate, and
+Auto-Mix-disabled tracks are never silently reintroduced.
+
+Imported music files, filenames, and analysis are stored in this browser
+profile until removed; they are not uploaded. Tracks can be removed one at a
+time or with **Remove All Local Music**. The optional timing model is fetched
+from the app's server only after the host chooses the download action, then
+cached for later reuse; browser storage may evict it.
+Mazzy uses a local system monospace font stack and makes no third-party font
+request when the app opens.
+
+The lightweight analyzer does not provide bar starts, so tracks using only that
+analyzer use Safe Fade. The optional enhanced detector can unlock a short local
+Bar Handoff automatically when both tracks expose qualified cue indices. Long
+phrase blends remain locked until a real-audio benchmark promotes a calibrated
+detector.
+Mazzy analyzes timing automatically; a host does not need to count beats,
+understand BPM, or approve a grid. Each track receives a versioned machine-only
+trust profile covering grid validity, coverage, tempo drift, phase stability,
+bar-start coherence, and signal activity. The optional Beat This `final0` model
+pack finds beats and bar starts locally through WebGPU with automatic WASM
+fallback. The first setup is approximately 109 MB, is checksum-verified, and is
+cached in the browser for offline reuse. Music is never sent with that download.
+
+When automatic checks support it, Mazzy can use a 0.35-second bar-aligned
+handoff with no tempo stretching or long percussion overlap. Otherwise it uses
+Safe Fade. Long 32-beat phrase blends remain locked until a detector/calibrator
+passes the real-music release gate; self-consistency is not presented as an
+accuracy probability.
+
+Timing eligibility and musical preference are intentionally separate. Enhanced
+analysis first creates the exact set of allowed cues. Energy, structure, and a
+spectral vocal-likelihood proxy then rank only that set: outgoing cues favor a
+later, calmer handoff region, while incoming cues favor an audible opening with
+less likely vocal overlap. The final source/target pair also favors similar
+normalized energy so a handoff is less likely to feel like an accidental jump.
+Soft features can choose among safe cues but cannot make an unsafe cue eligible.
+
+On a private development crate, the official detector produced usable beat and
+bar evidence across multiple tracks, while the conservative local-cue rule
+abstained on less coherent bar grouping. Exact per-track/cohort results remain
+in private evaluation storage under D-018. This is engineering coverage
+evidence, not a human-annotated accuracy claim.
+
+The **Review Timing (Advanced)** wizard remains available for troubleshooting,
+but is not required for import, playback, or Auto Mix. Adjustments stay local
+and still use Safe Fade; “adjusted” is never treated as professionally verified.
+For library tracks, the final plain-language answers are stored in IndexedDB
+only after **Save Answers**, restored after reload, and shown beside the deck.
+Raw tap times, playhead locations, filenames, and free-form notes are not part
+of the review record. Cancel leaves no record, and **Remove Saved Timing
+Review** deletes the stored answers. Direct-loaded tracks remain session-only.
+Energy, structural-change, and vocal-likelihood evidence is now analyzed for
+future cue selection, but the vocal value is explicitly a spectral proxy—not a
+validated vocal detector—and does not unlock long blends.
+
+A checksum-pinned Beat This ONNX/WebGPU pipeline can now analyze tracks locally
+in a browser worker, with a one-time model setup and automatic WASM fallback.
+Its results feed automatic timing and the conservative bar-aligned handoff, but
+remain ineligible for long phrase blends until human-scored accuracy,
+confidence calibration, memory, and loading UX pass their release gates. See
+[Private real-track evaluation](./PRIVATE_REAL_TRACK_EVALUATION.md) for the
+reproducible workflow and measured evidence.
 
 ## Audio architecture
 
@@ -57,6 +286,15 @@ Low EQ ─► Mid EQ ─► High EQ ─► Deck gain ─► Audio output
 
 WaveSurfer renders the visual waveform, while the Web Audio API handles the
 actual playback, EQ, gain automation, synchronization, and transitions.
+
+Current BPM/beat confidence is provisional and is not yet reliable enough for
+autonomous long phrase blends. The reproducible comparison and known failures
+are documented in the [Rhythm Benchmark Report](./RHYTHM_BENCHMARK_REPORT.md).
+Manual corrections survive reload and reanalysis, but they intentionally do not
+manufacture confidence or unlock long-blend Auto Mix.
+Timing-review answers are bound to the analyzer and grid schema they assessed;
+a new analysis clears the old review instead of presenting stale listening
+feedback as current.
 
 ## Getting started
 
@@ -84,6 +322,51 @@ npm run build
 npm run preview
 ```
 
+`npm run build` intentionally creates the Safe-Fade-capable build without the
+83 MB model/configuration/filterbank pack (the shared browser runtime may still
+be present in the JavaScript build). To create the enhanced local-analysis build, first
+prepare and verify the pinned assets, then opt in explicitly:
+
+```bash
+npm run prepare:beat-this-onnx
+npm run build:enhanced
+npm run preview
+```
+
+The enhanced build fails if any model/configuration/filterbank asset is missing
+or has the wrong SHA-256. The standard build labels enhanced timing as not
+included instead of presenting a download that cannot succeed.
+
+### Validation and rhythm benchmark
+
+```bash
+npm test
+npm run typecheck
+npm run benchmark:rhythm
+npm run benchmark:real-tracks
+```
+
+For the local audio-engine check, start the preview server and open
+`/device-soak.html`. Keep the page visible and the computer awake. Reports are
+private local evidence; do not commit individual reports.
+
+The experimental key-lock smoke page is built into a separate diagnostics
+directory so it cannot be mixed into a production artifact:
+
+```bash
+npm run build:diagnostics
+npm run preview:diagnostics
+```
+
+Then open `/key-lock-benchmark.html`. It uses generated synthetic audio only and
+does not unlock live phrase blends. Add `?sampleRate=44100` to run the separate
+44.1 kHz check; the default is 48 kHz.
+
+The real-track command reads `~/Desktop/music small` by default and writes only
+to external private application storage outside the repository and Vite root. See
+[Private real-track evaluation](./PRIVATE_REAL_TRACK_EVALUATION.md) for the
+annotation and Beat This prototype workflow.
+
 ## Using Mazzy
 
 1. Select **IMPORT** and choose a folder containing audio files.
@@ -92,21 +375,33 @@ npm run preview
 4. Press **Play**, adjust tempo and EQ, or use **SYNC** to match the other deck.
 5. Drag the crossfader for a manual transition.
 6. Add more tracks to the queue and use **AUTO MIX** for an assisted transition.
+7. Select **START PARTY AUTOPILOT** for hands-off queue playback; select it again
+   at any time to stop automatic arming. Autopilot may reorder queued tracks to
+   prefer a qualified transition, then uses confident key and tempo fit to break
+   ties. Its current choice and reason remain visible. A readiness check appears
+   before activation; Safe-Fade-only operation remains available without the
+   enhanced timing model.
 
 Audio format support depends on the browser's decoding capabilities. MP3, WAV,
 and FLAC are the safest choices; M4A and AIFF support can vary by platform.
+
+Right-click a library row and choose **Remove from Library** to delete that
+track's stored browser copy, automatic analysis, and timing-review record. If it
+is loaded, Mazzy safely ejects it from the corresponding deck as well.
 
 ## Project structure
 
 ```text
 src/
-├── components/
-│   └── Deck.jsx       # Playback engine and deck controls
-├── App.jsx            # Mixer, library, queue, and auto-mix coordination
-├── App.css            # Interface and deck styling
-├── audioContext.js    # Shared Web Audio context
-├── libraryDb.js       # IndexedDB library persistence
-└── main.jsx           # React entry point
+├── analysis/           # Worker client, versioning, and grid corrections
+├── audio/              # AudioEngine, DeckEngine, transport, and metering
+├── components/         # Deck controls and beat-grid visualization
+├── diagnostics/        # Rhythm benchmark and soak simulation
+├── domain/             # Versioned analysis and transition schemas
+├── planning/           # Deterministic transition planner and music math
+├── workers/            # Background audio analysis worker
+├── App.jsx             # Mixer, library, queue, and plan execution
+└── libraryDb.js        # IndexedDB library persistence
 ```
 
 ## Built with

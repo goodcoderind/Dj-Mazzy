@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Mazzy Key-Lock Crossfade Diagnostic</title>
+    <style>
+      body { max-width: 760px; margin: 40px auto; padding: 0 20px; font: 16px/1.5 system-ui; background: #111; color: #eee; }
+      button { min-height: 44px; padding: 0 18px; font: inherit; }
+      pre { white-space: pre-wrap; background: #1d1d1d; padding: 16px; border: 1px solid #444; }
+    </style>
+  </head>
+  <body>
+    <h1>Two-deck key-lock crossfade check</h1>
+    <p id="description">A quiet synthetic, local-only check of two simultaneous stretch processors and Mazzy’s protected master. It is not a listening or production-approval result.</p>
+    <button id="run" type="button" aria-describedby="description">Run two-deck check</button>
+    <button id="stop" type="button" disabled>Stop check</button>
+    <p id="status" role="status" aria-live="polite">Not run.</p>
+    <details><summary>Machine details</summary><pre id="result">No report.</pre></details>
+    <script type="module" src="/src/diagnostics/keyLockCrossfadePage.ts"></script>
+  </body>
+</html>

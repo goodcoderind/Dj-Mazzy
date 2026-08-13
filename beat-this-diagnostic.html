@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Mazzy · Beat This Browser Diagnostic</title>
+    <style>
+      :root { color-scheme: dark; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+      body { margin: 0; background: #090909; color: #d8d8d8; }
+      main { max-width: 760px; margin: 0 auto; padding: 48px 24px; }
+      h1 { margin: 0 0 10px; font-size: 22px; letter-spacing: .12em; text-transform: uppercase; }
+      p { color: #888; line-height: 1.6; }
+      button { margin: 18px 0; padding: 12px 18px; border: 1px solid #c8a96e; background: #131313; color: #e5e5e5; font: inherit; cursor: pointer; }
+      input[type="file"] { display: block; max-width: 100%; margin: 20px 0 0; color: #aaa; }
+      button:disabled { opacity: .45; cursor: wait; }
+      #status { padding: 14px; border: 1px solid #292929; color: #74adf2; }
+      pre { min-height: 120px; padding: 14px; overflow: auto; border: 1px solid #292929; background: #0d0d0d; line-height: 1.5; }
+      .warning { color: #ff8da3; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Beat This Browser Diagnostic</h1>
+      <p>
+        Development-only ONNX test. It can run a zero-valued feature window or analyze one local
+        audio file through browser decoding, exact log-mel preparation, sequential model windows,
+        and minimal peak extraction. It never persists the audio or unlocks Auto Mix.
+      </p>
+      <p class="warning">Eligibility confidence is hard-coded to zero for every diagnostic result.</p>
+      <button id="run" type="button">LOAD MODEL + RUN ZERO WINDOW</button>
+      <input id="track" type="file" accept="audio/*,.mp3,.wav,.flac,.m4a,.aiff" />
+      <button id="analyze-track" type="button">ANALYZE SELECTED FILE (EXPERIMENTAL)</button>
+      <button id="download-result" type="button" disabled>DOWNLOAD PRIVATE RESULT JSON</button>
+      <input id="oracle" type="file" accept="application/json,.json" />
+      <button id="compare-oracle" type="button" disabled>COMPARE WITH PRIVATE PYTHON ORACLE</button>
+      <div id="status" aria-live="polite">Ready. No model has been loaded.</div>
+      <pre id="result">No result.</pre>
+    </main>
+    <script type="module" src="/src/experimental/beatThisDiagnosticPage.ts"></script>
+  </body>
+</html>

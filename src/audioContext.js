@@ -1,9 +1,2 @@
-let sharedAudioContext = null;
-
-export const getAudioContext = () => {
-  if (!sharedAudioContext) {
-    const Ctx = window.AudioContext || window.webkitAudioContext;
-    sharedAudioContext = new Ctx();
-  }
-  return sharedAudioContext;
-};
+// Compatibility shim while existing imports migrate to the central engine.
+export { getAudioContext, getAudioEngine } from "./audio/audioEngineSingleton";

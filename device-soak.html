@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Mazzy · Local Device Party Check</title>
+    <style>
+      :root { color-scheme: dark; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+      body { margin: 0; background: #090909; color: #ddd; }
+      main { max-width: 760px; margin: 0 auto; padding: 40px 24px; }
+      p, label { color: #999; line-height: 1.55; }
+      button, select { min-height: 44px; padding: 10px 14px; border: 1px solid #c8a96e; background: #151515; color: #eee; font: inherit; }
+      .controls { display: flex; flex-wrap: wrap; gap: 12px; align-items: end; }
+      label { display: grid; gap: 6px; }
+      progress { width: 100%; height: 24px; margin: 18px 0; }
+      pre { min-height: 220px; overflow: auto; padding: 14px; border: 1px solid #303030; background: #111; }
+      .warning { color: #e3c27d; }
+      .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Local Device Party Check</h1>
+      <p>This exercises Mazzy’s post-limiter Web Audio render path for actual wall-clock time using synthetic stereo tones. It does not test music analysis, the full Party Autopilot, or speakers after the browser. It uploads and saves nothing.</p>
+      <p class="warning">Audible tones will play. Set a safe volume first, then keep this tab visible and your computer awake. Only the two-hour result can satisfy this audio-engine gate; shorter checks only find problems sooner.</p>
+      <div class="controls">
+        <label>Length
+          <select id="mode">
+            <option value="smoke-1m">1 minute quick check</option>
+            <option value="smoke-15m">15 minute smoke check</option>
+            <option value="acceptance-2h">2 hour release check</option>
+            <option value="endurance-4h">4 hour endurance check</option>
+          </select>
+        </label>
+        <button id="start" type="button">START LOCAL CHECK</button>
+        <button id="stop" type="button" disabled>STOP</button>
+      </div>
+      <progress id="progress" max="1" value="0" aria-label="Local audio-engine check progress"></progress>
+      <p id="status">Ready.</p>
+      <p id="announcer" class="sr-only" role="status" aria-live="polite">Ready.</p>
+      <pre id="report">No report yet.</pre>
+    </main>
+    <script type="module" src="/src/diagnostics/deviceSoakPage.ts"></script>
+  </body>
+</html>
