@@ -107,6 +107,10 @@ Mazzy may continue beyond the queue; library continuation is off by default.
 Progress comes from accumulated
 active Party Autopilot time on the Web Audio clock, not from queue length or UI
 timers; pauses do not advance the storyline and overtime never stops playback.
+Mazzy requests the browser's standard confirmation before a reload or tab close
+while Autopilot, an automatic transition, or a local rehearsal is active. The
+browser may suppress that prompt; force-quit and crash recovery remain outside
+the tab-memory session contract.
 While Autopilot runs, **Energy Down** and **Energy Up** temporarily shift the
 next-song activity target by up to 30%. This remains a soft selection preference
 and cannot promote a weaker transition or bypass Safe Fade.

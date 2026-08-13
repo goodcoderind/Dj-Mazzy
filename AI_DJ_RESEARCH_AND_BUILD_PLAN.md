@@ -1932,6 +1932,13 @@ These are the active backlog, not reasons to discard the prototype.
   set, microphone/camera changes can also trigger the pause; this is a bounded
   conservative interruption signal, not output-routing detection or proof that
   a physical speaker produced sound.
+- **D-048 — Guard active tab-memory sessions from accidental navigation:**
+  while Autopilot, an automatic transition, or transition rehearsal is active,
+  Mazzy requests the browser's standard `beforeunload` confirmation. The guard
+  is removed when those operations stop, and the browser may suppress its
+  prompt. It cannot guarantee recovery after a
+  crash, force-quit, browser eviction, or device loss and does not change the
+  tab-memory-only session contract.
 
 ### Open questions
 

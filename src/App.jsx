@@ -275,6 +275,16 @@ export default function App() {
   }, [autoPilotEnabled]);
 
   useEffect(() => {
+    if (!autoPilotEnabled && !autoMixArming && !autoMixing && !rehearsalActive && !rehearsalPreparing) return;
+    const warnBeforeLeaving = (event) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", warnBeforeLeaving);
+    return () => window.removeEventListener("beforeunload", warnBeforeLeaving);
+  }, [autoPilotEnabled, autoMixArming, autoMixing, rehearsalActive, rehearsalPreparing]);
+
+  useEffect(() => {
     const engine = getAudioEngine();
     const onStateChange = () => {
       const state = engine.context.state;
