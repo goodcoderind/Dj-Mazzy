@@ -1905,6 +1905,14 @@ These are the active backlog, not reasons to discard the prototype.
   unrelated stale snapshots cannot roll those fields backward. Import errors
   and later analysis-save errors have separate UI ownership, and only a later
   successful analysis snapshot clears the latter.
+- **D-045 — Party Autopilot owns a bounded screen wake-lock request:** entering
+  Autopilot asks the browser for a `screen` wake lock; every state path that
+  disables Autopilot converges on release through one state-owned effect, and
+  unmount also releases. A hidden-tab release is reacquired only after the tab
+  becomes visible while Autopilot is still enabled. Request failure never blocks
+  playback and is announced in a polite live status with the actionable fallback
+  to keep the computer powered and awake. This does not claim to override OS
+  power policy or keep a closed laptop lid awake.
 
 ### Open questions
 

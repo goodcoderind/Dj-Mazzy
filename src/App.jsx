@@ -58,6 +58,7 @@ import {
 } from "./diagnostics/partyAutopilotTrace";
 import { assessImportCapacity, formatStorageSize } from "./storage/importCapacity";
 import { identifyLocalFile, normalizeContentIdentity } from "./storage/contentIdentity";
+import { createPartyWakeLockController } from "./power/partyWakeLock";
 
 const audioExt = [".mp3", ".wav", ".flac", ".aiff", ".m4a"];
 const stripExt = (name) => name.replace(/\.[^/.]+$/, "");
@@ -146,6 +147,7 @@ export default function App() {
   const [partyEndingFinalTrack, setPartyEndingFinalTrack] = useState(false);
   const [partyDiagnosticEnabled, setPartyDiagnosticEnabled] = useState(false);
   const [partyDiagnosticEvaluation, setPartyDiagnosticEvaluation] = useState(null);
+  const [partyWakeLockStatus, setPartyWakeLockStatus] = useState("idle");
   const rehearsalPreparing = rehearsalStatus?.state === "rendering" || rehearsalStatus?.state === "cancelling";
   const [masterDeck, setMasterDeck] = useState("a");
   const [bpmByDeck, setBpmByDeck] = useState({ a: null, b: null });
@@ -215,6 +217,24 @@ export default function App() {
   const libraryMutationModeRef = useRef("hydrating");
   const libraryHydrationGenerationRef = useRef(0);
   const libraryImportGenerationRef = useRef(0);
+  const partyWakeLockRef = useRef(null);
+
+  useEffect(() => {
+    const controller = createPartyWakeLockController({ onStatus: setPartyWakeLockStatus });
+    partyWakeLockRef.current = controller;
+    const onVisibility = () => controller.onVisibilityChange();
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibility);
+      void controller.release();
+      partyWakeLockRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (autoPilotEnabled) void partyWakeLockRef.current?.acquire?.();
+    else void partyWakeLockRef.current?.release?.();
+  }, [autoPilotEnabled]);
 
   const stopRemoteLibraryPlayback = () => {
     autoPilotPreloadGenerationRef.current += 1;
@@ -232,6 +252,7 @@ export default function App() {
     setPartyClockDisplay(partySessionClockSnapshot(partySessionClockRef.current, engine.clock.now()));
     pausePartyDiagnostic("host-control");
     setAutoPilotEnabled(false);
+    void partyWakeLockRef.current?.release?.();
     setPartyEndingFinalTrack(false);
     setAutoPilotChoice(null);
     setAutoMixing(false);
@@ -675,6 +696,7 @@ export default function App() {
     setPartyEndingFinalTrack(false);
     setAutoPilotChoice(null);
     pausePartyDiagnostic("host-control");
+    void partyWakeLockRef.current?.release?.();
     showToast(message);
   };
 
@@ -1050,6 +1072,7 @@ export default function App() {
     setAutoPilotChoice(null);
     recordPartyEvent({ type: "session-ended", reason: "final-track-ended" });
     partyTraceRunningRef.current = false;
+    void partyWakeLockRef.current?.release?.();
     showToast("Party finished · no unplayed tracks remain");
   };
 
@@ -1625,6 +1648,7 @@ export default function App() {
           setMasterDeck(targetDeck);
           autoPilotEnabledRef.current = false;
           setAutoPilotEnabled(false);
+          void partyWakeLockRef.current?.release?.();
           const now = engine.clock.now();
           partySessionClockRef.current = pausePartySessionClock(partySessionClockRef.current, now);
           setPartyClockDisplay(partySessionClockSnapshot(partySessionClockRef.current, now));
@@ -1795,6 +1819,7 @@ export default function App() {
     autoPilotTransitionKeyRef.current = null;
     autoPilotEnabledRef.current = false;
     setAutoPilotEnabled(false);
+    void partyWakeLockRef.current?.release?.();
     pausePartyDiagnostic("rescue");
     finalTrackRef.current = null;
     partySessionClockRef.current = pausePartySessionClock(
@@ -1894,6 +1919,7 @@ export default function App() {
         setPartyClockDisplay(partySessionClockSnapshot(partySessionClockRef.current, now));
         autoPilotEnabledRef.current = false;
         setAutoPilotEnabled(false);
+        void partyWakeLockRef.current?.release?.();
         finalTrackRef.current = null;
         setPartyEndingFinalTrack(false);
         setAutoPilotChoice(null);
@@ -2084,6 +2110,7 @@ export default function App() {
     setPartyEndingFinalTrack(false);
     setShowPartyReadiness(false);
     pausePartyDiagnostic("host-request");
+    void partyWakeLockRef.current?.release?.();
   };
   const startPartyAutopilot = () => {
     const now = getAudioEngine().clock.now();
@@ -2231,7 +2258,18 @@ export default function App() {
             {autoMixing && <button className="party-emergency" type="button" onClick={rescueTransition}>STOP AUTOMATIC TRANSITION</button>}
           </div>
         )}
-        <p className="party-tab-note">Party progress lives in this tab and resets if the page is refreshed.</p>
+        <p className="party-tab-note">
+          Party progress lives in this tab and resets if the page is refreshed.
+        </p>
+        {autoPilotEnabled && (
+          <p className="party-tab-note" role="status" aria-live="polite">
+            {partyWakeLockStatus === "active"
+              ? "Mazzy asked this screen to stay awake while Autopilot runs."
+              : partyWakeLockStatus === "unavailable"
+                ? "This browser could not keep the screen awake; keep the computer powered and awake."
+                : "Asking the browser to keep this screen awake…"}
+          </p>
+        )}
         {partyDiagnosticEnabled && partyDiagnosticEvaluation && (
           <p className="party-tab-note" role="status">
             {partyDiagnosticEvaluation.status === "invalid"

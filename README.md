@@ -461,6 +461,12 @@ and FLAC are the safest choices; M4A and AIFF support can vary by platform. A
 decode failure is labelled **FILE COULDN’T BE READ · TRY ANOTHER FORMAT**; it is
 not presented as transition-ready.
 
+While Party Autopilot is running, Mazzy requests the browser's screen wake lock
+and releases it when Autopilot pauses or the page closes. Browsers and operating
+systems may refuse or later release that request, so the UI reports the actual
+state and still tells the host to keep the computer powered and awake when the
+lock is unavailable. It cannot keep a closed laptop lid awake.
+
 Right-click a library row and choose **Remove from Library** to delete that
 track's stored browser copy, automatic analysis, and timing-review record. If it
 is loaded, Mazzy safely ejects it from the corresponding deck as well.
