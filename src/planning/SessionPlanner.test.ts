@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
-import type { TransitionPlanV2 } from "../domain/transitionPlan";
+import type { TransitionPlanV3 } from "../domain/transitionPlan";
 import { planSessionHorizon } from "./SessionPlanner";
 
-const plan = (template: TransitionPlanV2["template"]) => ({ template }) as TransitionPlanV2;
+const plan = (template: TransitionPlanV3["template"]) => ({ template }) as TransitionPlanV3;
 const candidates = [
   { id: "dead-end", bpm: 120, energyByBeat: [0.6] },
   { id: "bridge", bpm: 120, energyByBeat: [0.55] },

@@ -833,7 +833,8 @@ const Deck = forwardRef(function Deck(
       getAnalysisRecord: () => analysisRecord,
       getDspSnapshot: () => ({
         trimDb: deckEngine.getTrackTrimDb(),
-        eqDb: deckEngine.getEqSnapshot()
+        eqDb: deckEngine.getEqSnapshot(),
+        filterCutoffHz: deckEngine.getFilterCutoff()
       }),
       getDecodedBufferForRehearsal: () => deckEngine.getDecodedBufferForRehearsal(),
       pause: () => pause(),
@@ -862,12 +863,13 @@ const Deck = forwardRef(function Deck(
       setGain: (value) => setGain(value),
       getEqBandGain: (band) => Number(eq[band] ?? 0),
       setTrackTrimDb: (value) => deckEngine.setTrackTrimDb(value),
-      setFilterCutoff: () => {},
+      setFilterCutoff: (hz) => deckEngine.setFilterCutoff(hz),
       setEqBandGain: (band, db) => setEqBandGain(band, db),
       scheduleEqBandRamp: (band, fromDb, toDb, startTime, duration) =>
         scheduleEqBandRamp(band, fromDb, toDb, startTime, duration),
       scheduleGainCurve: (curve, startTime, duration) => scheduleGainCurve(curve, startTime, duration),
-      scheduleFilterSweep: () => {}
+      scheduleFilterSweep: (fromHz, toHz, startTime, duration) =>
+        deckEngine.scheduleFilterSweep(fromHz, toHz, startTime, duration)
     }),
     [analysisRecord, originalBpm, tempo, eq]
   );

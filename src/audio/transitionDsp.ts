@@ -1,8 +1,8 @@
-import type { EqPoint, TransitionPlanV2 } from "../domain/transitionPlan";
+import type { EqPoint, TransitionPlanV3 } from "../domain/transitionPlan";
 import { TRANSITION_PLAN_SCHEMA_VERSION } from "../domain/versions";
 import { MASTER_DSP_V1 } from "./masterDsp";
 
-export const TRANSITION_DSP_VERSION = "transition-dsp/v1" as const;
+export const TRANSITION_DSP_VERSION = "transition-dsp/v2" as const;
 
 export type LinearDbRamp = Readonly<{
   startOffsetSeconds: number;
@@ -17,12 +17,18 @@ export type DeckTransitionDsp = Readonly<{
   gainCurve: readonly number[];
   initialEqDb: Readonly<EqPoint>;
   eqRamps: readonly Readonly<{ band: "low" | "mid" | "high"; ramp: LinearDbRamp }>[];
+  filterSweep: Readonly<{
+    startOffsetSeconds: number;
+    durationSeconds: number;
+    fromHz: number;
+    toHz: number;
+  }> | null;
 }>;
 
-export type TransitionDspV1 = Readonly<{
+export type TransitionDspV2 = Readonly<{
   schemaVersion: typeof TRANSITION_DSP_VERSION;
   planSchemaVersion: typeof TRANSITION_PLAN_SCHEMA_VERSION;
-  template: "safe-fade" | "downbeat-cut" | "phrase-blend";
+  template: "safe-fade" | "filtered-fade" | "downbeat-cut" | "phrase-blend";
   durationSeconds: number;
   targetCueSeconds: number;
   source: DeckTransitionDsp;
@@ -51,14 +57,15 @@ const freezeDeck = (deck: DeckTransitionDsp): DeckTransitionDsp => Object.freeze
   eqRamps: Object.freeze(deck.eqRamps.map((entry) => Object.freeze({
     band: entry.band,
     ramp: Object.freeze({ ...entry.ramp })
-  })))
+  }))),
+  filterSweep: deck.filterSweep ? Object.freeze({ ...deck.filterSweep }) : null
 });
 
-export const validateTransitionDsp = (dsp: TransitionDspV1) => {
+export const validateTransitionDsp = (dsp: TransitionDspV2) => {
   if (dsp.schemaVersion !== TRANSITION_DSP_VERSION || dsp.planSchemaVersion !== TRANSITION_PLAN_SCHEMA_VERSION) {
     throw new RangeError("Unsupported transition DSP schema");
   }
-  if (!["safe-fade", "downbeat-cut", "phrase-blend"].includes(dsp.template)) {
+  if (!["safe-fade", "filtered-fade", "downbeat-cut", "phrase-blend"].includes(dsp.template)) {
     throw new RangeError("Unsupported transition template");
   }
   if (dsp.outputStage !== "pre-master" || dsp.requiredMasterVersion !== MASTER_DSP_V1.version) {
@@ -88,6 +95,13 @@ export const validateTransitionDsp = (dsp: TransitionDspV1) => {
         throw new RangeError(`${label} EQ ramp is invalid`);
       }
     }
+    const sweep = deck.filterSweep;
+    if (sweep && (![sweep.startOffsetSeconds, sweep.durationSeconds, sweep.fromHz, sweep.toHz].every(finite) ||
+      sweep.startOffsetSeconds < 0 || sweep.durationSeconds <= 0 ||
+      sweep.startOffsetSeconds + sweep.durationSeconds > dsp.durationSeconds ||
+      sweep.fromHz < 200 || sweep.fromHz > 20_000 || sweep.toHz < 200 || sweep.toHz > 20_000)) {
+      throw new RangeError(`${label} filter sweep is invalid`);
+    }
   }
   const near = (value: number | undefined, expected: number) => value != null && Math.abs(value - expected) <= 1e-6;
   if (!near(dsp.source.gainCurve[0], 1) || !near(dsp.source.gainCurve.at(-1), 0) ||
@@ -97,24 +111,34 @@ export const validateTransitionDsp = (dsp: TransitionDspV1) => {
   if (dsp.template !== "phrase-blend" && (dsp.source.eqRamps.length || dsp.target.eqRamps.length || dsp.target.playbackRate !== 1)) {
     throw new RangeError("Short transitions cannot contain stretch or EQ automation");
   }
+  if (dsp.template === "filtered-fade") {
+    if (!dsp.source.filterSweep || dsp.target.filterSweep || dsp.source.filterSweep.fromHz !== 20_000 ||
+      dsp.source.filterSweep.toHz !== 420 || dsp.source.filterSweep.startOffsetSeconds !== 0 ||
+      Math.abs(dsp.source.filterSweep.durationSeconds - dsp.durationSeconds) > 1e-6) {
+      throw new RangeError("Filtered Fade requires one full-duration outgoing low-pass sweep");
+    }
+  } else if (dsp.source.filterSweep || dsp.target.filterSweep) {
+    throw new RangeError("Only Filtered Fade can contain filter automation");
+  }
   return true;
 };
 
 export const compileTransitionDsp = (
-  plan: Readonly<TransitionPlanV2>,
+  plan: Readonly<TransitionPlanV3>,
   snapshot: TransitionDspSnapshot
-): TransitionDspV1 => {
+): TransitionDspV2 => {
   if (plan.schemaVersion !== TRANSITION_PLAN_SCHEMA_VERSION) throw new RangeError("Unsupported transition plan schema");
-  if (!["safe-fade", "downbeat-cut", "phrase-blend"].includes(plan.template)) {
-    throw new RangeError("Transition template is not implemented by DSP v1");
+  if (!["safe-fade", "filtered-fade", "downbeat-cut", "phrase-blend"].includes(plan.template)) {
+    throw new RangeError("Transition template is not implemented by DSP v2");
   }
-  const template = plan.template as TransitionDspV1["template"];
+  const template = plan.template as TransitionDspV2["template"];
   validateEq(snapshot.sourceEqDb, "source");
   validateEq(snapshot.targetEqDb, "target");
   if (![snapshot.sourceTrimDb, snapshot.targetTrimDb].every(finite)) throw new RangeError("Track trim must be finite");
   const halfDuration = plan.schedule.durationSeconds / 2;
   const phrase = template === "phrase-blend";
-  const result: TransitionDspV1 = Object.freeze({
+  const filtered = template === "filtered-fade";
+  const result: TransitionDspV2 = Object.freeze({
     schemaVersion: TRANSITION_DSP_VERSION,
     planSchemaVersion: TRANSITION_PLAN_SCHEMA_VERSION,
     template,
@@ -125,14 +149,16 @@ export const compileTransitionDsp = (
       trimDb: snapshot.sourceTrimDb,
       gainCurve: plan.automation.sourceGain,
       initialEqDb: snapshot.sourceEqDb,
-      eqRamps: phrase ? [{ band: "low", ramp: { startOffsetSeconds: 0, durationSeconds: halfDuration, fromDb: snapshot.sourceEqDb.low, toDb: -12 } }] : []
+      eqRamps: phrase ? [{ band: "low", ramp: { startOffsetSeconds: 0, durationSeconds: halfDuration, fromDb: snapshot.sourceEqDb.low, toDb: -12 } }] : [],
+      filterSweep: filtered ? { startOffsetSeconds: 0, durationSeconds: plan.schedule.durationSeconds, fromHz: 20_000, toHz: 420 } : null
     }),
     target: freezeDeck({
       playbackRate: phrase ? plan.targetPlaybackRate : 1,
       trimDb: snapshot.targetTrimDb,
       gainCurve: plan.automation.targetGain,
       initialEqDb: phrase ? { ...snapshot.targetEqDb, low: -12 } : snapshot.targetEqDb,
-      eqRamps: phrase ? [{ band: "low", ramp: { startOffsetSeconds: halfDuration, durationSeconds: halfDuration, fromDb: -12, toDb: snapshot.targetEqDb.low } }] : []
+      eqRamps: phrase ? [{ band: "low", ramp: { startOffsetSeconds: halfDuration, durationSeconds: halfDuration, fromDb: -12, toDb: snapshot.targetEqDb.low } }] : [],
+      filterSweep: null
     }),
     outputStage: "pre-master",
     requiredMasterVersion: MASTER_DSP_V1.version

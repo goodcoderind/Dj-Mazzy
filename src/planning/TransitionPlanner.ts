@@ -1,10 +1,11 @@
 import { buildEffectiveBeatGrid } from "../analysis/beatGridCorrections";
 import type { BeatGridAnalysis } from "../domain/beatGrid";
-import type { TransitionPlanV2 } from "../domain/transitionPlan";
-import { TRANSITION_PLAN_SCHEMA_VERSION } from "../domain/versions";
+import type { TransitionPlanV3 } from "../domain/transitionPlan";
+import { TRACK_ANALYSIS_SCHEMA_VERSION, TRANSITION_PLAN_SCHEMA_VERSION } from "../domain/versions";
 import type { KeyLockCapability } from "../domain/keyLockCapability";
 import { keyLockCapabilityCovers } from "../domain/keyLockCapability";
 import { hasCurrentEnhancedRhythm } from "../analysis/enhancedRhythmVersion";
+import { hasCurrentBasicAnalysis } from "../analysis/analysisVersion";
 import { rankTrustedMusicalCuePairs } from "./musicalCueSelector";
 import {
   createEqualPowerCurves,
@@ -18,6 +19,7 @@ import {
 export const PHRASE_BEAT_CONFIDENCE_THRESHOLD = 0.8;
 export const PHRASE_DOWNBEAT_CONFIDENCE_THRESHOLD = 0.8;
 export const SAFE_FADE_SECONDS = 3.5;
+export const FILTERED_FADE_SECONDS = 4.5;
 export const DOWNBEAT_CUT_SECONDS = 0.35;
 // Enough time for the UI-side preparation pass to finish before Web Audio owns
 // the immutable schedule. Musical cues may be later; Safe Fade uses this floor.
@@ -39,8 +41,12 @@ export type TransitionTrack = BeatGridAnalysis & {
   rhythmAnalysisVersion?: string | null;
   rhythmModelSha256?: string | null;
   rhythmBackend?: string | null;
+  analyzerVersion?: string | null;
+  schemaVersion?: string | null;
+  analysisStatus?: string | null;
   energyByBeat?: number[];
   vocalProbabilityByBeat?: number[];
+  bandEnergyByBeat?: Array<{ low: number; mid: number; high: number }>;
   structureBoundaries?: Array<{ beatIndex: number; confidence: number }>;
 };
 
@@ -113,6 +119,67 @@ const safeAutomation = () => {
   };
 };
 
+const meanWindow = (values: number[] | undefined, start: number, count: number) => {
+  if (!values?.length || start < 0 || values.length < start + count) return null;
+  const window = values.slice(start, start + count);
+  if (window.some((value) => !Number.isFinite(value))) return null;
+  return window.reduce((sum, value) => sum + value, 0) / window.length;
+};
+
+const filterFadeEvidence = (
+  source: TransitionTrack,
+  sourceGrid: ReturnType<typeof buildEffectiveBeatGrid>,
+  positionSeconds: number,
+  playbackRate: number
+) => {
+  if (sourceGrid.isManual || source.analysisOverrides?.autoMixDisabled) return null;
+  if (!hasCurrentBasicAnalysis(source) || source.schemaVersion !== TRACK_ANALYSIS_SCHEMA_VERSION ||
+    source.analysisStatus !== "ready") return null;
+  const beats = sourceGrid.beatsSeconds;
+  const automaticBeats = source.beatsSeconds ?? [];
+  const duration = Number(source.durationSeconds ?? source.duration);
+  if (!automaticBeats.length || automaticBeats.length !== beats.length ||
+    automaticBeats.some((beat, index) => !Number.isFinite(beat) || beat < 0 || beat > duration ||
+      (index > 0 && beat <= automaticBeats[index - 1]) || Math.abs(beat - beats[index]) > 1e-6)) return null;
+  if (!beats.length || source.energyByBeat?.length !== beats.length ||
+    source.vocalProbabilityByBeat?.length !== beats.length || source.bandEnergyByBeat?.length !== beats.length) return null;
+  const startTime = positionSeconds + TRANSITION_SCHEDULE_LEAD_SECONDS * playbackRate;
+  const endTime = startTime + FILTERED_FADE_SECONDS * playbackRate;
+  if (startTime < beats[0]) return null;
+  let start = beats.findIndex((beat) => beat > startTime);
+  start = start <= 0 ? 0 : start - 1;
+  const closingBoundary = beats.findIndex((beat) => beat >= endTime);
+  if (closingBoundary < 0 || closingBoundary <= start) return null;
+  const count = closingBoundary - start;
+  const bounded = (value: number) => Number.isFinite(value) && value >= 0 && value <= 1;
+  const normalizedBand = (band: unknown): band is { low: number; mid: number; high: number } => {
+    if (!band || typeof band !== "object") return false;
+    const candidate = band as { low?: unknown; mid?: unknown; high?: unknown };
+    return typeof candidate.low === "number" && typeof candidate.mid === "number" && typeof candidate.high === "number" &&
+      [candidate.low, candidate.mid, candidate.high].every(bounded) &&
+      Math.abs(candidate.low + candidate.mid + candidate.high - 1) <= 0.02;
+  };
+  const vocals: number[] = [];
+  const energies: number[] = [];
+  const bands: Array<{ low: number; mid: number; high: number }> = [];
+  for (let offset = 0; offset < count; offset += 1) {
+    const index = start + offset;
+    const vocal = source.vocalProbabilityByBeat[index];
+    const energy = source.energyByBeat[index];
+    const band = source.bandEnergyByBeat[index] as unknown;
+    if (!bounded(vocal) || !bounded(energy) || !normalizedBand(band)) return null;
+    vocals.push(vocal);
+    energies.push(energy);
+    bands.push(band);
+  }
+  const vocal = meanWindow(vocals, 0, count);
+  const energy = meanWindow(energies, 0, count);
+  if (vocal == null || energy == null) return null;
+  const high = bands.reduce((sum, band) => sum + band.high, 0) / bands.length;
+  const qualifies = vocal <= 0.38 && energy >= 0.18 && high >= 0.08;
+  return qualifies ? { vocal, energy, high } : null;
+};
+
 const labelTrack = (track: TransitionTrack, fallback: string) => track.trackId ?? fallback;
 const allowsAutomaticDownbeatCut = (track: TransitionTrack) =>
   hasCurrentEnhancedRhythm(track) &&
@@ -123,7 +190,7 @@ const allowsAutomaticDownbeatCut = (track: TransitionTrack) =>
 
 export const planAutomaticTransition = (
   input: TransitionPlanningInput
-): Readonly<TransitionPlanV2> => {
+): Readonly<TransitionPlanV3> => {
   const { source, target, sourceDeck, requestedAt } = input;
   const sourceGrid = buildEffectiveBeatGrid(source);
   const targetGrid = buildEffectiveBeatGrid(target);
@@ -330,6 +397,47 @@ export const planAutomaticTransition = (
     0.05,
     (source.duration - sourceDeck.positionSeconds) / sourcePlaybackRate
   );
+  const filterEvidence = filterFadeEvidence(source, sourceGrid, sourceDeck.positionSeconds, sourcePlaybackRate);
+  if (!manualOrDisabled && filterEvidence && sourceRemaining >= FILTERED_FADE_SECONDS + TRANSITION_SCHEDULE_LEAD_SECONDS &&
+    target.duration >= FILTERED_FADE_SECONDS + 0.05) {
+    const startTime = requestedAt + TRANSITION_SCHEDULE_LEAD_SECONDS;
+    return deepFreeze({
+      schemaVersion: TRANSITION_PLAN_SCHEMA_VERSION,
+      fromTrackId: labelTrack(source, "untracked-source"),
+      toTrackId: labelTrack(target, "untracked-target"),
+      template: "filtered-fade",
+      targetBpm: null,
+      sourceStartBeat: null,
+      targetStartBeat: null,
+      lengthBeats: null,
+      sourcePlaybackRate,
+      targetPlaybackRate: 1,
+      score: 0.2,
+      confidence: 0,
+      scoreBreakdown: {
+        beatConfidence: Math.min(sourceBeatConfidence, targetBeatConfidence),
+        downbeatConfidence: Math.min(sourceDownbeatConfidence, targetDownbeatConfidence),
+        stretch: 0,
+        outgoingVocalClarity: clamp01(1 - filterEvidence.vocal),
+        outgoingEnergy: clamp01(filterEvidence.energy),
+        outgoingHighFrequencyPresence: clamp01(filterEvidence.high)
+      },
+      eligibility: { longBlendEligible: false, reasons: [...new Set(reasons)] },
+      schedule: {
+        requestedAt,
+        startTime,
+        endTime: startTime + FILTERED_FADE_SECONDS,
+        durationSeconds: FILTERED_FADE_SECONDS,
+        targetCueSeconds: 0
+      },
+      automation: { ...safeAutomation(), filter: [20_000, 420] },
+      explanation: [
+        "Filtered Fade selected where local analysis estimates audible high-frequency energy and fewer vocal-like frequencies.",
+        "The outgoing song is briefly softened while the next song fades in.",
+        "No beat alignment, tempo stretch, or long percussion overlap is applied."
+      ]
+    });
+  }
   const schedulingLeadSeconds = Math.min(
     TRANSITION_SCHEDULE_LEAD_SECONDS,
     Math.max(0.01, sourceRemaining * 0.2)

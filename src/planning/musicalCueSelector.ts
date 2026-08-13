@@ -72,8 +72,8 @@ export const rankTrustedMusicalCues = (
         : -timeSeconds / Math.max(track.duration, 1);
       const reason = meanVocalProxy != null && meanVocalProxy <= 0.35
         ? nearStructureBoundary
-          ? "Lower-vocal trusted cue near a musical change."
-          : "Lower-vocal trusted cue."
+          ? "Trusted cue where the proxy estimates fewer vocal-like frequencies, near a musical change."
+          : "Trusted cue where the proxy estimates fewer vocal-like frequencies."
         : nearStructureBoundary
           ? "Trusted cue near a musical change."
           : "Best available trusted timing cue.";

@@ -1,6 +1,6 @@
 import { createDeckDspChain } from "../audio/deckDspChain";
 import { MASTER_DSP_V1 } from "../audio/masterDsp";
-import type { TransitionDspV1 } from "../audio/transitionDsp";
+import type { TransitionDspV2 } from "../audio/transitionDsp";
 import { validateTransitionDsp } from "../audio/transitionDsp";
 import { assessTransitionRenderQuality, type TransitionQualityGate } from "./renderTransition";
 
@@ -78,7 +78,7 @@ const scheduleDeck = (
   context: OfflineAudioContext,
   buffer: AudioBuffer,
   destination: AudioNode,
-  dsp: TransitionDspV1["source"],
+  dsp: TransitionDspV2["source"],
   startTime: number,
   offsetSeconds: number,
   gainStartTime: number,
@@ -96,6 +96,12 @@ const scheduleDeck = (
     const rampStart = gainStartTime + ramp.startOffsetSeconds;
     param.setValueAtTime(ramp.fromDb, rampStart);
     param.linearRampToValueAtTime(ramp.toDb, rampStart + ramp.durationSeconds);
+  }
+  if (dsp.filterSweep) {
+    const sweep = dsp.filterSweep;
+    const sweepStart = gainStartTime + sweep.startOffsetSeconds;
+    chain.filterCutoff.setValueAtTime(sweep.fromHz, sweepStart);
+    chain.filterCutoff.exponentialRampToValueAtTime(sweep.toHz, sweepStart + sweep.durationSeconds);
   }
   const source = context.createBufferSource();
   source.buffer = buffer;
@@ -129,7 +135,7 @@ export const computeTransitionRehearsalWindow = (
 export const renderTransitionRehearsal = async (
   sourceBuffer: AudioBuffer,
   targetBuffer: AudioBuffer,
-  dsp: TransitionDspV1,
+  dsp: TransitionDspV2,
   window: TransitionRehearsalWindow
 ): Promise<TransitionRehearsalRender> => {
   validateTransitionDsp(dsp);

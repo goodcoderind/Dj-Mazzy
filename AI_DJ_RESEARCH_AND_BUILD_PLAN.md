@@ -451,12 +451,12 @@ totalCost = pairCost(A, B) + transitionCost(bestPlan(A, B))
 Current transition record:
 
 ```ts
-type TransitionPlanV2 = {
-  schemaVersion: "transition-plan/v2";
+type TransitionPlanV3 = {
+  schemaVersion: "transition-plan/v3";
   fromTrackId: string;
   toTrackId: string;
   template: "phrase-blend" | "bass-swap" | "echo-drop" |
-            "downbeat-cut" | "safe-fade";
+            "downbeat-cut" | "filtered-fade" | "safe-fade";
   targetBpm: number | null;
   sourceStartBeat: number | null;
   targetStartBeat: number | null;
@@ -1806,7 +1806,8 @@ These are the active backlog, not reasons to discard the prototype.
   evidence is still non-authoritative:** the device runner now waits for the
   first scheduled frame on the Web Audio clock and receives an acknowledged
   audio-health reset before starting wall/audio duration measurement. A fresh
-  production-built one-minute run matched both clocks at 60.2 seconds, completed
+  current `mazzy-audio-engine/v2` production-built one-minute run measured 60.2
+  seconds on the wall clock and 60.1 seconds on the Web Audio clock, completed
   7/7 owned transitions, and reported no unexpected silence, invalid/clipped
   samples, processor errors, or warnings. `key-lock-crossfade-smoke/v4` adds a
   mode-bound one-minute minimum and completed 37/37 two-processor transitions
@@ -1817,6 +1818,36 @@ These are the active backlog, not reasons to discard the prototype.
   These interval and completion-ownership semantics are versioned as
   `device-soak-report/v3` / `mazzy-device-soak-runner/v3`; earlier v2 reports do
   not constitute this evidence.
+- **D-042 — Filtered Fade is a bounded fourth behavior, not a weaker safety
+  ranking:** `transition-plan/v3` and `transition-dsp/v2` add a 4.5-second
+  no-stretch equal-power handoff with one outgoing 20 kHz→420 Hz low-pass sweep.
+  It is available only when current `basic-worker/v5` evidence aligned across
+  the complete playing interval contains normalized beat-synchronous energy,
+  vocal-frequency-proxy, and band-energy values through the full sweep, with
+  audible energy, fewer vocal-like frequencies, and useful high-frequency
+  material. Manual grids, disabled tracks, missing/stale evidence, proxy-heavy
+  or near-silent sections, insufficient remaining audio,
+  and every malformed input fall back to Safe Fade. Filtered Fade and Safe Fade
+  share the same selection-safety rank, so presentation variety cannot bypass
+  queue order, no-repeat rules, or prefer a weaker pair. Live scheduling and the
+  offline rehearsal consume the same immutable sweep; completion, failure, and
+  Rescue restore both decks' prior cutoff. The diagnostics-only
+  `transition-rehearsal-browser-check/v3` compares a 3 kHz filtered render with
+  an otherwise identical unfiltered render in both early and late windows, so
+  the ordinary gain fade cannot masquerade as filter evidence. Cue, stereo,
+  continuity, trim, and determinism passed in the same fresh 48 kHz browser
+  run; the early filtered/reference RMS ratio was 1.008 and the late ratio was
+  0.062.
+  `party-autopilot-decision/v2`,
+  `party-autopilot-trace/v2`, `party-autopilot-evaluation/v2`, and the synthetic
+  soak v3 carry the new allowlisted template. This closes the four-behavior code
+  requirement, not real-song artistic preference, long-blend calibration,
+  key-lock promotion, or the literal two-hour device gate.
+  This narrowly supersedes D-013 only for choosing between equal-ranked,
+  no-stretch fallback presentations: the vocal-frequency proxy may authorize a
+  bounded filter sweep, but it still cannot authorize timing, tempo stretch,
+  phrase alignment, or a higher-ranked song choice and is never described as
+  verified vocal detection.
 
 ### Open questions
 
@@ -1848,7 +1879,7 @@ Do these in order when implementation begins:
 7. Benchmark at least two beat/downbeat approaches on a small golden set.
 8. Add beat-grid storage, visualization, confidence, and manual correction.
 9. Replace fixed-second Auto Mix with a deterministic 32-beat phrase transition.
-   **Implemented in `transition-plan/v2`; live eligibility remains locked by the
+   **Implemented in `transition-plan/v3`; live eligibility remains locked by the
    analyzer limitation.**
 10. Implement safe fallback before adding more impressive templates.
     **Implemented as the visible, no-stretch Safe Fade.**

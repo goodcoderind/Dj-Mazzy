@@ -56,4 +56,5 @@ describe("transition rehearsal window", () => {
       .toContain("Rendered transition contains non-finite samples.");
     expect(() => assessStereoTransitionQuality(new Float32Array(2), new Float32Array(3), sampleRate)).toThrow("equal");
   });
+
 });

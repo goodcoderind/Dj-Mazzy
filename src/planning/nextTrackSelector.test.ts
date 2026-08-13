@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
-import type { TransitionPlanV2 } from "../domain/transitionPlan";
+import type { TransitionPlanV3 } from "../domain/transitionPlan";
 import { rankNextTracks } from "./nextTrackSelector";
 
-const plan = (template: TransitionPlanV2["template"]) => ({ template }) as TransitionPlanV2;
+const plan = (template: TransitionPlanV3["template"]) => ({ template }) as TransitionPlanV3;
 
 describe("automatic next-track selection", () => {
   it("prioritizes transition safety before key or tempo similarity", () => {

@@ -798,4 +798,17 @@ describe("DeckEngine", () => {
       { type: "ramp", value: -12, time: 14 }
     ]);
   });
+
+  it("keeps the transition-filter sweep on the Web Audio clock", () => {
+    const { context, engine } = createEngine();
+    const deck = engine.getDeck("a");
+    expect(deck.scheduleFilterSweep(20_000, 420, 8, 4)).toBe(10);
+    const cutoff = context.filters[3].frequency;
+    expect(cutoff.events).toEqual([
+      { type: "cancel", time: 10 },
+      { type: "value", value: 20_000, time: 10 },
+      { type: "ramp", value: 420, time: 14 }
+    ]);
+    expect(deck.setFilterCutoff(30_000)).toBe(20_000);
+  });
 });

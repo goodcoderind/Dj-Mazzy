@@ -1339,7 +1339,7 @@ summary:focus-visible {
   padding: 8px;
   border: 1px solid rgba(74, 158, 255, 0.35);
   color: #74adf2;
-  font-size: 9px;
+  font-size: 0.75rem;
   letter-spacing: 0.1em;
   text-transform: uppercase;
 }
@@ -1350,9 +1350,14 @@ summary:focus-visible {
   color: #c8a96e;
 }
 
+.pair-plan-preview.filtered {
+  border-color: rgba(129, 206, 167, 0.5);
+  color: #81cea7;
+}
+
 .pair-plan-preview small {
   color: #8c8c8c;
-  font-size: 8px;
+  font-size: 0.75rem;
   letter-spacing: 0.04em;
   line-height: 1.4;
   text-transform: none;
@@ -1614,7 +1619,7 @@ summary:focus-visible {
   border: 1px solid #2a2a2a;
   background: #0d0d0d;
   color: #777777;
-  font-size: 9px;
+  font-size: 0.75rem;
   line-height: 1.45;
   letter-spacing: 0.06em;
 }
@@ -1629,6 +1634,14 @@ summary:focus-visible {
 
 .transition-inspector.handoff {
   border-color: rgba(200, 169, 110, 0.5);
+}
+
+.transition-inspector.filtered {
+  border-color: rgba(129, 206, 167, 0.5);
+}
+
+.transition-inspector.filtered .transition-inspector-header {
+  color: #81cea7;
 }
 
 .transition-inspector-header {

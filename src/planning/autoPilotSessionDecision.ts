@@ -5,10 +5,10 @@ import type { TransitionTrack } from "./TransitionPlanner";
 import { planAutomaticTransition } from "./TransitionPlanner";
 import { shouldArmAutoPilotTransition } from "./autoPilot";
 import { buildAutoPilotPlanningIds } from "./autoPilotCrate";
-import type { TransitionPlanV2 } from "../domain/transitionPlan";
+import type { TransitionPlanV3 } from "../domain/transitionPlan";
 import type { KeyLockCapability } from "../domain/keyLockCapability";
 
-export const PARTY_AUTOPILOT_DECISION_VERSION = "party-autopilot-decision/v1" as const;
+export const PARTY_AUTOPILOT_DECISION_VERSION = "party-autopilot-decision/v2" as const;
 
 export type AutoPilotDeck = "a" | "b";
 
@@ -60,8 +60,8 @@ export type AutoPilotSessionDecision =
   | Readonly<{ version: typeof PARTY_AUTOPILOT_DECISION_VERSION; kind: "declare-final"; sourceTrackId: string | null }>
   | Readonly<{ version: typeof PARTY_AUTOPILOT_DECISION_VERSION; kind: "wait-target"; reason: "target-active" | "invalid-observation" | "unsupported-template" }>
   | Readonly<{ version: typeof PARTY_AUTOPILOT_DECISION_VERSION; kind: "wait-owned-transition"; transitionKey: string }>
-  | Readonly<{ version: typeof PARTY_AUTOPILOT_DECISION_VERSION; kind: "wait-cue"; transitionKey: string; plan: Readonly<TransitionPlanV2> }>
-  | Readonly<{ version: typeof PARTY_AUTOPILOT_DECISION_VERSION; kind: "arm"; transitionKey: string; plan: Readonly<TransitionPlanV2> }>;
+  | Readonly<{ version: typeof PARTY_AUTOPILOT_DECISION_VERSION; kind: "wait-cue"; transitionKey: string; plan: Readonly<TransitionPlanV3> }>
+  | Readonly<{ version: typeof PARTY_AUTOPILOT_DECISION_VERSION; kind: "arm"; transitionKey: string; plan: Readonly<TransitionPlanV3> }>;
 
 const finiteNonNegative = (value: number) => Number.isFinite(value) && value >= 0;
 
@@ -210,7 +210,7 @@ export const decideAutoPilotSessionTick = (
     return Object.freeze({ version, kind: "wait-owned-transition", transitionKey });
   }
   const plan = planPair(input.nowSeconds, input.source, input.target, input.keyLockCapability);
-  if (!["safe-fade", "downbeat-cut", "phrase-blend"].includes(plan.template)) {
+  if (!["safe-fade", "filtered-fade", "downbeat-cut", "phrase-blend"].includes(plan.template)) {
     return Object.freeze({ version, kind: "wait-target", reason: "unsupported-template" });
   }
   const remainingSeconds = Math.max(
@@ -220,7 +220,7 @@ export const decideAutoPilotSessionTick = (
   );
   const untilPlannedStartSeconds = plan.schedule.startTime - input.nowSeconds;
   if (!shouldArmAutoPilotTransition({
-    template: plan.template as "safe-fade" | "downbeat-cut" | "phrase-blend",
+    template: plan.template as "safe-fade" | "filtered-fade" | "downbeat-cut" | "phrase-blend",
     remainingSeconds,
     untilPlannedStartSeconds
   })) {

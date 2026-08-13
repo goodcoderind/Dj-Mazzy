@@ -34,7 +34,7 @@ const modeDurations: Record<DeviceSoakMode, number> = {
 const contextStates = new Set(["suspended", "running", "closed", "interrupted"]);
 
 export const buildDeviceSoakReport = (input: DeviceSoakInput) => {
-  if (input.buildContract !== "mazzy-audio-engine/v1" || input.runnerContract !== "mazzy-device-soak-runner/v3") {
+  if (input.buildContract !== "mazzy-audio-engine/v2" || input.runnerContract !== "mazzy-device-soak-runner/v3") {
     throw new RangeError("Device soak evidence requires an allowlisted build contract");
   }
   if (![input.requestedDurationSeconds, input.wallElapsedSeconds, input.audioElapsedSeconds,

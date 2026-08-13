@@ -1,7 +1,7 @@
 import { SAFE_FADE_SECONDS } from "./TransitionPlanner";
 
 export type AutoPilotDecisionInput = {
-  template: "phrase-blend" | "downbeat-cut" | "safe-fade";
+  template: "phrase-blend" | "downbeat-cut" | "filtered-fade" | "safe-fade";
   remainingSeconds: number;
   untilPlannedStartSeconds: number;
 };
@@ -18,6 +18,9 @@ export const shouldArmAutoPilotTransition = ({
   }
   if (template === "phrase-blend") {
     return remainingSeconds <= 30 && untilPlannedStartSeconds >= 0 && untilPlannedStartSeconds <= 8;
+  }
+  if (template === "filtered-fade") {
+    return remainingSeconds <= 6 && untilPlannedStartSeconds >= 0 && untilPlannedStartSeconds <= 0.5;
   }
   return remainingSeconds <= SAFE_FADE_SECONDS + 0.25;
 };

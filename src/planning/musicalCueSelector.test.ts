@@ -19,7 +19,7 @@ describe("role-aware musical cue ranking", () => {
     expect(ranked.every((cue) => input.automaticRhythmTrust.usableCutBeatIndices.includes(cue.beatIndex))).toBe(true);
   });
 
-  it("prefers a lower-vocal opening cue without jumping deep into the song", () => {
+  it("prefers a lower vocal-frequency-proxy opening cue without jumping deep into the song", () => {
     const input = track();
     input.vocalProbabilityByBeat.fill(0.1, 8, 16);
     input.structureBoundaries.push({ beatIndex: 8, confidence: 0.6 });

@@ -47,6 +47,7 @@ export class DeckEngine {
   private readonly lowFilter: BiquadFilterNode;
   private readonly midFilter: BiquadFilterNode;
   private readonly highFilter: BiquadFilterNode;
+  private readonly transitionFilter: BiquadFilterNode;
   private readonly trackTrim: GainNode;
   private readonly transportGate: GainNode;
   private readonly listeners = new Set<DeckListener>();
@@ -82,6 +83,7 @@ export class DeckEngine {
     this.lowFilter = chain.nodes.low;
     this.midFilter = chain.nodes.mid;
     this.highFilter = chain.nodes.high;
+    this.transitionFilter = chain.nodes.transitionFilter;
     this.trackTrim = chain.nodes.trim;
     this.transportGate = context.createGain();
     this.transportGate.gain.value = 0;
@@ -567,6 +569,33 @@ export class DeckEngine {
       mid: this.midFilter.gain.value,
       high: this.highFilter.gain.value
     });
+  }
+
+  getFilterCutoff() {
+    return this.transitionFilter.frequency.value;
+  }
+
+  setFilterCutoff(value: number) {
+    if (!Number.isFinite(value)) throw new RangeError("filter cutoff must be finite");
+    const safeValue = Math.max(200, Math.min(20_000, value));
+    const now = this.audioEngine.clock.now();
+    this.transitionFilter.frequency.cancelScheduledValues(now);
+    this.transitionFilter.frequency.setValueAtTime(safeValue, now);
+    return safeValue;
+  }
+
+  scheduleFilterSweep(fromHz: number, toHz: number, startTime: number, durationSeconds: number) {
+    if (![fromHz, toHz, startTime, durationSeconds].every(Number.isFinite) || durationSeconds <= 0) {
+      throw new RangeError("filter sweep values must be finite with a positive duration");
+    }
+    const scheduledStart = this.audioEngine.clock.resolveScheduleTime(startTime);
+    const param = this.transitionFilter.frequency;
+    const safeFrom = Math.max(200, Math.min(20_000, fromHz));
+    const safeTo = Math.max(200, Math.min(20_000, toHz));
+    param.cancelScheduledValues(scheduledStart);
+    param.setValueAtTime(safeFrom, scheduledStart);
+    param.exponentialRampToValueAtTime(safeTo, scheduledStart + durationSeconds);
+    return scheduledStart;
   }
 
   scheduleEqBandRamp(

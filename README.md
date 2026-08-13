@@ -62,13 +62,18 @@ triggered, it:
    on the selected bar starts with no tempo stretch.
 4. For future calibrated grids, the same planner can perform an exact 32-beat
    phrase blend with one deliberate bass handoff.
-5. Otherwise, performs a conservative 3.5-second **Safe Fade** with no tempo
+5. When current basic analysis finds an audible outgoing section with fewer
+   vocal-like frequencies,
+   performs a 4.5-second **Filtered Fade**: an equal-power handoff plus one
+   bounded outgoing low-pass sweep, with no beat matching or tempo stretch.
+6. Otherwise, performs a conservative 3.5-second **Safe Fade** with no tempo
    stretch or long percussion overlap.
-6. Shows the selected template and the first reason a long blend was rejected.
-7. Schedules starts, gain curves, and EQ automation against the Web Audio
+7. Shows the selected template and the first reason a long blend was rejected.
+8. Schedules starts, gain curves, filter/EQ automation, and restoration against the Web Audio
    clock; animation frames only update the display.
 
-The approved plan is compiled into a versioned, immutable DSP description using
+The current `transition-plan/v3` is compiled into immutable `transition-dsp/v2`
+using
 the decks' actual trim and EQ state. Live scheduling consumes that description;
 the DSP compiler cannot change transition eligibility or silently substitute a
 different template.
@@ -121,10 +126,10 @@ device stability, or human preference. No rehearsal audio or feedback is
 persisted.
 
 A deterministic three-hour Party Autopilot coordinator soak now drives the same
-pure decision function used by the live app. It therefore exercises the real
+`party-autopilot-decision/v2` function used by the live app. It therefore exercises the real
 queue-first two-song lookahead, library continuation, transition-plan arm
 windows, target cue offsets, no-repeat history, exact final-track ownership, and
-production trace evaluator. A Rescue correctly ends the unattended observation
+`party-autopilot-trace/v2` evaluator. A Rescue correctly ends the unattended observation
 in a paused state. This is state/coordinator evidence only: it does not exercise
 browser decoding, Web Audio rendering, analysis workers, musical quality, or
 speaker output, and it does not replace the visible two-hour device check.
@@ -203,12 +208,28 @@ page verifies browser cue timing, 1.25× source playback, stereo isolation,
 continuity, deterministic rendering, and trim at 48 kHz without playing or
 saving its generated signals; it is excluded from the production build.
 
-The current production-built one-minute check completed 60.2 seconds on both
-the wall and Web Audio clocks with 7/7 owned transitions, zero unexpected silent
-intervals, invalid/clipped samples, processor errors, or report warnings. Its
-interval begins only after the first scheduled audio frame and an acknowledged
-health reset, so browser startup is not misreported as party silence. This is
-useful smoke evidence only; the literal two-hour run remains open.
+Filtered Fade is the fourth implemented transition behavior. It is deliberately
+not ranked above Safe Fade when choosing a song: both are no-beat fallbacks, and
+the feature only changes presentation after safety and host intent have chosen
+the pair. It requires current `basic-worker/v5` energy, vocal-frequency proxy,
+and band-energy evidence aligned through the full outgoing sweep; missing,
+stale, vocal-like-frequency-heavy, near-silent,
+manual, disabled, or too-short inputs use plain Safe Fade. The v3 browser
+rehearsal compares filtered and unfiltered renders of the same outgoing 3 kHz
+signal in matching early and late windows, preventing the ordinary gain fade
+from being mistaken for filter evidence. In the fresh 48 kHz browser run the
+early filtered/reference RMS ratio was 1.008 and the late ratio was 0.062. Cue,
+stereo, continuity, trim, and determinism passed in the same run. This is
+deterministic DSP evidence, not a claim that every song will sound artistically
+good.
+
+The current audio-engine/v2 production-built one-minute check completed 60.2
+seconds on the wall clock and 60.1 seconds on the Web Audio clock. Its interval
+began only after the first scheduled audio frame and an acknowledged health
+reset, so browser startup was not misreported as party silence. It completed
+7/7 owned transitions with zero silence, invalid/clipped samples, processor
+errors, ownership failures, or warnings. This is useful smoke evidence only;
+the literal two-hour run remains open.
 
 By default, queued songs retain first priority and Autopilot may continue from
 the remaining eligible library only when that queue is exhausted. The host can

@@ -54,11 +54,15 @@ const transitionLabel = (template) => template === "phrase-blend"
   ? "SMOOTH PHRASE BLEND"
   : template === "downbeat-cut"
     ? "SHORT BAR-ALIGNED HANDOFF"
+    : template === "filtered-fade"
+      ? "FILTERED FADE"
     : "SAFE FADE";
 const transitionButtonLabel = (template) => template === "phrase-blend"
   ? "AUTO MIX · PHRASE BLEND"
   : template === "downbeat-cut"
     ? "AUTO MIX · BAR HANDOFF"
+    : template === "filtered-fade"
+      ? "AUTO MIX · FILTERED FADE"
     : "AUTO MIX · SAFE FADE";
 const previewReason = (plan) => {
   const reasons = plan?.eligibility?.reasons ?? [];
@@ -1264,7 +1268,9 @@ export default function App() {
     let crossfadeSchedule = null;
     const eqSnapshot = {
       sourceLow: Number(sourceRef.current?.getEqBandGain?.("low") ?? 0),
-      targetLow: Number(targetRef.current?.getEqBandGain?.("low") ?? 0)
+      targetLow: Number(targetRef.current?.getEqBandGain?.("low") ?? 0),
+      sourceFilter: Number(sourceRef.current?.getDspSnapshot?.()?.filterCutoffHz ?? 20_000),
+      targetFilter: Number(targetRef.current?.getDspSnapshot?.()?.filterCutoffHz ?? 20_000)
     };
 
     try {
@@ -1328,11 +1334,34 @@ export default function App() {
         targetRef.current?.scheduleEqBandRamp?.(entry.band, entry.ramp.fromDb, entry.ramp.toDb,
           preparedPlan.schedule.startTime + entry.ramp.startOffsetSeconds, entry.ramp.durationSeconds);
       }
+      if (transitionDsp.source.filterSweep) {
+        const sweep = transitionDsp.source.filterSweep;
+        sourceRef.current?.scheduleFilterSweep?.(sweep.fromHz, sweep.toHz,
+          preparedPlan.schedule.startTime + sweep.startOffsetSeconds, sweep.durationSeconds);
+      }
       const completeTransition = () => {
         if (activeTransitionScheduleRef.current?.id !== crossfadeSchedule.id) return;
         if (!engine.finishCrossfade(crossfadeSchedule.id)) {
           partyTraceRecorderRef.current?.markInterrupted?.();
           updatePartyDiagnosticEvaluation();
+          transitionCompletionCancelRef.current = null;
+          activeTransitionScheduleRef.current = null;
+          sourceRef.current?.pause?.();
+          sourceRef.current?.setEqBandGain?.("low", eqSnapshot.sourceLow);
+          targetRef.current?.setEqBandGain?.("low", eqSnapshot.targetLow);
+          sourceRef.current?.setFilterCutoff?.(eqSnapshot.sourceFilter);
+          targetRef.current?.setFilterCutoff?.(eqSnapshot.targetFilter);
+          setFade(targetDeck === "b" ? 1 : 0);
+          setAutoMixBeats(0);
+          setAutoMixing(false);
+          setTransitionInfo((current) => (current ? { ...current, active: false } : current));
+          setMasterDeck(targetDeck);
+          autoPilotEnabledRef.current = false;
+          setAutoPilotEnabled(false);
+          const now = engine.clock.now();
+          partySessionClockRef.current = pausePartySessionClock(partySessionClockRef.current, now);
+          setPartyClockDisplay(partySessionClockSnapshot(partySessionClockRef.current, now));
+          setAutoPilotChoice({ trackId: null, reason: "Transition ownership was lost. The next song was kept and Autopilot paused." });
           return;
         }
         const traceTransition = activeTransitionScheduleRef.current?.traceTransition;
@@ -1350,6 +1379,8 @@ export default function App() {
         sourceRef.current?.pause?.();
         sourceRef.current?.setEqBandGain?.("low", eqSnapshot.sourceLow);
         targetRef.current?.setEqBandGain?.("low", eqSnapshot.targetLow);
+        sourceRef.current?.setFilterCutoff?.(eqSnapshot.sourceFilter);
+        targetRef.current?.setFilterCutoff?.(eqSnapshot.targetFilter);
         setFade(targetDeck === "b" ? 1 : 0);
         setAutoMixBeats(0);
         setAutoMixing(false);
@@ -1437,6 +1468,8 @@ export default function App() {
       autoPilotTransitionKeyRef.current = null;
       sourceRef.current?.setEqBandGain?.("low", eqSnapshot.sourceLow);
       targetRef.current?.setEqBandGain?.("low", eqSnapshot.targetLow);
+      sourceRef.current?.setFilterCutoff?.(eqSnapshot.sourceFilter);
+      targetRef.current?.setFilterCutoff?.(eqSnapshot.targetFilter);
       targetRef.current?.pause?.();
       setAutoMixing(false);
       setAutoMixBeats(0);
@@ -1484,6 +1517,8 @@ export default function App() {
     const targetRef = schedule.target === "a" ? deckARef : deckBRef;
     sourceRef.current?.setEqBandGain?.("low", schedule.sourceLow ?? 0);
     targetRef.current?.setEqBandGain?.("low", schedule.targetLow ?? 0);
+    sourceRef.current?.setFilterCutoff?.(schedule.sourceFilter ?? 20_000);
+    targetRef.current?.setFilterCutoff?.(schedule.targetFilter ?? 20_000);
     stopRef.current?.pause?.();
     cancelAnimationFrame(autoMixCountdownFrameRef.current);
     transitionCompletionCancelRef.current?.();
@@ -1825,7 +1860,7 @@ export default function App() {
   const partyModeStatus = partyEndingFinalTrack
     ? "Final song is playing. The session will finish when it ends."
     : autoMixing
-    ? `Changing songs with ${transitionInfo?.template === "downbeat-cut" ? "a short timed handoff" : "a conservative fade"}.`
+    ? `Changing songs with ${transitionInfo?.template === "downbeat-cut" ? "a short timed handoff" : transitionInfo?.template === "filtered-fade" ? "an intentional filtered fade" : "a conservative fade"}.`
     : autoPilotEnabled
       ? "Party Autopilot is choosing and preparing the next song."
       : sourcePartyPlaying
@@ -2003,7 +2038,7 @@ export default function App() {
                 : autoMixing
                 ? transitionInfo?.template === "phrase-blend"
                   ? `PHRASE BLEND: ${autoMixBeats ?? 0} beats`
-                  : `${transitionInfo?.template === "downbeat-cut" ? "BAR HANDOFF" : "SAFE FADE"}: ${Number(autoMixBeats ?? 0).toFixed(1)}s`
+                  : `${transitionInfo?.template === "downbeat-cut" ? "BAR HANDOFF" : transitionInfo?.template === "filtered-fade" ? "FILTERED FADE" : "SAFE FADE"}: ${Number(autoMixBeats ?? 0).toFixed(1)}s`
                 : pairPreview?.status === "source-paused"
                   ? `START DECK ${String(pairPreview.sourceDeck).toUpperCase()} TO AUTO MIX`
                   : pairPreview?.plan
@@ -2181,13 +2216,15 @@ export default function App() {
               </section>
             )}
             {!autoMixing && pairPreview?.plan && (
-              <div className={`pair-plan-preview ${pairPreview.plan.template === "downbeat-cut" ? "handoff" : pairPreview.plan.template === "phrase-blend" ? "phrase" : "safe"}`} aria-live="polite">
+              <div className={`pair-plan-preview ${pairPreview.plan.template === "downbeat-cut" ? "handoff" : pairPreview.plan.template === "phrase-blend" ? "phrase" : pairPreview.plan.template === "filtered-fade" ? "filtered" : "safe"}`} aria-live="polite">
                 <span>{`NEXT · ${transitionLabel(pairPreview.plan.template)}`}</span>
                 <small>
                   {pairPreview.plan.template === "downbeat-cut"
                     ? pairPreview.plan.explanation[0]
                     : pairPreview.plan.template === "phrase-blend"
                       ? "This pair passed the calibrated long-blend gate."
+                      : pairPreview.plan.template === "filtered-fade"
+                        ? "Local analysis found a suitable section for briefly softening the outgoing song without beat matching."
                       : previewReason(pairPreview.plan)}
                 </small>
               </div>
@@ -2215,7 +2252,7 @@ export default function App() {
             {transitionInfo && (
               <section
                 className={`transition-inspector ${
-                  transitionInfo.template === "phrase-blend" ? "phrase" : transitionInfo.template === "downbeat-cut" ? "handoff" : "safe"
+                  transitionInfo.template === "phrase-blend" ? "phrase" : transitionInfo.template === "downbeat-cut" ? "handoff" : transitionInfo.template === "filtered-fade" ? "filtered" : "safe"
                 }`}
                 aria-live="polite"
               >

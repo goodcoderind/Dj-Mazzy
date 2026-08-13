@@ -1,5 +1,5 @@
-export const PARTY_AUTOPILOT_TRACE_SCHEMA_VERSION = "party-autopilot-trace/v1" as const;
-export const PARTY_AUTOPILOT_EVALUATION_SCHEMA_VERSION = "party-autopilot-evaluation/v1" as const;
+export const PARTY_AUTOPILOT_TRACE_SCHEMA_VERSION = "party-autopilot-trace/v2" as const;
+export const PARTY_AUTOPILOT_EVALUATION_SCHEMA_VERSION = "party-autopilot-evaluation/v2" as const;
 
 export type PartyDeck = "a" | "b";
 export type PartyTrackOrdinal = number;
@@ -19,7 +19,7 @@ export type PartyAutopilotEvent = EventBase & (
   | Readonly<{ type: "preload-settled"; operation: number; outcome: "committed" | "failed" | "superseded" | "discarded" }>
   | Readonly<{ type: "arm-started"; operation: number; origin: "autopilot" | "host" }>
   | Readonly<{ type: "arm-settled"; operation: number; outcome: "scheduled" | "cancelled" | "failed" }>
-  | Readonly<{ type: "transition-scheduled"; transition: number; sourceTrackOrdinal: PartyTrackOrdinal; sourceLoadOrdinal: PartyLoadOrdinal; targetTrackOrdinal: PartyTrackOrdinal; targetLoadOrdinal: PartyLoadOrdinal; ownership: "autopilot" | "host"; template: "safe-fade" | "downbeat-cut" | "phrase-blend" }>
+  | Readonly<{ type: "transition-scheduled"; transition: number; sourceTrackOrdinal: PartyTrackOrdinal; sourceLoadOrdinal: PartyLoadOrdinal; targetTrackOrdinal: PartyTrackOrdinal; targetLoadOrdinal: PartyLoadOrdinal; ownership: "autopilot" | "host"; template: "safe-fade" | "filtered-fade" | "downbeat-cut" | "phrase-blend" }>
   | Readonly<{ type: "transition-completed"; transition: number; targetTrackOrdinal: PartyTrackOrdinal; targetLoadOrdinal: PartyLoadOrdinal }>
   | Readonly<{ type: "transition-rescued"; transition: number; kept: "source" | "target" }>
   | Readonly<{ type: "final-declared"; deck: PartyDeck; trackOrdinal: PartyTrackOrdinal; loadOrdinal: PartyLoadOrdinal }>
@@ -122,7 +122,7 @@ const projectEvent = (event: PartyAutopilotEventInput, sequence: number): PartyA
       if (!isPositiveInteger(event.transition) || !isPositiveInteger(event.sourceTrackOrdinal) ||
         !isPositiveInteger(event.sourceLoadOrdinal) || !isPositiveInteger(event.targetTrackOrdinal) ||
         !isPositiveInteger(event.targetLoadOrdinal) || !["autopilot", "host"].includes(event.ownership) ||
-        !["safe-fade", "downbeat-cut", "phrase-blend"].includes(event.template)) return null;
+        !["safe-fade", "filtered-fade", "downbeat-cut", "phrase-blend"].includes(event.template)) return null;
       return Object.freeze({ ...base, type: event.type, transition: event.transition, sourceTrackOrdinal: event.sourceTrackOrdinal, sourceLoadOrdinal: event.sourceLoadOrdinal, targetTrackOrdinal: event.targetTrackOrdinal, targetLoadOrdinal: event.targetLoadOrdinal, ownership: event.ownership, template: event.template });
     case "transition-completed":
       if (!isPositiveInteger(event.transition) || !isPositiveInteger(event.targetTrackOrdinal) ||
@@ -323,7 +323,7 @@ export const evaluatePartyAutopilotTrace = (trace: PartyAutopilotTrace): PartyAu
           !isPositiveInteger(event.sourceLoadOrdinal) || !isPositiveInteger(event.targetTrackOrdinal) ||
           !isPositiveInteger(event.targetLoadOrdinal) ||
           !["autopilot", "host"].includes(event.ownership) ||
-          !["safe-fade", "downbeat-cut", "phrase-blend"].includes(event.template)) {
+          !["safe-fade", "filtered-fade", "downbeat-cut", "phrase-blend"].includes(event.template)) {
           failures.add("malformed-event");
         }
         if (playedTracks.has(event.targetTrackOrdinal)) failures.add("track-repeated");

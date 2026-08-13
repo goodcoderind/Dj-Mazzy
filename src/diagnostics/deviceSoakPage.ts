@@ -197,7 +197,7 @@ const runDeviceSoak = async (mode: DeviceSoakMode) => {
       activeEngine.setExpectedOutputActive(false);
       await new Promise((resolve) => window.setTimeout(resolve, 1_050));
       const report = buildDeviceSoakReport({
-        buildContract: "mazzy-audio-engine/v1",
+        buildContract: "mazzy-audio-engine/v2",
         runnerContract: "mazzy-device-soak-runner/v3",
         mode,
         requestedDurationSeconds,

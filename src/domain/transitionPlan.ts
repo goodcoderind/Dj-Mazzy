@@ -5,6 +5,7 @@ export type TransitionTemplate =
   | "bass-swap"
   | "echo-drop"
   | "downbeat-cut"
+  | "filtered-fade"
   | "safe-fade";
 
 export type EqPoint = {
@@ -13,7 +14,7 @@ export type EqPoint = {
   high: number;
 };
 
-export type TransitionPlanV2 = {
+export type TransitionPlanV3 = {
   schemaVersion: typeof TRANSITION_PLAN_SCHEMA_VERSION;
   fromTrackId: string;
   toTrackId: string;

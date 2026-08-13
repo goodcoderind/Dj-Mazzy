@@ -21,7 +21,7 @@ const health = (overrides = {}) => ({
 });
 
 const valid = (overrides = {}) => ({
-  buildContract: "mazzy-audio-engine/v1",
+  buildContract: "mazzy-audio-engine/v2",
   runnerContract: "mazzy-device-soak-runner/v3" as const,
   mode: "smoke-1m" as const,
   requestedDurationSeconds: 60,

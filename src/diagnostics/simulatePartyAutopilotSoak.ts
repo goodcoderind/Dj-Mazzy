@@ -6,7 +6,7 @@ import type { TransitionTrack } from "../planning/TransitionPlanner";
 import type { KeyLockCapability } from "../domain/keyLockCapability";
 import { createPartyAutopilotTraceRecorder, evaluatePartyAutopilotTrace, type PartyAutopilotEvaluation } from "./partyAutopilotTrace";
 
-export const PARTY_AUTOPILOT_SOAK_SCHEMA_VERSION = "party-autopilot-coordinator-soak/v2" as const;
+export const PARTY_AUTOPILOT_SOAK_SCHEMA_VERSION = "party-autopilot-coordinator-soak/v3" as const;
 
 export type SimulatedPartyTrack = Readonly<{
   id: string;
@@ -56,7 +56,7 @@ export type PartyAutopilotSoakResult = Readonly<{
   transitionAttempts: number;
   successfulHandoffs: number;
   rescueEvents: readonly SimulatedPartyRescueEvent[];
-  transitionTemplates: Readonly<Record<"safe-fade" | "downbeat-cut" | "phrase-blend", number>>;
+  transitionTemplates: Readonly<Record<"safe-fade" | "filtered-fade" | "downbeat-cut" | "phrase-blend", number>>;
   evaluation: PartyAutopilotEvaluation;
   errors: readonly string[];
 }>;
@@ -133,7 +133,7 @@ export const simulatePartyAutopilotSoak = (options: PartyAutopilotSoakOptions): 
   const errors: string[] = [];
   const playedTrackIds = [initial];
   const rescueEvents: SimulatedPartyRescueEvent[] = [];
-  const transitionTemplates = { "safe-fade": 0, "downbeat-cut": 0, "phrase-blend": 0 };
+  const transitionTemplates = { "safe-fade": 0, "filtered-fade": 0, "downbeat-cut": 0, "phrase-blend": 0 };
   let queue = [...new Set(options.queuedTrackIds ?? options.tracks.slice(1).map((track) => track.id))]
     .filter((id) => byId.has(id) && id !== initial);
   let queueRevision = 1;
@@ -224,8 +224,8 @@ export const simulatePartyAutopilotSoak = (options: PartyAutopilotSoakOptions): 
     }
     if (decision.kind === "wait-cue") {
       const remaining = Math.max(0, (source.durationSeconds - sourcePosition) / sourcePlaybackRate);
-      const templateRemaining = decision.plan.template === "phrase-blend" ? 30 : decision.plan.template === "downbeat-cut" ? 20 : 3.75;
-      const templateLead = decision.plan.template === "phrase-blend" ? 8 : decision.plan.template === "downbeat-cut" ? 6 : Number.POSITIVE_INFINITY;
+      const templateRemaining = decision.plan.template === "phrase-blend" ? 30 : decision.plan.template === "downbeat-cut" ? 20 : decision.plan.template === "filtered-fade" ? 6 : 3.75;
+      const templateLead = decision.plan.template === "phrase-blend" ? 8 : decision.plan.template === "downbeat-cut" ? 6 : decision.plan.template === "filtered-fade" ? 0.5 : Number.POSITIVE_INFINITY;
       const advanceSeconds = Math.max(0.05, remaining - templateRemaining, decision.plan.schedule.startTime - now - templateLead);
       advance(advanceSeconds);
       continue;

@@ -1,5 +1,5 @@
 import { MASTER_DSP_V1 } from "../audio/masterDsp";
-import { TRANSITION_DSP_VERSION, type TransitionDspV1 } from "../audio/transitionDsp";
+import { TRANSITION_DSP_VERSION, type TransitionDspV2 } from "../audio/transitionDsp";
 import { TRANSITION_PLAN_SCHEMA_VERSION } from "../domain/versions";
 import { renderTransitionRehearsal } from "./transitionRehearsal";
 
@@ -24,7 +24,7 @@ const createBuffer = (left: (time: number) => number, right: (time: number) => n
   return buffer;
 };
 
-const dsp = (trimDb = 0): TransitionDspV1 => Object.freeze({
+const dsp = (trimDb = 0): TransitionDspV2 => Object.freeze({
   schemaVersion: TRANSITION_DSP_VERSION,
   planSchemaVersion: TRANSITION_PLAN_SCHEMA_VERSION,
   template: "safe-fade",
@@ -35,17 +35,35 @@ const dsp = (trimDb = 0): TransitionDspV1 => Object.freeze({
     trimDb,
     gainCurve: Object.freeze([1, 0]),
     initialEqDb: Object.freeze({ low: 0, mid: 0, high: 0 }),
-    eqRamps: Object.freeze([])
+    eqRamps: Object.freeze([]),
+    filterSweep: null
   }),
   target: Object.freeze({
     playbackRate: 1,
     trimDb: 0,
     gainCurve: Object.freeze([0, 1]),
     initialEqDb: Object.freeze({ low: 0, mid: 0, high: 0 }),
-    eqRamps: Object.freeze([])
+    eqRamps: Object.freeze([]),
+    filterSweep: null
   }),
   outputStage: "pre-master",
   requiredMasterVersion: MASTER_DSP_V1.version
+});
+
+const filteredDsp = (): TransitionDspV2 => Object.freeze({
+  ...dsp(),
+  template: "filtered-fade",
+  source: Object.freeze({
+    ...dsp().source,
+    playbackRate: 1,
+    filterSweep: Object.freeze({ startOffsetSeconds: 0, durationSeconds: 1, fromHz: 20_000, toHz: 420 })
+  })
+});
+
+const unfilteredComparisonDsp = (): TransitionDspV2 => Object.freeze({
+  ...filteredDsp(),
+  template: "safe-fade",
+  source: Object.freeze({ ...filteredDsp().source, filterSweep: null })
 });
 
 const rms = (samples: Float32Array, startSeconds: number, endSeconds: number) => {
@@ -131,6 +149,21 @@ const run = async () => {
   const trimRatio = rms(trimmed.preview.channels[0], 0.2, 0.7) / leftEnergy;
   checks.push({ name: "−6 dB source trim", passed: Math.abs(trimRatio - 10 ** (-6 / 20)) <= 0.015, evidence: `measured amplitude ratio ${trimRatio.toFixed(4)}` });
 
+  const filterSource = createBuffer(tone(3_000), () => 0);
+  const unfiltered = await renderTransitionRehearsal(filterSource, targetTone, unfilteredComparisonDsp(), options);
+  const filtered = await renderTransitionRehearsal(filterSource, targetTone, filteredDsp(), options);
+  const unfilteredEarly = rms(unfiltered.preview.channels[0], 1.02, 1.12);
+  const unfilteredLate = rms(unfiltered.preview.channels[0], 1.82, 1.92);
+  const filteredEarly = rms(filtered.preview.channels[0], 1.02, 1.12);
+  const filteredLate = rms(filtered.preview.channels[0], 1.82, 1.92);
+  const earlyFilterRatio = filteredEarly / Math.max(unfilteredEarly, 1e-9);
+  const lateFilterRatio = filteredLate / Math.max(unfilteredLate, 1e-9);
+  checks.push({
+    name: "Filtered Fade audibly removes outgoing high frequencies",
+    passed: unfilteredEarly > 0.005 && unfilteredLate > 0.005 && earlyFilterRatio >= 0.8 && lateFilterRatio < 0.35 && filtered.quality.passed,
+    evidence: `filtered/reference RMS ratio: early ${earlyFilterRatio.toFixed(3)} · late ${lateFilterRatio.toFixed(3)}`
+  });
+
   results.replaceChildren(...checks.map((check) => {
     const row = document.createElement("tr");
     const name = document.createElement("td");
@@ -144,7 +177,7 @@ const run = async () => {
     return row;
   }));
   const report = Object.freeze({
-    schemaVersion: "transition-rehearsal-browser-check/v1",
+    schemaVersion: "transition-rehearsal-browser-check/v3",
     sampleRate,
     passed: checks.every((check) => check.passed),
     checks

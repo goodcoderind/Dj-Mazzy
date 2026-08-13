@@ -1,4 +1,4 @@
-import type { TransitionPlanV2 } from "../domain/transitionPlan";
+import type { TransitionPlanV3 } from "../domain/transitionPlan";
 import { octaveAwareTempoMatch } from "./transitionMath";
 
 export type SelectionTrack = {
@@ -11,7 +11,7 @@ export type SelectionTrack = {
 
 export type RankedNextTrack<T extends SelectionTrack> = {
   track: T;
-  plan: Readonly<TransitionPlanV2>;
+  plan: Readonly<TransitionPlanV3>;
   score: number;
   reasons: string[];
 };
@@ -61,10 +61,10 @@ const tempoScore = (source: SelectionTrack, target: SelectionTrack) => {
   };
 };
 
-const transitionScore = (template: TransitionPlanV2["template"]) =>
+const transitionScore = (template: TransitionPlanV3["template"]) =>
   template === "phrase-blend" ? 3 : template === "downbeat-cut" ? 2 : 0;
 
-const cuePreferenceScore = (plan: TransitionPlanV2) => {
+const cuePreferenceScore = (plan: TransitionPlanV3) => {
   const value = Number(plan.scoreBreakdown?.musicalCuePreference);
   return Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 0;
 };
@@ -72,7 +72,7 @@ const cuePreferenceScore = (plan: TransitionPlanV2) => {
 export const rankNextTracks = <T extends SelectionTrack>(
   source: SelectionTrack,
   candidates: T[],
-  planForTarget: (target: T) => Readonly<TransitionPlanV2>
+  planForTarget: (target: T) => Readonly<TransitionPlanV3>
 ): Array<RankedNextTrack<T>> =>
   candidates
     .map((track, queueIndex) => {
@@ -90,6 +90,8 @@ export const rankNextTracks = <T extends SelectionTrack>(
             ? "A locally trusted bar handoff is available."
             : plan.template === "phrase-blend"
               ? "A calibrated phrase blend is available."
+              : plan.template === "filtered-fade"
+                ? "A bounded filtered fade is available."
               : "Only the protected fade is available.",
           cuePreference > 0
             ? "The selected cue pair has stronger musical continuity."

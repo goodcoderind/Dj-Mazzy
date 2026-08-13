@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { DOWNBEAT_CUT_SECONDS, planAutomaticTransition, SAFE_FADE_SECONDS } from "./TransitionPlanner";
+import { DOWNBEAT_CUT_SECONDS, FILTERED_FADE_SECONDS, planAutomaticTransition, SAFE_FADE_SECONDS } from "./TransitionPlanner";
 import { TRANSITION_PLAN_SCHEMA_VERSION } from "../domain/versions";
 import { BEAT_THIS_EXPERIMENT_VERSION, BEAT_THIS_MODEL_SHA256 } from "../experimental/beatThisContract";
+import { BASIC_ANALYZER_VERSION } from "../domain/versions";
 
 const grid = (bpm: number, duration = 240) => {
   const interval = 60 / bpm;
@@ -116,6 +117,100 @@ describe("automatic transition planning", () => {
     expect(plan.schedule.durationSeconds).toBe(SAFE_FADE_SECONDS);
     expect(plan.schedule.startTime).toBe(qualifiedInput.requestedAt + 0.25);
     expect(plan.eligibility.reasons).toContain("A trusted downbeat grid is missing.");
+  });
+
+  it("selects an intentional Filtered Fade only with complete bounded outgoing evidence", () => {
+    const source = {
+      ...qualifiedInput.source,
+      analyzerVersion: BASIC_ANALYZER_VERSION,
+      schemaVersion: "track-analysis/v5",
+      analysisStatus: "ready",
+      downbeatsSeconds: [],
+      downbeatConfidence: 0,
+      energyByBeat: Array(qualifiedInput.source.beatsSeconds.length).fill(0.5),
+      vocalProbabilityByBeat: Array(qualifiedInput.source.beatsSeconds.length).fill(0.2),
+      bandEnergyByBeat: Array.from({ length: qualifiedInput.source.beatsSeconds.length }, () => ({ low: 0.4, mid: 0.4, high: 0.2 }))
+    };
+    const plan = planAutomaticTransition({ ...qualifiedInput, source });
+    expect(plan.template).toBe("filtered-fade");
+    expect(plan.schedule.durationSeconds).toBe(FILTERED_FADE_SECONDS);
+    expect(plan.targetPlaybackRate).toBe(1);
+    expect(plan.automation.filter).toEqual([20_000, 420]);
+    expect(plan.explanation[0]).toContain("Filtered Fade");
+  });
+
+  it.each([
+    { label: "stale analyzer evidence", analyzerVersion: "basic-worker/v4" },
+    { label: "missing vocal evidence", vocalProbabilityByBeat: undefined },
+    { label: "vocal section", vocalProbabilityByBeat: Array(qualifiedInput.source.beatsSeconds.length).fill(0.8) },
+    { label: "silent section", energyByBeat: Array(qualifiedInput.source.beatsSeconds.length).fill(0.01) },
+    { label: "no useful high-frequency content", bandEnergyByBeat: Array.from({ length: qualifiedInput.source.beatsSeconds.length }, () => ({ low: 0.8, mid: 0.19, high: 0.01 })) }
+  ])("keeps Safe Fade for $label", (override) => {
+    const source = {
+      ...qualifiedInput.source,
+      analyzerVersion: BASIC_ANALYZER_VERSION,
+      schemaVersion: "track-analysis/v5",
+      analysisStatus: "ready",
+      downbeatsSeconds: [],
+      downbeatConfidence: 0,
+      energyByBeat: Array(qualifiedInput.source.beatsSeconds.length).fill(0.5),
+      vocalProbabilityByBeat: Array(qualifiedInput.source.beatsSeconds.length).fill(0.2),
+      bandEnergyByBeat: Array.from({ length: qualifiedInput.source.beatsSeconds.length }, () => ({ low: 0.4, mid: 0.4, high: 0.2 })),
+      ...override
+    };
+    expect(planAutomaticTransition({ ...qualifiedInput, source }).template).toBe("safe-fade");
+  });
+
+  it("never uses Filtered Fade for a manual grid or insufficient remaining audio", () => {
+    const features = {
+      analyzerVersion: BASIC_ANALYZER_VERSION,
+      schemaVersion: "track-analysis/v5",
+      analysisStatus: "ready",
+      energyByBeat: Array(qualifiedInput.source.beatsSeconds.length).fill(0.5),
+      vocalProbabilityByBeat: Array(qualifiedInput.source.beatsSeconds.length).fill(0.2),
+      bandEnergyByBeat: Array.from({ length: qualifiedInput.source.beatsSeconds.length }, () => ({ low: 0.4, mid: 0.4, high: 0.2 }))
+    };
+    expect(planAutomaticTransition({
+      ...qualifiedInput,
+      source: { ...qualifiedInput.source, ...features, downbeatsSeconds: [], analysisOverrides: { firstBeatSeconds: 0.1 } }
+    }).template).toBe("safe-fade");
+    expect(planAutomaticTransition({
+      ...qualifiedInput,
+      source: { ...qualifiedInput.source, ...features, downbeatsSeconds: [] },
+      target: { ...qualifiedInput.target, analysisOverrides: { autoMixDisabled: true } }
+    }).template).toBe("safe-fade");
+    expect(planAutomaticTransition({
+      ...qualifiedInput,
+      source: { ...qualifiedInput.source, ...features, downbeatsSeconds: [] },
+      sourceDeck: { positionSeconds: qualifiedInput.source.duration - 3, playbackRate: 1 }
+    }).template).toBe("safe-fade");
+  });
+
+  it.each([
+    { label: "truncated band evidence", change: { bandEnergyByBeat: [{ low: 0.4, mid: 0.4, high: 0.2 }] } },
+    { label: "null band evidence", change: { bandEnergyByBeat: Object.assign(Array.from({ length: 480 }, () => ({ low: 0.4, mid: 0.4, high: 0.2 })), { 20: null }) } },
+    { label: "sparse vocal evidence", change: { vocalProbabilityByBeat: Object.assign(Array(480), { 40: 0.2 }) } },
+    { label: "negative vocal proxy", change: { vocalProbabilityByBeat: Array(480).fill(-0.1) } },
+    { label: "out-of-range energy", change: { energyByBeat: Array(480).fill(1.2) } },
+    { label: "misaligned energy", change: { energyByBeat: Array(479).fill(0.5) } },
+    { label: "unsorted beats", change: { beatsSeconds: [0.5, 0, ...Array.from({ length: 478 }, (_, index) => (index + 2) * 0.5)] } },
+    { label: "duplicate beats", change: { beatsSeconds: [0, 0, ...Array.from({ length: 478 }, (_, index) => (index + 2) * 0.5)] } },
+    { label: "stale schema", change: { schemaVersion: "track-analysis/v4" } },
+    { label: "unfinished analysis", change: { analysisStatus: "pending" } }
+  ])("keeps Safe Fade for malformed $label", ({ change }) => {
+    const source = {
+      ...qualifiedInput.source,
+      analyzerVersion: BASIC_ANALYZER_VERSION,
+      schemaVersion: "track-analysis/v5",
+      analysisStatus: "ready",
+      downbeatsSeconds: [],
+      downbeatConfidence: 0,
+      energyByBeat: Array(480).fill(0.5),
+      vocalProbabilityByBeat: Array(480).fill(0.2),
+      bandEnergyByBeat: Array.from({ length: 480 }, () => ({ low: 0.4, mid: 0.4, high: 0.2 })),
+      ...change
+    };
+    expect(planAutomaticTransition({ ...qualifiedInput, source }).template).toBe("safe-fade");
   });
 
   it.each([0.1, 0.35, 1, 3.5, 3.75])("never schedules a Safe Fade beyond %.2f seconds of source audio", (remainingSeconds) => {

@@ -37,4 +37,22 @@ describe("party autopilot arming", () => {
       untilPlannedStartSeconds: 0
     })).toBe(false);
   });
+
+  it("allows a full tick of lead to arm Filtered Fade without starting it early", () => {
+    expect(shouldArmAutoPilotTransition({
+      template: "filtered-fade",
+      remainingSeconds: 6,
+      untilPlannedStartSeconds: 0.5
+    })).toBe(true);
+    expect(shouldArmAutoPilotTransition({
+      template: "filtered-fade",
+      remainingSeconds: 6.001,
+      untilPlannedStartSeconds: 0.25
+    })).toBe(false);
+    expect(shouldArmAutoPilotTransition({
+      template: "filtered-fade",
+      remainingSeconds: 5,
+      untilPlannedStartSeconds: 0.501
+    })).toBe(false);
+  });
 });

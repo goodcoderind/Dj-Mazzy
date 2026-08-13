@@ -1,4 +1,4 @@
-import type { TransitionPlanV2 } from "../domain/transitionPlan";
+import type { TransitionPlanV3 } from "../domain/transitionPlan";
 import type { HostEnergyCurve } from "./EnergyStoryline";
 import { scoreEnergyStorylineCandidate } from "./EnergyStoryline";
 import type { RankedNextTrack, SelectionTrack } from "./nextTrackSelector";
@@ -13,9 +13,9 @@ export type SessionCandidate = SelectionTrack & {
 export type SessionHorizon<T extends SessionCandidate> = Readonly<{
   nextTrack: T;
   afterNextTrack: T | null;
-  firstPlan: Readonly<TransitionPlanV2>;
-  nextTemplate: TransitionPlanV2["template"];
-  afterNextTemplate: TransitionPlanV2["template"] | null;
+  firstPlan: Readonly<TransitionPlanV3>;
+  nextTemplate: TransitionPlanV3["template"];
+  afterNextTemplate: TransitionPlanV3["template"] | null;
   reasons: string[];
   energyReason: string;
 }>;
@@ -24,13 +24,13 @@ export type SessionPlannerOptions<T extends SessionCandidate> = {
   playedTrackIds?: readonly string[];
   curve: HostEnergyCurve;
   sessionProgress: number;
-  planFirstLeg: (track: T) => Readonly<TransitionPlanV2>;
-  planSecondLeg: (source: T, target: T) => Readonly<TransitionPlanV2>;
+  planFirstLeg: (track: T) => Readonly<TransitionPlanV3>;
+  planSecondLeg: (source: T, target: T) => Readonly<TransitionPlanV3>;
   candidateLimit?: number;
   beamWidth?: number;
 };
 
-const templateRank = (template: TransitionPlanV2["template"]) =>
+const templateRank = (template: TransitionPlanV3["template"]) =>
   template === "phrase-blend" ? 3 : template === "downbeat-cut" ? 2 : 1;
 
 type Path<T extends SessionCandidate> = {
@@ -100,7 +100,7 @@ export const planSessionHorizon = <T extends SessionCandidate>(
     reasons: Object.freeze([
       winner.first.reasons[0],
       winner.second
-        ? `The following handoff can use ${winner.second.plan.template === "downbeat-cut" ? "a trusted bar cue" : winner.second.plan.template === "phrase-blend" ? "a calibrated phrase blend" : "a protected fade"}.`
+        ? `The following handoff can use ${winner.second.plan.template === "downbeat-cut" ? "a trusted bar cue" : winner.second.plan.template === "phrase-blend" ? "a calibrated phrase blend" : winner.second.plan.template === "filtered-fade" ? "an intentional filtered fade" : "a protected fade"}.`
         : "No third track is currently available.",
       winner.energyReason
     ]) as unknown as string[],

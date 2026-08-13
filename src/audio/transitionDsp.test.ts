@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { planAutomaticTransition } from "../planning/TransitionPlanner";
 import { compileTransitionDsp, TRANSITION_DSP_VERSION, validateTransitionDsp } from "./transitionDsp";
+import { BASIC_ANALYZER_VERSION } from "../domain/versions";
 
 const track = (id: string) => ({
   trackId: id,
@@ -61,6 +62,34 @@ describe("transition DSP contract", () => {
     });
   });
 
+  it("compiles Filtered Fade as one bounded outgoing low-pass sweep", () => {
+    const source = {
+      ...track("a"),
+      analyzerVersion: BASIC_ANALYZER_VERSION,
+      schemaVersion: "track-analysis/v5",
+      analysisStatus: "ready",
+      energyByBeat: Array(480).fill(0.5),
+      vocalProbabilityByBeat: Array(480).fill(0.2),
+      bandEnergyByBeat: Array.from({ length: 480 }, () => ({ low: 0.4, mid: 0.4, high: 0.2 }))
+    };
+    const plan = planAutomaticTransition({
+      requestedAt: 10,
+      source,
+      target: track("b"),
+      sourceDeck: { positionSeconds: 20, playbackRate: 1 }
+    });
+    expect(plan.template).toBe("filtered-fade");
+    const dsp = compileTransitionDsp(plan, snapshot);
+    expect(dsp.source.filterSweep).toEqual({
+      startOffsetSeconds: 0,
+      durationSeconds: plan.schedule.durationSeconds,
+      fromHz: 20_000,
+      toHz: 420
+    });
+    expect(dsp.target.filterSweep).toBeNull();
+    expect(validateTransitionDsp(dsp)).toBe(true);
+  });
+
   it("rejects malformed DSP evidence", () => {
     expect(() => validateTransitionDsp({ schemaVersion: TRANSITION_DSP_VERSION } as never)).toThrow();
     const plan = planAutomaticTransition({ requestedAt: 10, source: track("a"), target: track("b"), sourceDeck: { positionSeconds: 20, playbackRate: 1 } });
@@ -68,5 +97,17 @@ describe("transition DSP contract", () => {
     expect(() => validateTransitionDsp({ ...valid, requiredMasterVersion: "another-master" } as never)).toThrow("production master");
     expect(() => validateTransitionDsp({ ...valid, source: { ...valid.source, gainCurve: [1, 1.01, 0] } } as never)).toThrow("gain curve");
     expect(() => validateTransitionDsp({ ...valid, target: { ...valid.target, trimDb: 4 } } as never)).toThrow("finite and positive");
+    expect(() => validateTransitionDsp({ ...valid, source: { ...valid.source, filterSweep: {
+      startOffsetSeconds: 0, durationSeconds: 1, fromHz: 20_000, toHz: 420
+    } } } as never)).toThrow("Only Filtered Fade");
+    const filteredSource = {
+      ...track("a"), analyzerVersion: BASIC_ANALYZER_VERSION, schemaVersion: "track-analysis/v5", analysisStatus: "ready",
+      energyByBeat: Array(480).fill(0.5), vocalProbabilityByBeat: Array(480).fill(0.2),
+      bandEnergyByBeat: Array.from({ length: 480 }, () => ({ low: 0.4, mid: 0.4, high: 0.2 }))
+    };
+    const filtered = compileTransitionDsp(planAutomaticTransition({ requestedAt: 10, source: filteredSource, target: track("b"), sourceDeck: { positionSeconds: 20, playbackRate: 1 } }), snapshot);
+    expect(() => validateTransitionDsp({ ...filtered, source: { ...filtered.source, filterSweep: {
+      ...filtered.source.filterSweep!, startOffsetSeconds: 0.1, durationSeconds: filtered.durationSeconds - 0.2
+    } } })).toThrow("full-duration");
   });
 });
