@@ -1,5 +1,5 @@
-export const PARTY_AUTOPILOT_TRACE_SCHEMA_VERSION = "party-autopilot-trace/v2" as const;
-export const PARTY_AUTOPILOT_EVALUATION_SCHEMA_VERSION = "party-autopilot-evaluation/v2" as const;
+export const PARTY_AUTOPILOT_TRACE_SCHEMA_VERSION = "party-autopilot-trace/v3" as const;
+export const PARTY_AUTOPILOT_EVALUATION_SCHEMA_VERSION = "party-autopilot-evaluation/v3" as const;
 
 export type PartyDeck = "a" | "b";
 export type PartyTrackOrdinal = number;
@@ -16,7 +16,8 @@ export type PartyAutopilotEvent = EventBase & (
   | Readonly<{ type: "queue-committed"; revision: number; trackOrdinals: readonly PartyTrackOrdinal[] }>
   | Readonly<{ type: "track-played"; trackOrdinal: PartyTrackOrdinal; loadOrdinal: PartyLoadOrdinal; cause: "host" | "transition" | "rescue" }>
   | Readonly<{ type: "preload-started"; operation: number; generation: number; deck: PartyDeck; trackOrdinal: PartyTrackOrdinal; loadOrdinal: PartyLoadOrdinal; selectionSource: "queue" | "library" }>
-  | Readonly<{ type: "preload-settled"; operation: number; outcome: "committed" | "failed" | "superseded" | "discarded" }>
+  | Readonly<{ type: "preload-settled"; operation: number; outcome: "committed" | "failed" | "unplayable" | "superseded" | "discarded" }>
+  | Readonly<{ type: "track-playability-restored"; trackOrdinal: PartyTrackOrdinal }>
   | Readonly<{ type: "arm-started"; operation: number; origin: "autopilot" | "host" }>
   | Readonly<{ type: "arm-settled"; operation: number; outcome: "scheduled" | "cancelled" | "failed" }>
   | Readonly<{ type: "transition-scheduled"; transition: number; sourceTrackOrdinal: PartyTrackOrdinal; sourceLoadOrdinal: PartyLoadOrdinal; targetTrackOrdinal: PartyTrackOrdinal; targetLoadOrdinal: PartyLoadOrdinal; ownership: "autopilot" | "host"; template: "safe-fade" | "filtered-fade" | "downbeat-cut" | "phrase-blend" }>
@@ -49,6 +50,7 @@ export type PartyAutopilotFailureCode =
   | "queue-revision-regressed"
   | "overlapping-preload"
   | "preload-owner-mismatch"
+  | "unplayable-track-retried"
   | "overlapping-arm"
   | "arm-owner-mismatch"
   | "overlapping-transition"
@@ -110,8 +112,11 @@ const projectEvent = (event: PartyAutopilotEventInput, sequence: number): PartyA
         !isPositiveInteger(event.loadOrdinal) || !["queue", "library"].includes(event.selectionSource)) return null;
       return Object.freeze({ ...base, type: event.type, operation: event.operation, generation: event.generation, deck: event.deck, trackOrdinal: event.trackOrdinal, loadOrdinal: event.loadOrdinal, selectionSource: event.selectionSource });
     case "preload-settled":
-      if (!isPositiveInteger(event.operation) || !["committed", "failed", "superseded", "discarded"].includes(event.outcome)) return null;
+      if (!isPositiveInteger(event.operation) || !["committed", "failed", "unplayable", "superseded", "discarded"].includes(event.outcome)) return null;
       return Object.freeze({ ...base, type: event.type, operation: event.operation, outcome: event.outcome });
+    case "track-playability-restored":
+      if (!isPositiveInteger(event.trackOrdinal)) return null;
+      return Object.freeze({ ...base, type: event.type, trackOrdinal: event.trackOrdinal });
     case "arm-started":
       if (!isPositiveInteger(event.operation) || !["autopilot", "host"].includes(event.origin)) return null;
       return Object.freeze({ ...base, type: event.type, operation: event.operation, origin: event.origin });
@@ -214,6 +219,7 @@ export const evaluatePartyAutopilotTrace = (trace: PartyAutopilotTrace): PartyAu
   let rescuePauseRequired = false;
   const playedLoads = new Set<string>();
   const playedTracks = new Set<number>();
+  const unplayableTracks = new Set<number>();
   let currentPlayedOwner: { trackOrdinal: number; loadOrdinal: number } | null = null;
   let preloadsCommitted = 0;
   let transitionsCompleted = 0;
@@ -283,6 +289,7 @@ export const evaluatePartyAutopilotTrace = (trace: PartyAutopilotTrace): PartyAu
           failures.add("malformed-event");
         }
         if (!queueEvidenceSeen) failures.add("queue-evidence-missing");
+        if (unplayableTracks.has(event.trackOrdinal)) failures.add("unplayable-track-retried");
         activePreload = event;
         break;
       case "preload-settled":
@@ -294,9 +301,15 @@ export const evaluatePartyAutopilotTrace = (trace: PartyAutopilotTrace): PartyAu
             committedPreload = activePreload;
             if (activePreload.selectionSource === "queue") queuedCommittedTarget = activePreload.trackOrdinal;
             preloadsCommitted += 1;
+          } else if (event.outcome === "unplayable") {
+            unplayableTracks.add(activePreload.trackOrdinal);
           }
           activePreload = null;
         }
+        break;
+      case "track-playability-restored":
+        if (!started || ended || !isPositiveInteger(event.trackOrdinal)) failures.add("invalid-session-lifecycle");
+        else unplayableTracks.delete(event.trackOrdinal);
         break;
       case "arm-started":
         if (!started || !running || ended) failures.add("invalid-session-lifecycle");

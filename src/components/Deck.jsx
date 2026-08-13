@@ -1,6 +1,7 @@
 import { forwardRef, useEffect, useId, useImperativeHandle, useMemo, useRef, useState } from "react";
 import WaveSurfer from "wavesurfer.js";
 import { getAudioEngine } from "../audioContext";
+import { DECK_LOAD_OUTCOME } from "../audio/deckLoadOutcome";
 import { getAnalysisClient } from "../analysis/AnalysisClient";
 import { hasCurrentBasicAnalysis } from "../analysis/analysisVersion";
 import {
@@ -564,9 +565,10 @@ const Deck = forwardRef(function Deck(
   }, [color]);
 
   const loadFileToDeck = async (file, trackId = null, knownAnalysis = null) => {
-    if (!file || playbackStartLocked || playbackStartLockRef?.current) {
-      return false;
+    if (playbackStartLocked || playbackStartLockRef?.current) {
+      return DECK_LOAD_OUTCOME.cancelled;
     }
+    if (!(file instanceof Blob)) return DECK_LOAD_OUTCOME.unplayableFile;
 
     loadGenerationRef.current += 1;
     const loadGeneration = loadGenerationRef.current;
@@ -575,51 +577,55 @@ const Deck = forwardRef(function Deck(
       audioContext = await ensureGraphReady();
     } catch {
       onAudioStartError?.(getAudioEngine().context.state);
-      return false;
+      return DECK_LOAD_OUTCOME.audioBlocked;
     }
-    if (loadGenerationRef.current !== loadGeneration || playbackStartLockRef?.current) return false;
-    const objectUrl = URL.createObjectURL(file);
-    if (lastObjectUrlRef.current) {
-      URL.revokeObjectURL(lastObjectUrlRef.current);
+    if (loadGenerationRef.current !== loadGeneration || playbackStartLockRef?.current) return DECK_LOAD_OUTCOME.cancelled;
+    try {
+      const objectUrl = URL.createObjectURL(file);
+      if (lastObjectUrlRef.current) URL.revokeObjectURL(lastObjectUrlRef.current);
+      lastObjectUrlRef.current = objectUrl;
+      createWaveSurfer();
+      void wavesurferRef.current?.load(objectUrl)?.catch?.(() => undefined);
+      setFileReady(false);
+      setBpmLabel("...");
+      setTrackName(file.name || "LOCAL AUDIO");
+      setSyncActive(false);
+      setTempo(1);
+      stopMetronomeAudition();
+      setTimingWizard(null);
+      setTapTimes([]);
+      currentTrackIdRef.current = trackId;
+      setAnalysisRecord(null);
+      deckEngine.beginPreparing(trackId);
+    } catch {
+      return DECK_LOAD_OUTCOME.cancelled;
     }
-    lastObjectUrlRef.current = objectUrl;
-    createWaveSurfer();
-    wavesurferRef.current?.load(objectUrl);
-
-    setFileReady(false);
-    setBpmLabel("...");
-    setTrackName(file.name);
-    setSyncActive(false);
-    setTempo(1);
-    stopMetronomeAudition();
-    setTimingWizard(null);
-    setTapTimes([]);
-    currentTrackIdRef.current = trackId;
-    setAnalysisRecord(null);
-
-    deckEngine.beginPreparing(trackId);
-
     let decoded;
     try {
       const arrayBuffer = await readFileAsArrayBuffer(file);
       decoded = await audioContext.decodeAudioData(arrayBuffer.slice(0));
       if (loadGenerationRef.current !== loadGeneration || currentTrackIdRef.current !== trackId) {
-        return false;
+        return DECK_LOAD_OUTCOME.cancelled;
       }
       deckEngine.loadBuffer(decoded, trackId);
     } catch (error) {
       if (loadGenerationRef.current !== loadGeneration || currentTrackIdRef.current !== trackId) {
-        return false;
+        return DECK_LOAD_OUTCOME.cancelled;
+      }
+      if (playbackStartLockRef?.current) return DECK_LOAD_OUTCOME.cancelled;
+      if (audioContext.state !== "running") {
+        onAudioStartError?.(audioContext.state);
+        return DECK_LOAD_OUTCOME.audioBlocked;
       }
       deckEngine.fail(error);
       setFileReady(false);
       setBpmLabel("n/a");
       onBpmChange(channel, null);
-      return false;
+      return DECK_LOAD_OUTCOME.unplayableFile;
     }
 
     try {
-      if (loadGenerationRef.current !== loadGeneration || currentTrackIdRef.current !== trackId) return false;
+      if (loadGenerationRef.current !== loadGeneration || currentTrackIdRef.current !== trackId) return DECK_LOAD_OUTCOME.cancelled;
       let generatedAnalysis = null;
       if (knownAnalysis && hasCurrentBasicAnalysis(knownAnalysis)) {
         applyAnalysis(
@@ -633,7 +639,7 @@ const Deck = forwardRef(function Deck(
         );
       } else {
         generatedAnalysis = await getAnalysisClient().analyzeAudioBuffer(decoded);
-        if (loadGenerationRef.current !== loadGeneration || currentTrackIdRef.current !== trackId) return false;
+        if (loadGenerationRef.current !== loadGeneration || currentTrackIdRef.current !== trackId) return DECK_LOAD_OUTCOME.cancelled;
         applyAnalysis(
           { ...generatedAnalysis, analysisOverrides: knownAnalysis?.analysisOverrides },
           trackId
@@ -644,7 +650,7 @@ const Deck = forwardRef(function Deck(
         deckEngine.setTrackTrimDb(activeProgramLevel.trimDb);
       } else {
         const current = await getAnalysisClient().analyzeAudioBuffer(decoded);
-        if (loadGenerationRef.current !== loadGeneration || currentTrackIdRef.current !== trackId) return false;
+        if (loadGenerationRef.current !== loadGeneration || currentTrackIdRef.current !== trackId) return DECK_LOAD_OUTCOME.cancelled;
         deckEngine.setTrackTrimDb(current.programLevel.trimDb);
         setAnalysisRecord((record) => record ? { ...record, programLevel: current.programLevel } : record);
         if (trackId) onProgramLevelDetected?.(trackId, current.programLevel);
@@ -670,15 +676,15 @@ const Deck = forwardRef(function Deck(
         });
       }
     } catch {
-      if (loadGenerationRef.current !== loadGeneration || currentTrackIdRef.current !== trackId) return false;
+      if (loadGenerationRef.current !== loadGeneration || currentTrackIdRef.current !== trackId) return DECK_LOAD_OUTCOME.cancelled;
       setOriginalBpm(null);
       setBpmLabel("n/a");
       setKeyLabel("--");
       onBpmChange(channel, null);
     }
-    if (loadGenerationRef.current !== loadGeneration || currentTrackIdRef.current !== trackId) return false;
+    if (loadGenerationRef.current !== loadGeneration || currentTrackIdRef.current !== trackId) return DECK_LOAD_OUTCOME.cancelled;
     onTrackLoaded?.(channel, trackId, file.name);
-    return true;
+    return DECK_LOAD_OUTCOME.loaded;
   };
 
   const onFileChange = async (event) => {

@@ -130,13 +130,18 @@ device stability, or human preference. No rehearsal audio or feedback is
 persisted.
 
 A deterministic three-hour Party Autopilot coordinator soak now drives the same
-`party-autopilot-decision/v2` function used by the live app. It therefore exercises the real
+`party-autopilot-decision/v3` function used by the live app. It therefore exercises the real
 queue-first two-song lookahead, library continuation, transition-plan arm
 windows, target cue offsets, no-repeat history, exact final-track ownership, and
-`party-autopilot-trace/v2` evaluator. A Rescue correctly ends the unattended observation
+`party-autopilot-trace/v3` evaluator. A Rescue correctly ends the unattended observation
 in a paused state. This is state/coordinator evidence only: it does not exercise
 browser decoding, Web Audio rendering, analysis workers, musical quality, or
 speaker output, and it does not replace the visible two-hour device check.
+The v3 coordinator also receives a session-only list of files that genuinely
+failed browser read/decode. Autopilot skips each such song instead of retrying it
+every half-second, preserves it visibly in the queue/library, and immediately
+tries the next eligible song. Manual successful loading or **New Party** clears
+the skip; analysis failure and cancelled/audio-blocked loads never poison a song.
 
 Tempo-changing phrase blends also remain fail-closed until pitch-preserving
 playback is ready on the exact loaded decks. A developer-only Signalsmith

@@ -35,4 +35,15 @@ describe("party readiness", () => {
       queuedTracks: 0, analyzedQueuedTracks: 0, libraryFillTracks: 0, enhancedTimingReady: true
     })).toMatchObject({ canStart: false, level: "stop-target" });
   });
+
+  it("reports unavailable session tracks without counting them as playable", () => {
+    expect(assessPartyReadiness({
+      sourcePlaying: true, sourceReady: true, targetReady: false, targetActive: false,
+      queuedTracks: 0, analyzedQueuedTracks: 0, libraryFillTracks: 0,
+      unavailableTracks: 2, enhancedTimingReady: true
+    })).toMatchObject({
+      canStart: false,
+      details: expect.arrayContaining(["2 songs couldn't be opened and will be skipped for this party."])
+    });
+  });
 });

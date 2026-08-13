@@ -8,7 +8,7 @@ import { buildAutoPilotPlanningIds } from "./autoPilotCrate";
 import type { TransitionPlanV3 } from "../domain/transitionPlan";
 import type { KeyLockCapability } from "../domain/keyLockCapability";
 
-export const PARTY_AUTOPILOT_DECISION_VERSION = "party-autopilot-decision/v2" as const;
+export const PARTY_AUTOPILOT_DECISION_VERSION = "party-autopilot-decision/v3" as const;
 
 export type AutoPilotDeck = "a" | "b";
 
@@ -37,6 +37,7 @@ export type AutoPilotSessionDecisionInput = Readonly<{
   queueTrackIds: readonly string[];
   library: readonly AutoPilotSessionTrack[];
   playedTrackIds: readonly string[];
+  unavailableTrackIds: readonly string[];
   includeRestOfLibrary: boolean;
   energyCurve: HostEnergyCurve;
   sessionProgress: number;
@@ -180,7 +181,8 @@ export const decideAutoPilotSessionTick = (
       input.library,
       input.playedTrackIds,
       [input.source.trackId, input.target.trackId],
-      input.includeRestOfLibrary
+      input.includeRestOfLibrary,
+      input.unavailableTrackIds
     );
     const candidates = candidateIds
       .map((id) => input.library.find((track) => track.id === id))

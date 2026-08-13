@@ -6,7 +6,7 @@ import type { TransitionTrack } from "../planning/TransitionPlanner";
 import type { KeyLockCapability } from "../domain/keyLockCapability";
 import { createPartyAutopilotTraceRecorder, evaluatePartyAutopilotTrace, type PartyAutopilotEvaluation } from "./partyAutopilotTrace";
 
-export const PARTY_AUTOPILOT_SOAK_SCHEMA_VERSION = "party-autopilot-coordinator-soak/v3" as const;
+export const PARTY_AUTOPILOT_SOAK_SCHEMA_VERSION = "party-autopilot-coordinator-soak/v4" as const;
 
 export type SimulatedPartyTrack = Readonly<{
   id: string;
@@ -36,6 +36,8 @@ export type PartyAutopilotSoakOptions = Readonly<{
   rescues?: readonly SimulatedPartyRescue[];
   /** Synthetic fixture capability; never inferred from track metadata. */
   keyLockCapability?: KeyLockCapability | null;
+  /** Synthetic load failures, consumed once per listed track in this run. */
+  unplayableTrackIds?: readonly string[];
 }>;
 
 export type SimulatedPartyRescueEvent = Readonly<{
@@ -150,6 +152,8 @@ export const simulatePartyAutopilotSoak = (options: PartyAutopilotSoakOptions): 
   let nextOperation = 0;
   let nextTransition = 0;
   let activeTransitionKey: string | null = null;
+  const unavailableTrackIds = new Set<string>();
+  const syntheticUnplayableIds = new Set(options.unplayableTrackIds ?? []);
   let stopReason: PartyAutopilotSoakResult["stopReason"] = "invalid";
 
   const clockSnapshot = () => partySessionClockSnapshot(clock, now);
@@ -204,6 +208,7 @@ export const simulatePartyAutopilotSoak = (options: PartyAutopilotSoakOptions): 
       queueTrackIds: queue,
       library,
       playedTrackIds,
+      unavailableTrackIds: [...unavailableTrackIds],
       includeRestOfLibrary: options.includeRestOfLibrary ?? true,
       energyCurve: PARTY_ENERGY_CURVES.build,
       sessionProgress: clockSnapshot().energyProgress,
@@ -213,10 +218,18 @@ export const simulatePartyAutopilotSoak = (options: PartyAutopilotSoakOptions): 
     });
 
     if (decision.kind === "preload") {
-      targetId = decision.trackId;
+      const requestedId = decision.trackId;
+      targetId = requestedId;
       targetLoad = ++nextLoad;
       const operation = ++nextOperation;
       append({ type: "preload-started", activeSecond: 0, operation, generation: operation, deck: targetDeck, trackOrdinal: ordinals.get(targetId)!, loadOrdinal: targetLoad, selectionSource: decision.selectionSource });
+      if (syntheticUnplayableIds.delete(requestedId)) {
+        append({ type: "preload-settled", activeSecond: 0, operation, outcome: "unplayable" });
+        unavailableTrackIds.add(requestedId);
+        targetId = null;
+        targetLoad = null;
+        continue;
+      }
       append({ type: "preload-settled", activeSecond: 0, operation, outcome: "committed" });
       queue = queue.filter((id) => id !== targetId);
       append({ type: "queue-committed", activeSecond: 0, revision: ++queueRevision, trackOrdinals: queue.map((id) => ordinals.get(id)!) });

@@ -185,6 +185,35 @@ describe("Party Autopilot trace", () => {
     expect(evaluatePartyAutopilotTrace(afterTerminal).failureCodes).toContain("invalid-session-lifecycle");
   });
 
+  it("rejects retrying a track already proven unplayable in this session", () => {
+    const trace = record([
+      { type: "session-started", activeSecond: 0 },
+      { type: "queue-committed", activeSecond: 0, revision: 1, trackOrdinals: [2, 3] },
+      { type: "track-played", activeSecond: 0, trackOrdinal: 1, loadOrdinal: 1, cause: "host" },
+      { type: "preload-started", activeSecond: 1, operation: 1, generation: 1, deck: "b", trackOrdinal: 2, loadOrdinal: 2, selectionSource: "queue" },
+      { type: "preload-settled", activeSecond: 2, operation: 1, outcome: "unplayable" },
+      { type: "preload-started", activeSecond: 3, operation: 2, generation: 2, deck: "b", trackOrdinal: 2, loadOrdinal: 3, selectionSource: "queue" },
+      { type: "preload-settled", activeSecond: 4, operation: 2, outcome: "unplayable" }
+    ]);
+    expect(evaluatePartyAutopilotTrace(trace).failureCodes).toContain("unplayable-track-retried");
+  });
+
+  it("allows retry only after a successful manual load restores playability", () => {
+    const trace = record([
+      { type: "session-started", activeSecond: 0 },
+      { type: "queue-committed", activeSecond: 0, revision: 1, trackOrdinals: [2] },
+      { type: "track-played", activeSecond: 0, trackOrdinal: 1, loadOrdinal: 1, cause: "host" },
+      { type: "preload-started", activeSecond: 1, operation: 1, generation: 1, deck: "b", trackOrdinal: 2, loadOrdinal: 2, selectionSource: "queue" },
+      { type: "preload-settled", activeSecond: 2, operation: 1, outcome: "unplayable" },
+      { type: "session-paused", activeSecond: 3, reason: "host-control" },
+      { type: "track-playability-restored", activeSecond: 3, trackOrdinal: 2 },
+      { type: "session-resumed", activeSecond: 4 },
+      { type: "preload-started", activeSecond: 5, operation: 2, generation: 2, deck: "b", trackOrdinal: 2, loadOrdinal: 3, selectionSource: "queue" },
+      { type: "preload-settled", activeSecond: 6, operation: 2, outcome: "failed" }
+    ]);
+    expect(evaluatePartyAutopilotTrace(trace).failureCodes).not.toContain("unplayable-track-retried");
+  });
+
   it("records only bounded allowlisted fields", () => {
     const recorder = createPartyAutopilotTraceRecorder();
     recorder.append({ type: "session-started", activeSecond: 0, filename: "private.mp3", trackId: "secret" } as never);

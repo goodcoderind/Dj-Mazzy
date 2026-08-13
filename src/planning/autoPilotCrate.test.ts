@@ -25,4 +25,9 @@ describe("Autopilot crate candidates", () => {
     expect(buildAutoPilotPlanningIds(["c", "b"], library, [], [], true)).toEqual(["c", "b"]);
     expect(buildAutoPilotPlanningIds(["disabled"], library, [], [], true)).toEqual(["a", "b", "c"]);
   });
+
+  it("keeps queue priority while skipping session-unavailable tracks", () => {
+    expect(buildAutoPilotPlanningIds(["b", "c"], library, [], [], true, ["b"])).toEqual(["c"]);
+    expect(buildAutoPilotPlanningIds(["b"], library, [], [], true, ["b"])).toEqual(["a", "c"]);
+  });
 });

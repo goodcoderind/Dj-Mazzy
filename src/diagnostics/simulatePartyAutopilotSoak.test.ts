@@ -87,6 +87,21 @@ describe("shared Party Autopilot coordinator soak", () => {
     expect(result.errors).toEqual([]);
   });
 
+  it("skips each unplayable queued track once and continues without repeating it", () => {
+    const result = simulatePartyAutopilotSoak({
+      tracks: library(5, 120),
+      queuedTrackIds: ["track-1", "track-2", "track-3"],
+      unplayableTrackIds: ["track-1", "track-2"],
+      includeRestOfLibrary: false,
+      sessionDurationSeconds: 1_200
+    });
+
+    expect(result.playedTrackIds).toEqual(["track-0", "track-3"]);
+    expect(result.evaluation.counters.preloadsCommitted).toBe(1);
+    expect(result.stopReason).toBe("crate-exhausted");
+    expect(result.errors).toEqual([]);
+  });
+
   it("models production Rescue as an immediate paused state", () => {
     const result = simulatePartyAutopilotSoak({
       tracks: library(10, 180),

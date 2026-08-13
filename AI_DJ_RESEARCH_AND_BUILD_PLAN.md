@@ -1838,8 +1838,8 @@ These are the active backlog, not reasons to discard the prototype.
   continuity, trim, and determinism passed in the same fresh 48 kHz browser
   run; the early filtered/reference RMS ratio was 1.008 and the late ratio was
   0.062.
-  `party-autopilot-decision/v2`,
-  `party-autopilot-trace/v2`, `party-autopilot-evaluation/v2`, and the synthetic
+  `party-autopilot-decision/v3`,
+  `party-autopilot-trace/v3`, `party-autopilot-evaluation/v3`, and the synthetic
   soak v3 carry the new allowlisted template. This closes the four-behavior code
   requirement, not real-song artistic preference, long-blend calibration,
   key-lock promotion, or the literal two-hour device gate.
@@ -1939,6 +1939,15 @@ These are the active backlog, not reasons to discard the prototype.
   prompt. It cannot guarantee recovery after a
   crash, force-quit, browser eviction, or device loss and does not change the
   tab-memory-only session contract.
+- **D-049 — Quarantine only proven-unplayable files for one party:** an exact,
+  current Autopilot preload that fails browser file read or decode adds that
+  track ID to a tab-memory session skip set. The shared v3 coordinator excludes
+  it and immediately chooses the next queue-first candidate; the failed row
+  remains visible with a plain-language reason. Cancellation, supersession,
+  AudioContext recovery, and analysis failure do not quarantine a playable
+  file. A later successful manual load or New Party clears the skip. Synthetic
+  `party-autopilot-coordinator-soak/v4` can inject read/decode failures to prove
+  failover and no-repeat behavior without claiming browser decode evidence.
 
 ### Open questions
 

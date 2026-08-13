@@ -8,9 +8,10 @@ export const buildAutoPilotCandidateIds = (
   library: readonly AutoPilotCrateTrack[],
   playedIds: readonly string[],
   loadedIds: readonly (string | null | undefined)[],
-  includeRestOfLibrary: boolean
+  includeRestOfLibrary: boolean,
+  unavailableIds: readonly string[] = []
 ) => {
-  const blocked = new Set([...playedIds, ...loadedIds.filter((id): id is string => Boolean(id))]);
+  const blocked = new Set([...playedIds, ...loadedIds.filter((id): id is string => Boolean(id)), ...unavailableIds]);
   const byId = new Map(library.map((track) => [track.id, track]));
   const seen = new Set<string>();
   const result: string[] = [];
@@ -30,10 +31,11 @@ export const buildAutoPilotPlanningIds = (
   library: readonly AutoPilotCrateTrack[],
   playedIds: readonly string[],
   loadedIds: readonly (string | null | undefined)[],
-  includeRestOfLibrary: boolean
+  includeRestOfLibrary: boolean,
+  unavailableIds: readonly string[] = []
 ) => {
-  const queued = buildAutoPilotCandidateIds(queuedIds, library, playedIds, loadedIds, false);
+  const queued = buildAutoPilotCandidateIds(queuedIds, library, playedIds, loadedIds, false, unavailableIds);
   return queued.length
     ? queued
-    : buildAutoPilotCandidateIds([], library, playedIds, loadedIds, includeRestOfLibrary);
+    : buildAutoPilotCandidateIds([], library, playedIds, loadedIds, includeRestOfLibrary, unavailableIds);
 };

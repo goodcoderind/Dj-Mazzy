@@ -6,6 +6,7 @@ export type PartyReadinessInput = {
   queuedTracks: number;
   analyzedQueuedTracks: number;
   libraryFillTracks: number;
+  unavailableTracks?: number;
   enhancedTimingReady: boolean;
 };
 
@@ -39,7 +40,12 @@ export const assessPartyReadiness = (input: PartyReadinessInput): PartyReadiness
       canStart: false,
       level: "needs-tracks",
       headline: "Add at least one next track",
-      details: ["Load the other deck or add music to the queue."]
+      details: [
+        "Load the other deck or add music to the queue.",
+        ...(input.unavailableTracks
+          ? [`${input.unavailableTracks} ${input.unavailableTracks === 1 ? "song couldn't" : "songs couldn't"} be opened and will be skipped for this party.`]
+          : [])
+      ]
     };
   }
   const details = [
@@ -48,6 +54,9 @@ export const assessPartyReadiness = (input: PartyReadinessInput): PartyReadiness
   ];
   if (input.libraryFillTracks > 0) {
     details.push(`${input.libraryFillTracks} additional unplayed library ${input.libraryFillTracks === 1 ? "track" : "tracks"} available after the queue.`);
+  }
+  if (input.unavailableTracks) {
+    details.push(`${input.unavailableTracks} ${input.unavailableTracks === 1 ? "song couldn't" : "songs couldn't"} be opened and will be skipped for this party.`);
   }
   if (!input.enhancedTimingReady) {
     return {

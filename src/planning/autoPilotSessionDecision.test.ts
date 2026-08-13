@@ -40,6 +40,7 @@ const input = (overrides: Partial<AutoPilotSessionDecisionInput> = {}): AutoPilo
   queueTrackIds: ["next", "later"],
   library: [track("source"), track("next", 120, 0.4), track("later", 120, 0.8)],
   playedTrackIds: ["source"],
+  unavailableTrackIds: [],
   includeRestOfLibrary: false,
   energyCurve: PARTY_ENERGY_CURVES.steady,
   sessionProgress: 0.2,
@@ -76,6 +77,13 @@ describe("production Autopilot tick decision", () => {
 
   it("declares the exact source final when no candidate remains", () => {
     expect(decideAutoPilotSessionTick(input({ queueTrackIds: [], library: [track("source")] })))
+      .toMatchObject({ kind: "declare-final", sourceTrackId: "source" });
+  });
+
+  it("fails over past unavailable queue entries and declares final when all candidates are unavailable", () => {
+    expect(decideAutoPilotSessionTick(input({ unavailableTrackIds: ["next"] })))
+      .toMatchObject({ kind: "preload", trackId: "later", selectionSource: "queue" });
+    expect(decideAutoPilotSessionTick(input({ unavailableTrackIds: ["next", "later"] })))
       .toMatchObject({ kind: "declare-final", sourceTrackId: "source" });
   });
 

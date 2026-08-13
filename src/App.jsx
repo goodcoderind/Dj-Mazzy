@@ -61,6 +61,7 @@ import { identifyLocalFile, normalizeContentIdentity } from "./storage/contentId
 import { createPartyWakeLockController } from "./power/partyWakeLock";
 import { audioRecoveryMessage, needsHostAudioRecovery } from "./audio/audioContextRecovery";
 import { OUTPUT_DEVICE_RECOVERY_MESSAGE, supportsOutputDeviceChangeMonitoring } from "./audio/outputDeviceRecovery";
+import { DECK_LOAD_OUTCOME, shouldQuarantineAutoPilotLoad } from "./audio/deckLoadOutcome";
 
 const audioExt = [".mp3", ".wav", ".flac", ".aiff", ".m4a"];
 const stripExt = (name) => name.replace(/\.[^/.]+$/, "");
@@ -139,6 +140,7 @@ export default function App() {
     partySessionClockSnapshot(createPartySessionClock(180 * 60), 0)
   );
   const [playedTrackIds, setPlayedTrackIds] = useState([]);
+  const [unavailableAutoPilotTrackIds, setUnavailableAutoPilotTrackIds] = useState([]);
   const [showPartyReadiness, setShowPartyReadiness] = useState(false);
   const [autoMixBeats, setAutoMixBeats] = useState(null);
   const [transitionInfo, setTransitionInfo] = useState(null);
@@ -399,7 +401,8 @@ export default function App() {
       library,
       playedTrackIds,
       [loadedByDeck.a, loadedByDeck.b],
-      autoPilotUseLibrary
+      autoPilotUseLibrary,
+      unavailableAutoPilotTrackIds
     ).includes(autoPilotChoice.afterNextId);
     if (!stillEligible) {
       setAutoPilotChoice((current) => current ? {
@@ -409,7 +412,7 @@ export default function App() {
         reasons: [current.reasons[0], "The later horizon will be replanned.", current.reasons[2]].filter(Boolean)
       } : current);
     }
-  }, [autoPilotChoice?.afterNextId, autoPilotUseLibrary, library, loadedByDeck, playedTrackIds, queue]);
+  }, [autoPilotChoice?.afterNextId, autoPilotUseLibrary, library, loadedByDeck, playedTrackIds, queue, unavailableAutoPilotTrackIds]);
 
   useEffect(() => {
     const update = () => setPartyClockDisplay(
@@ -431,7 +434,8 @@ export default function App() {
     library,
     playedTrackIds,
     [loadedByDeck.a, loadedByDeck.b],
-    autoPilotUseLibrary
+    autoPilotUseLibrary,
+    unavailableAutoPilotTrackIds
   );
   const availableAutoPilotTracks = availableAutoPilotTrackIds.length;
   const queuePositionMap = useMemo(() => {
@@ -1331,14 +1335,32 @@ export default function App() {
   };
 
   const loadTrackToDeck = async (deck, track, { autoPilotOwned = false } = {}) => {
-    if (audioRecoveryState || outputDeviceChanged || libraryMutationBusyRef.current || autoMixing || autoMixArming || rehearsalActive || rehearsalPreparing) return false;
+    if (audioRecoveryState || outputDeviceChanged || libraryMutationBusyRef.current || autoMixing || autoMixArming || rehearsalActive || rehearsalPreparing) return DECK_LOAD_OUTCOME.cancelled;
     if (!autoPilotOwned) pauseAutoPilotForHostControl();
+    const manuallyRestoringPlayability = !autoPilotOwned && unavailableAutoPilotTrackIds.includes(track.id);
     const ref = deck === "a" ? deckARef : deckBRef;
-    const ok = await ref.current?.loadTrack?.(track.file, track.id, track);
-    if (ok) {
+    const outcome = await ref.current?.loadTrack?.(track.file, track.id, track) ?? DECK_LOAD_OUTCOME.cancelled;
+    if (outcome === DECK_LOAD_OUTCOME.loaded) {
       setLoadedByDeck((prev) => ({ ...prev, [deck]: track.id }));
+      setUnavailableAutoPilotTrackIds((current) => current.includes(track.id)
+        ? current.filter((id) => id !== track.id)
+        : current);
+      if (manuallyRestoringPlayability) {
+        const trackOrdinal = partyTrackOrdinal(track.id);
+        if (
+          trackOrdinal
+          && partyTraceRecorderRef.current
+          && evaluatePartyAutopilotTrace(partyTraceRecorderRef.current.snapshot()).status !== "valid-terminal"
+        ) {
+          recordPartyEvent({ type: "track-playability-restored", trackOrdinal });
+        }
+      }
+    } else if (outcome === DECK_LOAD_OUTCOME.unplayableFile) {
+      ref.current?.eject?.();
+      setLoadedByDeck((current) => ({ ...current, [deck]: null }));
+      partyLoadByDeckRef.current = { ...partyLoadByDeckRef.current, [deck]: null };
     }
-    return Boolean(ok);
+    return outcome;
   };
 
   const addToQueue = (trackId, playNext = false) => {
@@ -1349,6 +1371,10 @@ export default function App() {
   };
 
   const activateLibraryTrack = async (track) => {
+    if (unavailableAutoPilotTrackIds.includes(track.id)) {
+      showToast("Couldn't open earlier · pause Autopilot, then use More to try again");
+      return;
+    }
     const sourceRef = masterDeck === "a" ? deckARef : deckBRef;
     if (!sourceRef.current?.isReady?.()) {
       await loadTrackToDeck(masterDeck, track);
@@ -1378,6 +1404,7 @@ export default function App() {
     queuedTracks: queue.filter((id) => availableAutoPilotTrackIds.includes(id)).length,
     analyzedQueuedTracks: queueTracks.filter((track) => availableAutoPilotTrackIds.includes(track.id) && hasCurrentBasicAnalysis(track)).length,
     libraryFillTracks: availableAutoPilotTrackIds.filter((id) => !queue.includes(id)).length,
+    unavailableTracks: unavailableAutoPilotTrackIds.length,
     enhancedTimingReady: enhancedTimingAvailable === true
   });
 
@@ -1990,6 +2017,7 @@ export default function App() {
         queueTrackIds: queue,
         library,
         playedTrackIds,
+        unavailableTrackIds: unavailableAutoPilotTrackIds,
         includeRestOfLibrary: autoPilotUseLibrary,
         energyCurve: shiftEnergyCurve(partyEnergyCurve(partyEnergyProfile), partyEnergyShift),
         sessionProgress,
@@ -2084,14 +2112,16 @@ export default function App() {
           });
         }
         try {
-          const loaded = await loadTrackToDeck(targetDeck, nextTrack, { autoPilotOwned: true });
+          const loadOutcome = await loadTrackToDeck(targetDeck, nextTrack, { autoPilotOwned: true });
+          const loaded = loadOutcome === DECK_LOAD_OUTCOME.loaded;
           const targetSnapshot = targetRef.current?.getDeckSnapshot?.();
           const stillEligible = buildAutoPilotPlanningIds(
             queueRef.current,
             libraryRef.current,
             playedTrackIdsRef.current,
             [sourceSnapshot?.trackId],
-            autoPilotUseLibrary
+            autoPilotUseLibrary,
+            unavailableAutoPilotTrackIds
           ).includes(nextTrack.id);
           const settlement = {
             loaded,
@@ -2130,8 +2160,25 @@ export default function App() {
             recordPartyEvent({
               type: "preload-settled",
               operation: preloadOperation,
-              outcome: loaded ? "superseded" : "failed"
+              outcome: shouldQuarantineAutoPilotLoad({
+                outcome: loadOutcome,
+                autoPilotEnabled: settlement.autoPilotEnabled,
+                operationCurrent: settlement.operationCurrent
+              }) ? "unplayable" : loaded ? "superseded" : "failed"
             });
+            if (shouldQuarantineAutoPilotLoad({
+              outcome: loadOutcome,
+              autoPilotEnabled: settlement.autoPilotEnabled,
+              operationCurrent: settlement.operationCurrent
+            })) {
+              setUnavailableAutoPilotTrackIds((current) => current.includes(nextTrack.id)
+                ? current
+                : [...current, nextTrack.id]);
+              targetRef.current?.eject?.();
+              setLoadedByDeck((current) => ({ ...current, [targetDeck]: null }));
+              partyLoadByDeckRef.current = { ...partyLoadByDeckRef.current, [targetDeck]: null };
+              showToast(`${nextTrack.name} couldn't be opened · skipped for this party`);
+            }
           }
         } finally {
           const pending = partyPendingLoadByDeckRef.current[targetDeck];
@@ -2164,7 +2211,7 @@ export default function App() {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [autoPilotEnabled, autoMixing, masterDeck, queue, library, loadedByDeck, playedTrackIds, partyEnergyProfile, partyEnergyShift, autoPilotUseLibrary]);
+  }, [autoPilotEnabled, autoMixing, masterDeck, queue, library, loadedByDeck, playedTrackIds, partyEnergyProfile, partyEnergyShift, autoPilotUseLibrary, unavailableAutoPilotTrackIds]);
 
   useEffect(() => {
     return () => {
@@ -2220,6 +2267,7 @@ export default function App() {
     partyQueueRevisionRef.current = 0;
     partyPlayedLoadsRef.current = new Set();
     setPartyDiagnosticEvaluation(null);
+    setUnavailableAutoPilotTrackIds([]);
     partySessionClockRef.current = resetPartySessionClock(
       partySessionClockRef.current,
       partyDurationMinutes * 60
@@ -2781,6 +2829,11 @@ export default function App() {
                   ? " This browser did not provide a storage estimate, so import capacity could not be checked in advance."
                   : " Mazzy checks browser capacity before adding a folder when the browser provides an estimate."}
           </p>
+          {unavailableAutoPilotTrackIds.length > 0 && (
+            <p className="library-storage-error" role="status">
+              {`${unavailableAutoPilotTrackIds.length} ${unavailableAutoPilotTrackIds.length === 1 ? "song couldn't" : "songs couldn't"} be opened and will be skipped for this party. Try loading one manually to retry it, or choose New Party to clear the skipped list.`}
+            </p>
+          )}
           {libraryStorageError && (
             <div className="library-storage-error" role="alert">
               <p>{libraryStorageError}</p>
@@ -2818,7 +2871,7 @@ export default function App() {
                   }}
                 >
                   <span className="queue-pos">{index + 1}.</span>
-                  <span className="queue-name">{track.name}</span>
+                  <span className="queue-name">{`${track.name}${unavailableAutoPilotTrackIds.includes(track.id) ? " · COULDN'T OPEN · SKIPPED" : ""}`}</span>
                   <span className="queue-meta">
                     {getEffectiveBpm(track) != null ? getEffectiveBpm(track).toFixed(1) : "--"} BPM
                   </span>
@@ -2953,11 +3006,13 @@ export default function App() {
                       className="library-track-action"
                       type="button"
                       disabled={libraryMutationBusy || loadedA || loadedB || autoMixing || autoMixArming || rehearsalActive || rehearsalPreparing}
-                      aria-label={`${loadedA || loadedB ? "Ready" : !sourcePartyReady ? "Choose first song" : autoPilotEnabled || queuePositionMap.has(track.id) ? "Request next" : "Add to queue"}: ${track.name}`}
+                      aria-label={`${loadedA || loadedB ? "Ready" : unavailableAutoPilotTrackIds.includes(track.id) ? "Couldn't open; pause Autopilot and use More actions to retry" : !sourcePartyReady ? "Choose first song" : autoPilotEnabled || queuePositionMap.has(track.id) ? "Request next" : "Add to queue"}: ${track.name}`}
                       onClick={() => void activateLibraryTrack(track)}
                     >
                       {loadedA || loadedB
                         ? "READY"
+                        : unavailableAutoPilotTrackIds.includes(track.id)
+                          ? autoPilotEnabled ? "PAUSE · MORE TO RETRY" : "USE MORE TO RETRY"
                         : !sourcePartyReady
                           ? "CHOOSE FIRST"
                           : autoPilotEnabled || queuePositionMap.has(track.id)
@@ -3011,6 +3066,8 @@ export default function App() {
                   <div className="cell mix-readiness-cell">
                     {analyzing
                       ? "FINDING THE BEAT…"
+                      : unavailableAutoPilotTrackIds.includes(track.id)
+                        ? "COULDN’T OPEN · SKIPPED FOR THIS PARTY"
                       : track.analysisStatus === "failed"
                         ? "FILE COULDN’T BE READ · TRY ANOTHER FORMAT"
                         : enhancedFailed
