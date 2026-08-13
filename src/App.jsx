@@ -2828,7 +2828,7 @@ export default function App() {
                     {analyzing
                       ? "FINDING THE BEAT…"
                       : track.analysisStatus === "failed"
-                        ? "SAFE TRANSITION"
+                        ? "FILE COULDN’T BE READ · TRY ANOTHER FORMAT"
                         : enhancedFailed
                           ? "ENHANCED TIMING UNAVAILABLE · SAFE TRANSITION"
                         : hasCurrentBasicAnalysis(track)

@@ -457,7 +457,9 @@ annotation and Beat This prototype workflow.
    enhanced timing model.
 
 Audio format support depends on the browser's decoding capabilities. MP3, WAV,
-and FLAC are the safest choices; M4A and AIFF support can vary by platform.
+and FLAC are the safest choices; M4A and AIFF support can vary by platform. A
+decode failure is labelled **FILE COULDN’T BE READ · TRY ANOTHER FORMAT**; it is
+not presented as transition-ready.
 
 Right-click a library row and choose **Remove from Library** to delete that
 track's stored browser copy, automatic analysis, and timing-review record. If it
