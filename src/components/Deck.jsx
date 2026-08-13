@@ -201,8 +201,6 @@ const Deck = forwardRef(function Deck(
     const startAt = when == null ? getAudioEngine().clock.now() : when;
     deckEngine.play(offset ?? undefined, startAt);
     if (when == null) {
-      const logPrefix = title === "Deck A" ? "Playing deck A, gain:" : `Playing ${title}, gain:`;
-      console.log(logPrefix, getAudioEngine().getDeckGain(channel));
       if (notifyMaster) {
         onDeckPlayStart?.(
           channel,
