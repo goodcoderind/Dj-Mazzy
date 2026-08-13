@@ -1802,6 +1802,18 @@ These are the active backlog, not reasons to discard the prototype.
   target runtime load keys, and the Signalsmith backend on both decks. Missing,
   stale, wrong-load, wrong-context, or synthetic-only evidence stays closed.
   App intentionally supplies neither capability nor runtime binding yet.
+- **D-041 — Diagnostic intervals begin on audio authority and sustained key-lock
+  evidence is still non-authoritative:** the device runner now waits for the
+  first scheduled frame on the Web Audio clock and receives an acknowledged
+  audio-health reset before starting wall/audio duration measurement. A fresh
+  production-built one-minute run matched both clocks at 60.2 seconds, completed
+  7/7 owned transitions, and reported no unexpected silence, invalid/clipped
+  samples, processor errors, or warnings. `key-lock-crossfade-smoke/v4` adds a
+  mode-bound one-minute minimum and completed 37/37 two-processor transitions
+  across 2,958,336 expected-active frames with zero silent frames, invalid or
+  clipped samples, or processor errors. Both results are synthetic render-path
+  smoke evidence only. They do not satisfy the visible two-hour device gate,
+  real-song listening, musical-quality, or live key-lock authority requirements.
 
 ### Open questions
 

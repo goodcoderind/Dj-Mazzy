@@ -1,18 +1,27 @@
 import { AudioEngine } from "../audio/AudioEngine";
 import { DeckEngine } from "../audio/DeckEngine";
 import { createSignalsmithPreparedKeyLockSource } from "../audio/signalsmithPreparedKeyLockSource";
-import { evaluateKeyLockCrossfadeEvidence, KEY_LOCK_CROSSFADE_REPORT_SCHEMA } from "./keyLockCrossfadeReport";
+import {
+  evaluateKeyLockCrossfadeEvidence,
+  KEY_LOCK_CROSSFADE_REPORT_SCHEMA,
+  type KeyLockCrossfadeMode
+} from "./keyLockCrossfadeReport";
 
 const runButton = document.querySelector<HTMLButtonElement>("#run")!;
 const stopButton = document.querySelector<HTMLButtonElement>("#stop")!;
+const modeSelect = document.querySelector<HTMLSelectElement>("#mode")!;
 const statusNode = document.querySelector<HTMLElement>("#status")!;
 const resultNode = document.querySelector<HTMLElement>("#result")!;
 const wait = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms));
 let runGeneration = 0;
 let cancelActive: (() => Promise<void>) | null = null;
 
-const createFixture = (context: AudioContext, carrier: number) => {
-  const seconds = 45;
+const modes: Record<KeyLockCrossfadeMode, Readonly<{ transitionCount: number; fixtureSeconds: number }>> = {
+  "quick-20s": { transitionCount: 12, fixtureSeconds: 45 },
+  "sustained-1m": { transitionCount: 37, fixtureSeconds: 75 }
+};
+
+const createFixture = (context: AudioContext, carrier: number, seconds: number) => {
   const buffer = context.createBuffer(2, context.sampleRate * seconds, context.sampleRate);
   for (let channel = 0; channel < 2; channel += 1) {
     const data = buffer.getChannelData(channel);
@@ -25,9 +34,13 @@ const createFixture = (context: AudioContext, carrier: number) => {
 };
 
 runButton.addEventListener("click", async () => {
+  const mode = modeSelect.value as KeyLockCrossfadeMode;
+  const modeConfig = modes[mode];
+  if (!modeConfig) return;
   const generation = ++runGeneration;
   runButton.disabled = true;
   stopButton.disabled = false;
+  modeSelect.disabled = true;
   statusNode.setAttribute("aria-busy", "true");
   statusNode.textContent = "Running two simultaneous key-lock decks…";
   resultNode.textContent = "No report yet.";
@@ -67,8 +80,8 @@ runButton.addEventListener("click", async () => {
     if (!await engine.enableAudioHealthMonitoring()) throw new Error("Audio health observer is unavailable");
     source = new DeckEngine(engine, "a", createSignalsmithPreparedKeyLockSource);
     target = new DeckEngine(engine, "b", createSignalsmithPreparedKeyLockSource);
-    source.loadBuffer(createFixture(context, 330), "synthetic-source");
-    target.loadBuffer(createFixture(context, 550), "synthetic-target");
+    source.loadBuffer(createFixture(context, 330, modeConfig.fixtureSeconds), "synthetic-source");
+    target.loadBuffer(createFixture(context, 550, modeConfig.fixtureSeconds), "synthetic-target");
     if (!(await Promise.all([source.prepareKeyLock(), target.prepareKeyLock()])).every(Boolean)) {
       throw new Error("Both key-lock processors were not prepared");
     }
@@ -89,7 +102,7 @@ runButton.addEventListener("click", async () => {
     if (!await engine.resetAudioHealthMonitoringForDiagnostic()) throw new Error("Audio health interval could not start");
     const baseline = engine.getAudioHealthSnapshot();
     engine.setExpectedOutputActive(true);
-    const transitionCount = 12;
+    const transitionCount = modeConfig.transitionCount;
     let completedTransitions = 0;
     const scheduledIds: number[] = [];
     const completedIds: number[] = [];
@@ -160,6 +173,7 @@ runButton.addEventListener("click", async () => {
       reports: totals.reports - baseline.reports
     };
     const evaluation = evaluateKeyLockCrossfadeEvidence({
+      mode,
       transitionCount,
       scheduledIds,
       completedIds,
@@ -175,6 +189,7 @@ runButton.addEventListener("click", async () => {
     });
     const report = {
       schemaVersion: KEY_LOCK_CROSSFADE_REPORT_SCHEMA,
+      mode,
       scope: "synthetic two-deck prepared playback, repeated equal-power crossfades, and post-limiter render health only",
       ...evaluation,
       transitionCount,
@@ -202,6 +217,7 @@ runButton.addEventListener("click", async () => {
     statusNode.removeAttribute("aria-busy");
     runButton.disabled = false;
     stopButton.disabled = true;
+    modeSelect.disabled = false;
   }
 });
 
@@ -214,6 +230,7 @@ stopButton.addEventListener("click", () => {
     statusNode.removeAttribute("aria-busy");
     statusNode.textContent = "Check stopped. No release evidence was recorded.";
     runButton.disabled = false;
+    modeSelect.disabled = false;
   });
 });
 

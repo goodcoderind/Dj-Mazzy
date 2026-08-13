@@ -1,5 +1,6 @@
 import { AudioEngine, type CrossfadeSchedule, type DeckChannel } from "../audio/AudioEngine";
 import { buildDeviceSoakReport, type DeviceSoakMode } from "./deviceSoakReport";
+import { decideDeviceSoakCompletion } from "./deviceSoakCompletion";
 
 const modeSelect = document.querySelector<HTMLSelectElement>("#mode");
 const startButton = document.querySelector<HTMLButtonElement>("#start");
@@ -31,6 +32,19 @@ const createContinuousBuffer = (context: AudioContext, frequency: number) => {
     }
   }
   return buffer;
+};
+
+const waitForAudioClock = async (
+  now: () => number,
+  targetAudioTime: number,
+  timeoutMs = 2_000
+) => {
+  const deadline = performance.now() + timeoutMs;
+  while (now() < targetAudioTime) {
+    if (performance.now() >= deadline) return false;
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+  }
+  return true;
 };
 
 const runDeviceSoak = async (mode: DeviceSoakMode) => {
@@ -97,13 +111,6 @@ const runDeviceSoak = async (mode: DeviceSoakMode) => {
     throw new Error("The local device check was cancelled during setup.");
   }
   const activeEngine = engine;
-  wallStart = performance.now();
-  audioStart = activeEngine.clock.now();
-  nextTransitionAudioTime = audioStart + 6;
-  window.addEventListener("error", onError);
-  window.addEventListener("unhandledrejection", onRejection);
-  document.addEventListener("visibilitychange", onVisibility);
-
   const loadAndPlay = (deck: DeckChannel, when: number) => {
     const instance = activeEngine.getDeck(deck);
     instance.loadBuffer(buffers[nextBuffer % buffers.length], null);
@@ -113,8 +120,30 @@ const runDeviceSoak = async (mode: DeviceSoakMode) => {
   try {
     activeEngine.setDeckGain("a", 1);
     activeEngine.setDeckGain("b", 0);
-    loadAndPlay("a", activeEngine.clock.now() + 0.05);
+    const initialStart = activeEngine.clock.now() + 0.2;
+    loadAndPlay("a", initialStart);
+    const audioStarted = await waitForAudioClock(() => activeEngine.clock.now(), initialStart + 0.05);
+    if (!audioStarted || cancelRequestedDuringSetup || activeEngine.context.state !== "running") {
+      await cleanup();
+      throw new Error("The local device check was interrupted during audio startup.");
+    }
+    if (!await activeEngine.resetAudioHealthMonitoringForDiagnostic()) {
+      await cleanup();
+      throw new Error("The local audio-health interval could not start.");
+    }
+    if (cancelRequestedDuringSetup) {
+      await cleanup();
+      throw new Error("The local device check was cancelled during audio startup.");
+    }
+    // The wall/audio comparison begins only after the audio clock has crossed
+    // the first scheduled frame. Browser/device startup is not party runtime.
+    wallStart = performance.now();
+    audioStart = activeEngine.clock.now();
+    nextTransitionAudioTime = audioStart + 6;
     activeEngine.setExpectedOutputActive(true);
+    window.addEventListener("error", onError);
+    window.addEventListener("unhandledrejection", onRejection);
+    document.addEventListener("visibilitychange", onVisibility);
   } catch (error) {
     await cleanup();
     throw error;
@@ -201,8 +230,12 @@ const runDeviceSoak = async (mode: DeviceSoakMode) => {
 
   timer = window.setInterval(() => {
     const wallElapsedSeconds = (performance.now() - wallStart) / 1_000;
-    const remaining = requestedDurationSeconds - wallElapsedSeconds;
-    progress.value = Math.min(1, wallElapsedSeconds / requestedDurationSeconds);
+    const audioElapsedSeconds = activeEngine.clock.now() - audioStart;
+    const remaining = Math.max(
+      requestedDurationSeconds - wallElapsedSeconds,
+      requestedDurationSeconds - audioElapsedSeconds
+    );
+    progress.value = Math.min(1, Math.min(wallElapsedSeconds, audioElapsedSeconds) / requestedDurationSeconds);
     status.textContent = `${Math.max(0, Math.ceil(remaining))} seconds remaining · ${completedTransitions} transitions completed.`;
     const announcementBucket = Math.floor(wallElapsedSeconds / 30);
     if (announcementBucket !== lastAnnouncementBucket) {
@@ -218,7 +251,14 @@ const runDeviceSoak = async (mode: DeviceSoakMode) => {
         return;
       }
     }
-    if (wallElapsedSeconds >= requestedDurationSeconds) void finish(false);
+    const completion = decideDeviceSoakCompletion(wallElapsedSeconds, audioElapsedSeconds, requestedDurationSeconds);
+    if (completion === "finish") {
+      void finish(false);
+    } else if (completion === "finish-stalled") {
+      // A context that cannot render the requested audio time within bounded
+      // wall-clock slack must fail through the unchanged report thresholds.
+      void finish(false);
+    }
   }, 200);
 };
 

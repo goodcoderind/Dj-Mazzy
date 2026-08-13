@@ -1,4 +1,6 @@
-export const KEY_LOCK_CROSSFADE_REPORT_SCHEMA = "key-lock-crossfade-smoke/v3" as const;
+export const KEY_LOCK_CROSSFADE_REPORT_SCHEMA = "key-lock-crossfade-smoke/v4" as const;
+
+export type KeyLockCrossfadeMode = "quick-20s" | "sustained-1m";
 
 export type KeyLockCrossfadeHealthDelta = Readonly<{
   renderedFrames: number;
@@ -14,6 +16,7 @@ export type KeyLockCrossfadeHealthDelta = Readonly<{
 }>;
 
 export type KeyLockCrossfadeEvidence = Readonly<{
+  mode: KeyLockCrossfadeMode;
   transitionCount: number;
   scheduledIds: readonly number[];
   completedIds: readonly number[];
@@ -52,6 +55,13 @@ export const evaluateKeyLockCrossfadeEvidence = (evidence: KeyLockCrossfadeEvide
     evidence.completionLatenessSeconds.some((value) => !finiteNonnegative(value))) {
     failures.push("malformed-evidence");
   }
+  const modeMinimums = evidence.mode === "quick-20s"
+    ? { transitions: 12, activeSeconds: 19 }
+    : evidence.mode === "sustained-1m"
+      ? { transitions: 37, activeSeconds: 60 }
+      : null;
+  if (!modeMinimums || evidence.transitionCount < modeMinimums.transitions ||
+    evidence.expectedActiveSeconds < modeMinimums.activeSeconds) failures.push("mode-coverage");
   const expectedIds = Array.from({ length: evidence.transitionCount }, (_, index) => index + 1);
   if (evidence.scheduledIds.length !== evidence.transitionCount ||
     evidence.scheduledIds.some((id, index) => id !== expectedIds[index])) failures.push("schedule-ownership");

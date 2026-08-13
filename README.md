@@ -159,14 +159,15 @@ between the two prepared decks. All 12 completed exactly once across 967,680
 expected-active frames; the longest measured silence was one sample (0.021 ms),
 with zero invalid/clipped samples or processor errors. It remains synthetic and
 does not replace real-song listening or the sustained device gate.
-The executable diagnostic is now `key-lock-crossfade-smoke/v3`: it adds a Stop
+The executable diagnostic is now `key-lock-crossfade-smoke/v4`: it adds a Stop
 path, bounded completion timeouts, exact schedule/completion IDs and lateness,
 context-continuity checks, and internally consistent expected/rendered-frame
-coverage. The v2 measurements above remain historical evidence. A fresh v3
-built-diagnostics browser run passed all 12 transitions with 967,680
-expected-active frames and zero silent frames, invalid samples, clipping, or
-processor errors after an acknowledged interval reset. Stop during a transition
-and immediate restart also completed without a stale schedule or browser error.
+coverage plus a one-minute sustained mode with enforced duration/transition
+minimums. The v2/v3 measurements above remain historical evidence. A fresh v4
+built-diagnostics browser run passed all 37 sustained transitions across
+2,958,336 expected-active frames, with zero silent frames, invalid samples,
+clipping, or processor errors after an acknowledged interval reset. This remains
+synthetic render-path evidence and does not authorize live phrase blends.
 
 The diagnostics artifact now also includes `/key-lock-listening.html`, an
 advanced private listening lab. The host chooses two local songs; Mazzy keeps
@@ -200,6 +201,13 @@ output, or musical quality. A development-only synthetic transition-rehearsal
 page verifies browser cue timing, 1.25× source playback, stereo isolation,
 continuity, deterministic rendering, and trim at 48 kHz without playing or
 saving its generated signals; it is excluded from the production build.
+
+The current production-built one-minute check completed 60.2 seconds on both
+the wall and Web Audio clocks with 7/7 owned transitions, zero unexpected silent
+intervals, invalid/clipped samples, processor errors, or report warnings. Its
+interval begins only after the first scheduled audio frame and an acknowledged
+health reset, so browser startup is not misreported as party silence. This is
+useful smoke evidence only; the literal two-hour run remains open.
 
 By default, queued songs retain first priority and Autopilot may continue from
 the remaining eligible library only when that queue is exhausted. The host can
