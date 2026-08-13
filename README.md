@@ -467,6 +467,12 @@ systems may refuse or later release that request, so the UI reports the actual
 state and still tells the host to keep the computer powered and awake when the
 lock is unavailable. It cannot keep a closed laptop lid awake.
 
+If the browser suspends or the device interrupts its AudioContext, Mazzy pauses
+Autopilot authority and shows a host-operated **RESUME AUDIO** control. It does
+not silently arm against a stale audio clock or attempt an automatic restart
+without a user gesture. A permanently closed AudioContext asks the host to
+reload instead.
+
 Right-click a library row and choose **Remove from Library** to delete that
 track's stored browser copy, automatic analysis, and timing-review record. If it
 is loaded, Mazzy safely ejects it from the corresponding deck as well.

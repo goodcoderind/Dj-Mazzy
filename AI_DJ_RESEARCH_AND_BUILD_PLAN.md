@@ -1913,6 +1913,14 @@ These are the active backlog, not reasons to discard the prototype.
   playback and is announced in a polite live status with the actionable fallback
   to keep the computer powered and awake. This does not claim to override OS
   power policy or keep a closed laptop lid awake.
+- **D-046 — Browser audio suspension fails closed to host recovery:** an
+  AudioContext state listener treats `suspended`, `interrupted`, and `closed` as
+  authoritative recovery events. If Autopilot is active it is paused through
+  the same generation/clock/trace path used for host control, preventing later
+  preload or arm authority from running against a stale audio clock. Suspended
+  or interrupted audio gets a visible, keyboard-operable `RESUME AUDIO` gesture;
+  a closed context asks for reload. Mazzy never claims or attempts a silent
+  automatic restart without the browser gesture.
 
 ### Open questions
 

@@ -145,9 +145,13 @@ export class AudioEngine {
   }
 
   async resume() {
-    if (this.context.state === "suspended") {
+    if (this.context.state === "closed") {
+      throw new Error("AudioContext is closed");
+    }
+    if (this.context.state === "suspended" || this.context.state === "interrupted") {
       await this.context.resume();
     }
+    if (this.context.state !== "running") throw new Error("AudioContext did not resume");
   }
 
   async enableAudioHealthMonitoring() {

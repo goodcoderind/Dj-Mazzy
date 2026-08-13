@@ -84,6 +84,7 @@ const Deck = forwardRef(function Deck(
     librarySaveStatus,
     onDeckPlayStart,
     onDeckEnded,
+    onAudioStartError,
     flash,
     transitionLocked = false,
     rehearsalLocked = false
@@ -192,7 +193,12 @@ const Deck = forwardRef(function Deck(
   const getCurrentTime = () => deckEngine.getPosition();
 
   const play = async (offset = null, when = null, notifyMaster = true) => {
-    await ensureGraphReady();
+    try {
+      await ensureGraphReady();
+    } catch {
+      onAudioStartError?.(getAudioEngine().context.state);
+      return false;
+    }
     if (!deckEngine.isReady()) {
       return false;
     }
@@ -552,6 +558,14 @@ const Deck = forwardRef(function Deck(
 
     loadGenerationRef.current += 1;
     const loadGeneration = loadGenerationRef.current;
+    let audioContext;
+    try {
+      audioContext = await ensureGraphReady();
+    } catch {
+      onAudioStartError?.(getAudioEngine().context.state);
+      return false;
+    }
+    if (loadGenerationRef.current !== loadGeneration) return false;
     const objectUrl = URL.createObjectURL(file);
     if (lastObjectUrlRef.current) {
       URL.revokeObjectURL(lastObjectUrlRef.current);
@@ -571,7 +585,6 @@ const Deck = forwardRef(function Deck(
     currentTrackIdRef.current = trackId;
     setAnalysisRecord(null);
 
-    const audioContext = await ensureGraphReady();
     deckEngine.beginPreparing(trackId);
 
     let decoded;
@@ -662,8 +675,6 @@ const Deck = forwardRef(function Deck(
   };
 
   const onPlayPause = async () => {
-    const engine = getAudioEngine();
-    await engine.resume();
     if (!deckEngine.isReady() || !fileReady) {
       return;
     }
