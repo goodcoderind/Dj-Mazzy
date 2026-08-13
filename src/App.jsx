@@ -60,6 +60,7 @@ import { assessImportCapacity, formatStorageSize } from "./storage/importCapacit
 import { identifyLocalFile, normalizeContentIdentity } from "./storage/contentIdentity";
 import { createPartyWakeLockController } from "./power/partyWakeLock";
 import { audioRecoveryMessage, needsHostAudioRecovery } from "./audio/audioContextRecovery";
+import { OUTPUT_DEVICE_RECOVERY_MESSAGE, supportsOutputDeviceChangeMonitoring } from "./audio/outputDeviceRecovery";
 
 const audioExt = [".mp3", ".wav", ".flac", ".aiff", ".m4a"];
 const stripExt = (name) => name.replace(/\.[^/.]+$/, "");
@@ -150,6 +151,7 @@ export default function App() {
   const [partyDiagnosticEvaluation, setPartyDiagnosticEvaluation] = useState(null);
   const [partyWakeLockStatus, setPartyWakeLockStatus] = useState("idle");
   const [audioRecoveryState, setAudioRecoveryState] = useState(null);
+  const [outputDeviceChanged, setOutputDeviceChanged] = useState(false);
   const rehearsalPreparing = rehearsalStatus?.state === "rendering" || rehearsalStatus?.state === "cancelling";
   const [masterDeck, setMasterDeck] = useState("a");
   const [bpmByDeck, setBpmByDeck] = useState({ a: null, b: null });
@@ -219,6 +221,15 @@ export default function App() {
   const libraryMutationModeRef = useRef("hydrating");
   const libraryHydrationGenerationRef = useRef(0);
   const libraryImportGenerationRef = useRef(0);
+  const audioOutputWatchArmedRef = useRef(false);
+  const outputDeviceGenerationRef = useRef(0);
+  const audioRecoveryGenerationRef = useRef(0);
+  const audioRecoveryPendingRef = useRef(false);
+  const outputDevicePendingRef = useRef(false);
+  const playbackRecoveryLockedRef = useRef(false);
+  const refreshPlaybackRecoveryLock = () => {
+    playbackRecoveryLockedRef.current = audioRecoveryPendingRef.current || outputDevicePendingRef.current;
+  };
   const partyWakeLockRef = useRef(null);
 
   useEffect(() => {
@@ -234,6 +245,31 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    const mediaDevices = navigator.mediaDevices;
+    if (!supportsOutputDeviceChangeMonitoring(mediaDevices)) return;
+    const onDeviceChange = () => {
+      if (!audioOutputWatchArmedRef.current) return;
+      outputDeviceGenerationRef.current += 1;
+      outputDevicePendingRef.current = true;
+      refreshPlaybackRecoveryLock();
+      setOutputDeviceChanged(true);
+      rehearsalGenerationRef.current += 1;
+      rehearsalCancelRef.current?.();
+      rehearsalCancelRef.current = null;
+      setRehearsalActive(false);
+      setRehearsalStatus((current) => current
+        ? { state: "stopped", message: "Preview stopped while the audio output is checked. Nothing was saved." }
+        : current);
+      autoPilotPreloadGenerationRef.current += 1;
+      transitionArmGenerationRef.current += 1;
+      if (activeTransitionScheduleRef.current) rescueTransition();
+      if (autoPilotEnabledRef.current) pauseAutoPilotForHostControl("Party Autopilot paused · audio device changed");
+    };
+    mediaDevices.addEventListener("devicechange", onDeviceChange);
+    return () => mediaDevices.removeEventListener("devicechange", onDeviceChange);
+  }, []);
+
+  useEffect(() => {
     if (autoPilotEnabled) void partyWakeLockRef.current?.acquire?.();
     else void partyWakeLockRef.current?.release?.();
   }, [autoPilotEnabled]);
@@ -243,11 +279,20 @@ export default function App() {
     const onStateChange = () => {
       const state = engine.context.state;
       if (state === "running") {
-        setAudioRecoveryState(null);
         return;
       }
       if (!needsHostAudioRecovery(state)) return;
+      audioRecoveryGenerationRef.current += 1;
+      audioRecoveryPendingRef.current = true;
+      refreshPlaybackRecoveryLock();
       setAudioRecoveryState(state);
+      rehearsalGenerationRef.current += 1;
+      rehearsalCancelRef.current?.();
+      rehearsalCancelRef.current = null;
+      setRehearsalActive(false);
+      setRehearsalStatus((current) => current
+        ? { state: "stopped", message: "Preview stopped because browser audio needs attention. Nothing was saved." }
+        : current);
       if (autoPilotEnabledRef.current) pauseAutoPilotForHostControl("Party Autopilot paused · browser audio stopped");
     };
     engine.context.addEventListener("statechange", onStateChange);
@@ -1039,6 +1084,7 @@ export default function App() {
   };
 
   const onDeckPlayStart = (deck, playKind = "start") => {
+    audioOutputWatchArmedRef.current = true;
     pauseAutoPilotForHostControl();
     setMasterDeck(deck);
     const deckRef = deck === "a" ? deckARef : deckBRef;
@@ -1275,7 +1321,7 @@ export default function App() {
   };
 
   const loadTrackToDeck = async (deck, track, { autoPilotOwned = false } = {}) => {
-    if (libraryMutationBusyRef.current || autoMixing || autoMixArming || rehearsalActive || rehearsalPreparing) return false;
+    if (audioRecoveryState || outputDeviceChanged || libraryMutationBusyRef.current || autoMixing || autoMixArming || rehearsalActive || rehearsalPreparing) return false;
     if (!autoPilotOwned) pauseAutoPilotForHostControl();
     const ref = deck === "a" ? deckARef : deckBRef;
     const ok = await ref.current?.loadTrack?.(track.file, track.id, track);
@@ -1364,7 +1410,13 @@ export default function App() {
   };
 
   const rehearseCurrentPair = async () => {
-    if (autoMixing || autoMixArming || deckARef.current?.isPlaying?.() || deckBRef.current?.isPlaying?.()) return;
+    if (
+      playbackRecoveryLockedRef.current
+      || autoMixing
+      || autoMixArming
+      || deckARef.current?.isPlaying?.()
+      || deckBRef.current?.isPlaying?.()
+    ) return;
     const preview = planCurrentPair();
     if (!preview.plan) return;
     const sourceTrackId = preview.sourceDeck === "a" ? loadedByDeck.a : loadedByDeck.b;
@@ -1426,14 +1478,16 @@ export default function App() {
         postRollSeconds,
         outputSampleRate: sampleRate
       });
+      if (playbackRecoveryLockedRef.current) return;
       await engine.resume();
-      if (!pairStillCurrent()) return;
+      if (!pairStillCurrent() || playbackRecoveryLockedRef.current) return;
       rehearsalCancelRef.current = engine.playProtectedPreview(rendered.preview, () => {
         if (rehearsalGenerationRef.current !== generation) return;
         rehearsalCancelRef.current = null;
         setRehearsalActive(false);
         setRehearsalStatus({ state: "complete", message: "Stereo transition rehearsal finished. Nothing was saved." });
       });
+      audioOutputWatchArmedRef.current = true;
       setRehearsalActive(true);
       setRehearsalStatus({
         state: rendered.quality.passed ? "playing" : "warning",
@@ -1465,7 +1519,7 @@ export default function App() {
   }, [masterDeck, loadedByDeck, library, autoMixing]);
 
   const startAutoMix = async (origin = "host") => {
-    if (audioRecoveryState || getAudioEngine().context.state !== "running") return;
+    if (audioRecoveryState || outputDeviceChanged || getAudioEngine().context.state !== "running") return;
     if (autoMixing || transitionArmRef.current || rehearsalActive) {
       return;
     }
@@ -2132,7 +2186,7 @@ export default function App() {
     void partyWakeLockRef.current?.release?.();
   };
   const startPartyAutopilot = () => {
-    if (audioRecoveryState || getAudioEngine().context.state !== "running") return;
+    if (audioRecoveryState || outputDeviceChanged || getAudioEngine().context.state !== "running") return;
     const now = getAudioEngine().clock.now();
     partySessionClockRef.current = startPartySessionClock(partySessionClockRef.current, now);
     startOrResumePartyDiagnostic(masterDeck);
@@ -2168,22 +2222,49 @@ export default function App() {
     setPartyEnergyShift(0);
   };
   const startCurrentSong = async () => {
-    if (audioRecoveryState || getAudioEngine().context.state === "closed" || !sourcePartyReady || sourcePartyPlaying || autoPilotEnabled) return;
+    if (audioRecoveryState || outputDeviceChanged || getAudioEngine().context.state === "closed" || !sourcePartyReady || sourcePartyPlaying || autoPilotEnabled) return;
     const started = await sourcePartyRef.current?.play?.();
+    if (started) audioOutputWatchArmedRef.current = true;
+    if (playbackRecoveryLockedRef.current) {
+      sourcePartyRef.current?.pause?.();
+      return;
+    }
     if (!started && getAudioEngine().context.state !== "running") onAudioStartError(getAudioEngine().context.state);
   };
   const resumeBrowserAudio = async () => {
+    const recoveryGeneration = audioRecoveryGenerationRef.current;
     try {
       await getAudioEngine().resume();
-      if (getAudioEngine().context.state === "running") {
+      if (
+        getAudioEngine().context.state === "running"
+        && recoveryGeneration === audioRecoveryGenerationRef.current
+      ) {
         contextReadyRef.current = true;
         setAudioRecoveryState(null);
+        audioRecoveryPendingRef.current = false;
+        refreshPlaybackRecoveryLock();
+      }
+    } catch {
+      setAudioRecoveryState(getAudioEngine().context.state);
+    }
+  };
+  const confirmOutputDeviceAndResume = async () => {
+    const checkedGeneration = outputDeviceGenerationRef.current;
+    try {
+      await getAudioEngine().resume();
+      if (getAudioEngine().context.state === "running" && checkedGeneration === outputDeviceGenerationRef.current) {
+        contextReadyRef.current = true;
+        setOutputDeviceChanged(false);
+        outputDevicePendingRef.current = false;
+        refreshPlaybackRecoveryLock();
       }
     } catch {
       setAudioRecoveryState(getAudioEngine().context.state);
     }
   };
   const onAudioStartError = (state) => {
+    audioRecoveryPendingRef.current = true;
+    refreshPlaybackRecoveryLock();
     setAudioRecoveryState(needsHostAudioRecovery(state) ? state : "suspended");
   };
   const partyModeStatus = partyEndingFinalTrack
@@ -2221,14 +2302,20 @@ export default function App() {
             )}
           </div>
         )}
+        {outputDeviceChanged && !audioRecoveryState && (
+          <div className="library-storage-error" role="alert">
+            <p>{OUTPUT_DEVICE_RECOVERY_MESSAGE}</p>
+            <button type="button" onClick={() => void confirmOutputDeviceAndResume()}>I CHECKED · CONTINUE</button>
+          </div>
+        )}
         <div className="party-mode-flow" aria-label="Party setup steps">
           <button type="button" disabled={libraryMutationBusy} onClick={() => importRef.current?.click()}>
             <span>1</span><strong>IMPORT MUSIC</strong><small>Saved only in this browser</small>
           </button>
-          <button type="button" onClick={() => void startCurrentSong()} disabled={!!audioRecoveryState || !sourcePartyReady || sourcePartyPlaying || autoPilotEnabled}>
+          <button type="button" onClick={() => void startCurrentSong()} disabled={!!audioRecoveryState || outputDeviceChanged || !sourcePartyReady || sourcePartyPlaying || autoPilotEnabled}>
             <span>2</span><strong>{sourcePartyPlaying ? "FIRST SONG PLAYING" : "PLAY FIRST SONG"}</strong><small>{sourcePartyReady ? nowPlayingTrack?.name ?? "Loaded track" : "Choose a song below"}</small>
           </button>
-          <button ref={partyStartButtonRef} type="button" onClick={() => autoPilotEnabled ? pausePartyAutopilot() : setShowPartyReadiness(true)} disabled={!!audioRecoveryState || (!sourcePartyPlaying && !autoPilotEnabled)}>
+          <button ref={partyStartButtonRef} type="button" onClick={() => autoPilotEnabled ? pausePartyAutopilot() : setShowPartyReadiness(true)} disabled={!!audioRecoveryState || outputDeviceChanged || (!sourcePartyPlaying && !autoPilotEnabled)}>
             <span>3</span><strong>{autoPilotEnabled ? "PAUSE AUTOPILOT" : "START AUTOPILOT"}</strong><small>{autoPilotEnabled ? "Music keeps playing" : "Mazzy handles later songs"}</small>
           </button>
         </div>
@@ -2278,7 +2365,7 @@ export default function App() {
                 setShowPartyReadiness(false);
                 window.requestAnimationFrame(() => partyStartButtonRef.current?.focus?.());
               }}>NOT YET</button>
-              <button type="button" disabled={!!audioRecoveryState || !partyReadiness.canStart} onClick={() => {
+              <button type="button" disabled={!!audioRecoveryState || outputDeviceChanged || !partyReadiness.canStart} onClick={() => {
                 startPartyAutopilot();
                 window.requestAnimationFrame(() => partyStartButtonRef.current?.focus?.());
               }}>START PARTY AUTOPILOT</button>
@@ -2347,6 +2434,8 @@ export default function App() {
             onDeckPlayStart={onDeckPlayStart}
             onDeckEnded={onDeckEnded}
             onAudioStartError={onAudioStartError}
+            playbackStartLocked={!!audioRecoveryState || outputDeviceChanged}
+            playbackStartLockRef={playbackRecoveryLockedRef}
             flash={deckFlash.a}
             transitionLocked={autoMixing || autoMixArming || autoPilotEnabled}
             rehearsalLocked={rehearsalActive || rehearsalPreparing}
@@ -2381,7 +2470,7 @@ export default function App() {
               onChange={onCrossFade}
               disabled={autoMixing || autoMixArming || autoPilotEnabled || rehearsalActive || rehearsalPreparing}
             />
-            <button className="auto-mix-btn" type="button" onClick={startAutoMix} disabled={!!audioRecoveryState || autoMixing || autoMixArming || autoPilotEnabled || rehearsalActive || rehearsalPreparing}>
+            <button className="auto-mix-btn" type="button" onClick={startAutoMix} disabled={!!audioRecoveryState || outputDeviceChanged || autoMixing || autoMixArming || autoPilotEnabled || rehearsalActive || rehearsalPreparing}>
               {autoMixArming
                 ? "ARMING SAFE TRANSITION…"
                 : autoMixing
@@ -2590,7 +2679,7 @@ export default function App() {
                   <button
                     type="button"
                     onClick={() => void rehearseCurrentPair()}
-                    disabled={autoMixArming || deckARef.current?.isPlaying?.() || deckBRef.current?.isPlaying?.()}
+                    disabled={!!audioRecoveryState || outputDeviceChanged || autoMixArming || deckARef.current?.isPlaying?.() || deckBRef.current?.isPlaying?.()}
                   >
                     {rehearsalPreparing ? "PREPARING REHEARSAL…" : "HEAR TRANSITION REHEARSAL"}
                   </button>
@@ -2649,6 +2738,8 @@ export default function App() {
             onDeckPlayStart={onDeckPlayStart}
             onDeckEnded={onDeckEnded}
             onAudioStartError={onAudioStartError}
+            playbackStartLocked={!!audioRecoveryState || outputDeviceChanged}
+            playbackStartLockRef={playbackRecoveryLockedRef}
             flash={deckFlash.b}
             transitionLocked={autoMixing || autoMixArming || autoPilotEnabled}
             rehearsalLocked={rehearsalActive || rehearsalPreparing}

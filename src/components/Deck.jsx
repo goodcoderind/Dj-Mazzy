@@ -85,6 +85,8 @@ const Deck = forwardRef(function Deck(
     onDeckPlayStart,
     onDeckEnded,
     onAudioStartError,
+    playbackStartLocked = false,
+    playbackStartLockRef,
     flash,
     transitionLocked = false,
     rehearsalLocked = false
@@ -109,6 +111,7 @@ const Deck = forwardRef(function Deck(
   const timingWizardDescriptionId = useId();
   const deckEngineRef = useRef(null);
   const interactionLocked = transitionLocked || rehearsalLocked;
+  const startOrLoadLocked = interactionLocked || playbackStartLocked || playbackStartLockRef?.current;
   const interactionLockedRef = useRef(interactionLocked);
   const previousDeckStatusRef = useRef("idle");
   const onDeckEndedRef = useRef(onDeckEnded);
@@ -193,12 +196,14 @@ const Deck = forwardRef(function Deck(
   const getCurrentTime = () => deckEngine.getPosition();
 
   const play = async (offset = null, when = null, notifyMaster = true) => {
+    if (playbackStartLocked || playbackStartLockRef?.current) return false;
     try {
       await ensureGraphReady();
     } catch {
       onAudioStartError?.(getAudioEngine().context.state);
       return false;
     }
+    if (playbackStartLockRef?.current) return false;
     if (!deckEngine.isReady()) {
       return false;
     }
@@ -223,7 +228,7 @@ const Deck = forwardRef(function Deck(
   };
 
   const seek = async (seconds) => {
-    if (interactionLocked) return false;
+    if (interactionLocked || playbackStartLocked || playbackStartLockRef?.current) return false;
     stopMetronomeAudition();
     if (timingWizard?.step === 2) setTapTimes([]);
     const snapshot = deckEngine.getSnapshot();
@@ -238,6 +243,7 @@ const Deck = forwardRef(function Deck(
 
     wavesurferRef.current?.seekTo(safeOffset / snapshot.durationSeconds);
     setCurrentTimeSec(safeOffset);
+    return true;
   };
 
   const applyAnalysis = (result, trackId, reportToLibrary = true) => {
@@ -286,9 +292,10 @@ const Deck = forwardRef(function Deck(
       stopMetronomeAudition();
       return;
     }
-    if (!deckEngine.isActive() || !previewGrid.beatsSeconds.length) return;
+    if (playbackStartLocked || playbackStartLockRef?.current || !deckEngine.isActive() || !previewGrid.beatsSeconds.length) return;
     const engine = getAudioEngine();
     await engine.resume();
+    if (playbackStartLocked || playbackStartLockRef?.current) return;
     const audition = startBeatGridAudition(engine, {
       beatsSeconds: previewGrid.beatsSeconds,
       downbeatsSeconds: previewGrid.downbeatsSeconds,
@@ -312,6 +319,10 @@ const Deck = forwardRef(function Deck(
     const remainingMs = Math.max(100, (finalEvent.audioTime - engine.clock.now() + 0.1) * 1000);
     metronomeUiTimerRef.current = window.setTimeout(stopMetronomeAudition, remainingMs);
   };
+
+  useEffect(() => {
+    if (playbackStartLocked) stopMetronomeAudition();
+  }, [playbackStartLocked]);
 
   const openTimingWizard = () => {
     if (!analysisRecord) return;
@@ -339,8 +350,9 @@ const Deck = forwardRef(function Deck(
   };
 
   const playTimingCheckAt = async (positionSeconds) => {
+    if (playbackStartLocked || playbackStartLockRef?.current) return;
     stopMetronomeAudition();
-    await seek(positionSeconds);
+    if (!await seek(positionSeconds)) return;
     if (!deckEngine.isActive()) await play(positionSeconds);
     await auditionBeatGrid();
   };
@@ -497,7 +509,7 @@ const Deck = forwardRef(function Deck(
     });
     wavesurferRef.current.on("click", (progress) => {
       const duration = deckEngine.getSnapshot().durationSeconds;
-      if (!duration || interactionLockedRef.current) return;
+      if (!duration || interactionLockedRef.current || playbackStartLockRef?.current) return;
       void seek(progress * duration);
     });
   };
@@ -552,7 +564,7 @@ const Deck = forwardRef(function Deck(
   }, [color]);
 
   const loadFileToDeck = async (file, trackId = null, knownAnalysis = null) => {
-    if (!file) {
+    if (!file || playbackStartLocked || playbackStartLockRef?.current) {
       return false;
     }
 
@@ -565,7 +577,7 @@ const Deck = forwardRef(function Deck(
       onAudioStartError?.(getAudioEngine().context.state);
       return false;
     }
-    if (loadGenerationRef.current !== loadGeneration) return false;
+    if (loadGenerationRef.current !== loadGeneration || playbackStartLockRef?.current) return false;
     const objectUrl = URL.createObjectURL(file);
     if (lastObjectUrlRef.current) {
       URL.revokeObjectURL(lastObjectUrlRef.current);
@@ -683,6 +695,7 @@ const Deck = forwardRef(function Deck(
       pause();
       return;
     }
+    if (playbackStartLocked || playbackStartLockRef?.current) return;
     await play();
   };
 
@@ -908,12 +921,12 @@ const Deck = forwardRef(function Deck(
         {trackName}
       </div>
       <div className="deck-top-actions">
-        <button className="text-control-btn" type="button" onClick={() => fileInputRef.current?.click()} disabled={interactionLocked}>
+        <button className="text-control-btn" type="button" onClick={() => fileInputRef.current?.click()} disabled={startOrLoadLocked}>
           LOAD TRACK
         </button>
         <span className={`deck-engine-status status-${deckStatus}`}>{statusLabel}</span>
       </div>
-      <input ref={fileInputRef} className="file-input-hidden" type="file" accept="audio/*" onChange={onFileChange} disabled={interactionLocked} />
+      <input ref={fileInputRef} className="file-input-hidden" type="file" accept="audio/*" onChange={onFileChange} disabled={startOrLoadLocked} />
 
       <div className="wave-section">
         <div
@@ -950,7 +963,7 @@ const Deck = forwardRef(function Deck(
               }
             }
           }}
-          disabled={!fileReady || interactionLocked}
+          disabled={!fileReady || startOrLoadLocked}
         />
       </div>
 
@@ -1032,8 +1045,8 @@ const Deck = forwardRef(function Deck(
                 <h4>First, listen</h4>
                 <p>Start the song, then play 16 clicks. Do the clicks land with the rhythm you naturally feel?</p>
                 <div className="wizard-actions two">
-                  <button type="button" onClick={onPlayPause}>{isPlaying ? "PAUSE SONG" : "PLAY SONG"}</button>
-                  <button type="button" aria-pressed={metronomeActive} onClick={() => void auditionBeatGrid()} disabled={!isPlaying || !previewGrid.beatsSeconds.length}>
+                  <button type="button" onClick={onPlayPause} disabled={!isPlaying && startOrLoadLocked}>{isPlaying ? "PAUSE SONG" : "PLAY SONG"}</button>
+                  <button type="button" aria-pressed={metronomeActive} onClick={() => void auditionBeatGrid()} disabled={!isPlaying || !previewGrid.beatsSeconds.length || (!metronomeActive && startOrLoadLocked)}>
                     {metronomeActive ? "STOP CLICKS" : "PLAY 16 CLICKS"}
                   </button>
                 </div>
@@ -1098,9 +1111,9 @@ const Deck = forwardRef(function Deck(
                 <h4>Line up one click</h4>
                 <p>Pause on a clear drum hit, then choose “Put a click here.” Use Earlier or Later only if the clicks feel slightly behind or ahead.</p>
                 <div className="wizard-actions three">
-                  <button type="button" onClick={() => void seek(Math.max(0, currentTimeSec - 2))}>− 2 SECONDS</button>
-                  <button type="button" onClick={onPlayPause}>{isPlaying ? "PAUSE" : "PLAY"}</button>
-                  <button type="button" onClick={() => void seek(Math.min(deckEngine.getSnapshot().durationSeconds, currentTimeSec + 2))}>+ 2 SECONDS</button>
+                  <button type="button" disabled={startOrLoadLocked} onClick={() => void seek(Math.max(0, currentTimeSec - 2))}>− 2 SECONDS</button>
+                  <button type="button" onClick={onPlayPause} disabled={!isPlaying && startOrLoadLocked}>{isPlaying ? "PAUSE" : "PLAY"}</button>
+                  <button type="button" disabled={startOrLoadLocked} onClick={() => void seek(Math.min(deckEngine.getSnapshot().durationSeconds, currentTimeSec + 2))}>+ 2 SECONDS</button>
                 </div>
                 <button className="wizard-primary" type="button" disabled={!previewGrid.bpm} onClick={() => updateTimingDraft(setBeatAtTime(draftAnalysis(), deckEngine.getPosition()), { beatAction: "aligned" })}>PUT A CLICK HERE</button>
                 <details className="wizard-advanced">
@@ -1122,9 +1135,9 @@ const Deck = forwardRef(function Deck(
                 <h4>Optional: mark the strongest first beat</h4>
                 <p>Many songs repeat in groups of four. Pause on the “ONE” that begins a group, then mark it. Mazzy will use a stronger click there. Skip this if you are unsure.</p>
                 <div className="wizard-actions three">
-                  <button type="button" onClick={() => void seek(Math.max(0, currentTimeSec - 2))}>− 2 SECONDS</button>
-                  <button type="button" onClick={onPlayPause}>{isPlaying ? "PAUSE" : "PLAY"}</button>
-                  <button type="button" onClick={() => void seek(Math.min(deckEngine.getSnapshot().durationSeconds, currentTimeSec + 2))}>+ 2 SECONDS</button>
+                  <button type="button" disabled={startOrLoadLocked} onClick={() => void seek(Math.max(0, currentTimeSec - 2))}>− 2 SECONDS</button>
+                  <button type="button" onClick={onPlayPause} disabled={!isPlaying && startOrLoadLocked}>{isPlaying ? "PAUSE" : "PLAY"}</button>
+                  <button type="button" disabled={startOrLoadLocked} onClick={() => void seek(Math.min(deckEngine.getSnapshot().durationSeconds, currentTimeSec + 2))}>+ 2 SECONDS</button>
                 </div>
                 <button
                   className="wizard-primary"
@@ -1225,7 +1238,7 @@ const Deck = forwardRef(function Deck(
       </div>
 
       <div className="deck-row">
-        <button className={`action-btn ${isPlaying ? "playing" : ""}`} type="button" onClick={onPlayPause} disabled={!fileReady || interactionLocked}>
+        <button className={`action-btn ${isPlaying ? "playing" : ""}`} type="button" onClick={onPlayPause} disabled={!fileReady || interactionLocked || (!isPlaying && startOrLoadLocked)}>
           {isPlaying ? "Pause" : "Play"}
         </button>
         <button

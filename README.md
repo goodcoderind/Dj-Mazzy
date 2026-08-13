@@ -473,6 +473,13 @@ not silently arm against a stale audio clock or attempt an automatic restart
 without a user gesture. A permanently closed AudioContext asks the host to
 reload instead.
 
+After audio has started, a generic browser media-device-set change makes Mazzy
+conservatively pause Autopilot and ask the host to check the speakers before
+continuing. The event can also be caused by a microphone or camera change; it is
+not proof that output routing changed. Mazzy does not enumerate device
+names or IDs, request microphone permission, or claim that speaker output was
+verified.
+
 Right-click a library row and choose **Remove from Library** to delete that
 track's stored browser copy, automatic analysis, and timing-review record. If it
 is loaded, Mazzy safely ejects it from the corresponding deck as well.

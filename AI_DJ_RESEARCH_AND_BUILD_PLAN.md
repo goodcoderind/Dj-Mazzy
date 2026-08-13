@@ -1921,6 +1921,17 @@ These are the active backlog, not reasons to discard the prototype.
   or interrupted audio gets a visible, keyboard-operable `RESUME AUDIO` gesture;
   a closed context asks for reload. Mazzy never claims or attempts a silent
   automatic restart without the browser gesture.
+- **D-047 — Output-device change requires host confirmation without device
+  enumeration:** when `navigator.mediaDevices` exposes the `devicechange`
+  event, Mazzy arms a conservative listener only after audio has started. It
+  does not call `enumerateDevices`,
+  collect labels/IDs, or request microphone permission. A change pauses
+  Autopilot through its normal authority-invalidating path and gates new
+  playback, Auto Mix, and Autopilot until the host checks the speakers and uses
+  the explicit recovery gesture; the current song may keep playing. Because the event covers the whole media-device
+  set, microphone/camera changes can also trigger the pause; this is a bounded
+  conservative interruption signal, not output-routing detection or proof that
+  a physical speaker produced sound.
 
 ### Open questions
 
