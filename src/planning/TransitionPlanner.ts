@@ -138,7 +138,7 @@ const filterFadeEvidence = (
   const beats = sourceGrid.beatsSeconds;
   const automaticBeats = source.beatsSeconds ?? [];
   const duration = Number(source.durationSeconds ?? source.duration);
-  if (!automaticBeats.length || automaticBeats.length !== beats.length ||
+  if (!Number.isFinite(duration) || duration < 0 || !automaticBeats.length || automaticBeats.length !== beats.length ||
     automaticBeats.some((beat, index) => !Number.isFinite(beat) || beat < 0 || beat > duration ||
       (index > 0 && beat <= automaticBeats[index - 1]) || Math.abs(beat - beats[index]) > 1e-6)) return null;
   if (!beats.length || source.energyByBeat?.length !== beats.length ||

@@ -193,6 +193,8 @@ describe("automatic transition planning", () => {
     { label: "negative vocal proxy", change: { vocalProbabilityByBeat: Array(480).fill(-0.1) } },
     { label: "out-of-range energy", change: { energyByBeat: Array(480).fill(1.2) } },
     { label: "misaligned energy", change: { energyByBeat: Array(479).fill(0.5) } },
+    { label: "non-finite duration", change: { durationSeconds: Number.NaN } },
+    { label: "infinite duration", change: { durationSeconds: Number.POSITIVE_INFINITY } },
     { label: "unsorted beats", change: { beatsSeconds: [0.5, 0, ...Array.from({ length: 478 }, (_, index) => (index + 2) * 0.5)] } },
     { label: "duplicate beats", change: { beatsSeconds: [0, 0, ...Array.from({ length: 478 }, (_, index) => (index + 2) * 0.5)] } },
     { label: "stale schema", change: { schemaVersion: "track-analysis/v4" } },
