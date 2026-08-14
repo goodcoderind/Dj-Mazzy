@@ -1,0 +1,39 @@
+{
+  "schemaVersion": "device-soak-report/v4",
+  "buildContract": "mazzy-audio-engine/v2",
+  "runnerContract": "mazzy-device-soak-runner/v3",
+  "mode": "acceptance-2h",
+  "requestedDurationSeconds": 7200,
+  "wallElapsedSeconds": 7200.2,
+  "audioElapsedSeconds": 7200.2,
+  "wallAudioClockDivergenceMs": 32,
+  "maximumClockDivergenceMs": 3600,
+  "scheduledTransitions": 923,
+  "completedTransitions": 923,
+  "cancelledTransitions": 0,
+  "transitionOwnershipFailures": 0,
+  "maximumCompletionLatenessMs": 28,
+  "audioHealth": {
+    "supported": true,
+    "sampleRate": 48000,
+    "renderedFrames": 345648000,
+    "expectedActiveFrames": 345608192,
+    "silentFrames": 0,
+    "renderQuanta": 2700375,
+    "nonFiniteSamples": 0,
+    "clippedSamples": 0,
+    "processorErrors": 0,
+    "peak": 0.06054,
+    "longestUnexpectedSilentMs": 0,
+    "reports": 7201,
+    "contextStates": [
+      "running"
+    ]
+  },
+  "failureCodes": [],
+  "warningCodes": [],
+  "passed": true,
+  "releaseGatePassed": true,
+  "evidenceScope": "Synthetic post-limiter Web Audio render-path continuity; not speaker, output-device, decoder, analysis, or full Party Autopilot proof.",
+  "privacy": "No audio, filenames, paths, track identifiers, exact timestamps, or device identifiers are included."
+}

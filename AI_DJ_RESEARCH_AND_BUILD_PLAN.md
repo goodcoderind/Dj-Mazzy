@@ -1822,9 +1822,8 @@ These are the active backlog, not reasons to discard the prototype.
   samples, processor errors, or warnings. `key-lock-crossfade-smoke/v4` adds a
   mode-bound one-minute minimum and completed 37/37 two-processor transitions
   across 2,958,336 expected-active frames with zero silent frames, invalid or
-  clipped samples, or processor errors. Both results are synthetic render-path
-  smoke evidence only. They do not satisfy the visible two-hour device gate,
-  real-song listening, musical-quality, or live key-lock authority requirements.
+  clipped samples, or processor errors. That key-lock result and the one-minute
+  device result are synthetic render-path smoke evidence only.
   These interval and completion-ownership semantics were versioned as
   `device-soak-report/v3` / `mazzy-device-soak-runner/v3`; earlier v2 reports do
   not constitute this evidence. A literal v3 two-hour run subsequently rendered
@@ -1835,7 +1834,17 @@ These are the active backlog, not reasons to discard the prototype.
   replaces that duration-independent limit with a bounded 500 ppm device-clock
   rate tolerance (a one-second floor for short checks). Context-state and render
   coverage gates remain unchanged, and the v3 result is not retroactively a
-  release pass; a fresh visible v4 two-hour run remains required.
+  release pass. On 2026-08-14, a fresh visible production-built v4 run completed
+  7,200.2 seconds on both wall and Web Audio clocks, with 32 ms measured clock
+  divergence, 923/923 owned transitions, 28 ms maximum completion lateness,
+  345,608,192 expected-active frames, and zero silent frames, invalid/clipped
+  samples, processor errors, ownership failures, failure codes, or warnings.
+  Its exact privacy-safe `device-soak-report/v4` artifact sets
+  `releaseGatePassed: true` and is committed as
+  `DEVICE_SOAK_ACCEPTANCE_REPORT.json`. This satisfies the synthetic production
+  audio-engine render-path gate. It does not satisfy real-song listening,
+  browser-to-speaker/output-device validation, full Party Autopilot behavior,
+  musical-quality, or live key-lock authority requirements.
 - **D-042 — Filtered Fade is a bounded fourth behavior, not a weaker safety
   ranking:** `transition-plan/v3` and `transition-dsp/v2` add a 4.5-second
   no-stretch equal-power handoff with one outgoing 20 kHz→420 Hz low-pass sweep.

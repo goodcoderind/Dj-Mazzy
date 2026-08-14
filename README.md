@@ -234,18 +234,16 @@ stereo, continuity, trim, and determinism passed in the same run. This is
 deterministic DSP evidence, not a claim that every song will sound artistically
 good.
 
-The audio-engine/v2 production-built v3 one-minute check completed 60.2
-seconds on the wall clock and 60.1 seconds on the Web Audio clock. Its interval
-began only after the first scheduled audio frame and an acknowledged health
-reset, so browser startup was not misreported as party silence. It completed
-7/7 owned transitions with zero silence, invalid/clipped samples, processor
-errors, ownership failures, or warnings. This is useful smoke evidence only.
-A completed v3 two-hour run rendered 7,201 healthy seconds and completed 923/923
-transitions, but correctly remained failed evidence because its fixed one-second
-wall/audio-clock limit rejected the 1.6-second device-clock drift. V4 replaces
-that duration-independent limit with a reported, bounded 500 ppm clock-rate
-tolerance; it does not retroactively convert the v3 result into a pass, so the
-literal v4 two-hour run remains open.
+The production-built `mazzy-audio-engine/v2` literal v4 gate completed 7,200.2
+seconds on both the wall and Web Audio clocks. It completed 923/923 owned
+transitions, with 32 ms wall/audio-clock divergence and 28 ms maximum completion
+lateness. Across 345,608,192 expected-active frames it reported zero silence,
+invalid or clipped samples, processor errors, ownership failures, failures, or
+warnings. The report sets `releaseGatePassed: true`; its exact privacy-safe JSON
+is committed as [DEVICE_SOAK_ACCEPTANCE_REPORT.json](./DEVICE_SOAK_ACCEPTANCE_REPORT.json).
+This closes the synthetic production audio-engine render-path gate only. It does
+not prove decoding, music analysis, full Party Autopilot behavior, browser-to-
+speaker delivery, output-device behavior, or musical quality.
 
 By default, queued songs retain first priority and Autopilot may continue from
 the remaining eligible library only when that queue is exhausted. The host can
