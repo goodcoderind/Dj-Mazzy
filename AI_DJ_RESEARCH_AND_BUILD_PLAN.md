@@ -2069,6 +2069,18 @@ These are the active backlog, not reasons to discard the prototype.
   workflow. Selecting a production target still requires consented,
   counterbalanced real-music listening across the required genres and devices;
   this implementation does not manufacture that human evidence.
+- **D-055 — Use formula-defined true-peak cases before restricted test audio:**
+  the decoded four-times Annex 2 estimator now runs the exact sine frequency,
+  amplitude, phase, and 10 ms taper definitions from EBU Tech 3341 cases 15–19
+  at 48 kHz. All five land inside the document's asymmetric +0.2/−0.4 dBTP
+  minimum-requirement tolerance, including the +3 dBTP overload case. The tests
+  synthesize their samples at runtime and never download, commit, or render the
+  EBU sequences, whose terms restrict use to internal R&D and prohibit
+  redistribution. Cases 20–23 require the specified high-rate synthesis,
+  anti-alias filtering, and four downsampling offsets, and remain open along
+  with the full official set. This additional evidence does not rename the
+  field, change the estimator schema, promote it to a compliant meter, or prove
+  the live post-master/output path.
 
 ### Open questions
 

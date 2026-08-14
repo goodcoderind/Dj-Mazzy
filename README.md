@@ -99,7 +99,11 @@ calibration and EBU gate vectors cover 44.1, 48, and 96 kHz; four synthetic
 Tech 3342 range cases run at 48 kHz. Fixed 50 Hz and
 10 kHz results are within 0.1 LU of FFmpeg 8.1.1's independent `ebur128`
 meter. A phase-offset quarter-rate vector proves that the decoded peak estimate
-can detect a peak between stored samples. This is a BS.1770-derived local
+can detect a peak between stored samples. Formula-defined EBU Tech 3341
+minimum-requirement cases 15–19 also fall inside their asymmetric +0.2/−0.4
+dBTP tolerances without committing or playing the restricted EBU audio files.
+Cases 20–23 and the complete official test set remain open. This is a
+BS.1770-derived local
 consistency aid, not certified EBU Mode or true-peak metering: range is not yet
 used to change playback, and it does not certify a −14 LUFS product target or
 prove the post-EQ, overlapped master output is true-peak safe. Files with more than two channels
