@@ -1205,15 +1205,25 @@ fallback, duplicated main-thread analysis, and no protected master bus. The
 foundation updates below resolve those architectural failures. Remaining gaps
 before musical or operational reliability are:
 
-- the production analyzer has provisional beats but no trusted downbeats;
-- tempo control still changes pitch because key-lock/time-stretch is not built;
-- beat-synchronous energy and a structural-change/vocal-likelihood baseline now
-  exist, but neither is calibrated on annotated real music;
-- real tracks therefore remain restricted to the conservative Safe Fade;
-- master peak protection exists, but perceptual loudness normalization and true
-  peak evaluation are not complete;
-- queue ordering is manual and has no session lookahead or energy storyline;
-- Rescue Mode, transition rehearsal, and real-party validation are not built.
+- the lightweight production analyzer still has provisional beats and no
+  trusted downbeats; the optional enhanced detector can authorize only the
+  narrowly bounded, no-stretch Bar Handoff, while long phrase blends remain
+  locked pending human-scored calibration;
+- the key-lock processor is isolated behind exact-load capability checks and
+  has synthetic browser diagnostics, but it is intentionally not wired into
+  live transitions until the human listening and device-acceptance gates pass;
+- beat-synchronous energy and structural/vocal-frequency proxies now support
+  safety-bounded cue ranking and Filtered Fade, but they are not calibrated as
+  semantic vocal or musical-quality truth on annotated real music;
+- master peak protection and conservative program-level trim exist, but
+  perceptual loudness normalization and true-peak evaluation are not complete;
+- the shared Autopilot coordinator now provides queue-first three-track
+  lookahead, played-track exclusion, energy-storyline intent, Rescue, and
+  deterministic final-track ownership, but live real-party validation and
+  refresh/crash recovery remain open;
+- production transition rehearsal, private listening tools, and synthetic
+  sustained diagnostics exist; the fresh visible v4 two-hour audio-engine gate
+  and human key-lock listening judgment remain open.
 
 These are the active backlog, not reasons to discard the prototype.
 
