@@ -1,16 +1,18 @@
 # MAZZY
 
-### A two-deck DJ workstation built for the browser
+### A local-first party autopilot built for the browser
 
 [![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)](https://react.dev/)
 [![Vite](https://img.shields.io/badge/Vite-7-646CFF?logo=vite&logoColor=white)](https://vite.dev/)
 [![Web Audio API](https://img.shields.io/badge/audio-Web%20Audio%20API-c8a96e)](https://developer.mozilla.org/en-US/docs/Web/API/Web_Audio_API)
 [![License](https://img.shields.io/badge/license-ISC-green)](./LICENSE)
 
-Mazzy is a local-first DJ application with two independent decks, waveform
-navigation, tempo sync, three-band EQ, a music library, queue management, and
-beat-aligned automatic transitions. It runs entirely in the browser—there is no
-backend and your music is not uploaded to a server.
+Mazzy is a local-first party-mixing application that guides a non-DJ host through
+library setup, first playback, and safety-first Autopilot. An optional advanced
+surface exposes its two independent decks, waveform navigation, tempo sync,
+three-band EQ, queue management, and beat-aligned automatic transitions. It runs
+entirely in the browser—there is no backend and your music is not uploaded to a
+server.
 
 ## Project direction
 
