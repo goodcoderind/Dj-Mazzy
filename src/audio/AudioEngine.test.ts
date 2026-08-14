@@ -833,6 +833,7 @@ describe("DeckEngine", () => {
 
   it("restarts from the beginning after natural completion", () => {
     const { context, engine } = createEngine();
+    context.state = "running";
     const deck = engine.getDeck("a");
     deck.loadBuffer(buffer, "track-a");
     deck.play(0, 10);
@@ -842,6 +843,338 @@ describe("DeckEngine", () => {
 
     deck.play();
     expect(context.sources.at(-1)?.startCalls[0]).toEqual({ when: 130, offset: 0 });
+  });
+
+  it("settles exact native natural completion once from the source callback", () => {
+    const { context, engine } = createEngine();
+    context.state = "running";
+    const deck = engine.getDeck("a");
+    const completions: Parameters<Parameters<typeof deck.subscribePlaybackCompletion>[0]>[0][] = [];
+    deck.subscribe(() => { throw new Error("snapshot observer failed"); });
+    deck.subscribePlaybackCompletion((event) => completions.push(event));
+    deck.loadBuffer({ duration: 2 } as AudioBuffer, "short");
+    deck.play(0, 10);
+    const source = context.sources.at(-1)!;
+    const primary = source.onended;
+
+    context.currentTime = 12;
+    primary?.();
+    primary?.();
+
+    expect(deck.getSnapshot().status).toBe("ended");
+    expect(completions).toEqual([expect.objectContaining({
+      channel: "a",
+      trackId: "short",
+      settledBy: "source-onended",
+      outcome: "on-time"
+    })]);
+  });
+
+  it("labels a source callback delivered beyond the watchdog boundary as late", () => {
+    const { context, engine } = createEngine();
+    context.state = "running";
+    const deck = engine.getDeck("a");
+    const completions: Array<{ settledBy: string; outcome: string }> = [];
+    deck.subscribe(() => { throw new Error("snapshot observer failed"); });
+    deck.subscribePlaybackCompletion((event) => completions.push(event));
+    deck.loadBuffer({ duration: 2 } as AudioBuffer, "short");
+    deck.play(0, 10);
+    const retainedPrimary = context.sources.at(-1)!.onended;
+
+    context.currentTime = 12.2;
+    retainedPrimary?.();
+
+    expect(completions).toEqual([expect.objectContaining({
+      settledBy: "source-onended",
+      outcome: "late"
+    })]);
+  });
+
+  it("recovers a dropped source callback from the exact audio-clock sentinel once", () => {
+    const { context, engine } = createEngine();
+    context.state = "running";
+    const deck = engine.getDeck("b");
+    const completions: Array<{ settledBy: string; outcome: string }> = [];
+    deck.subscribePlaybackCompletion((event) => completions.push(event));
+    deck.loadBuffer({ duration: 2 } as AudioBuffer, "short");
+    deck.play(0, 10);
+    const source = context.sources.at(-1)!;
+    const retainedPrimary = source.onended;
+    const sentinel = context.oscillators.at(-1)!;
+    const sentinelCallback = sentinel.onended;
+
+    context.currentTime = 12.05;
+    sentinelCallback?.();
+    retainedPrimary?.();
+
+    expect(deck.getSnapshot().status).toBe("ended");
+    expect(completions).toEqual([expect.objectContaining({ settledBy: "audio-clock", outcome: "recovered" })]);
+  });
+
+  it("reconciles a missing callback from Web Audio time without waiting for wall time", () => {
+    const { context, engine } = createEngine();
+    context.state = "running";
+    const deck = engine.getDeck("a");
+    const completions: Array<{ settledBy: string; outcome: string }> = [];
+    deck.subscribe(() => { throw new Error("snapshot observer failed"); });
+    deck.subscribePlaybackCompletion((event) => completions.push(event));
+    deck.loadBuffer({ duration: 2 } as AudioBuffer, "short");
+    deck.play(0, 10);
+
+    context.currentTime = 11;
+    expect(deck.reconcilePlaybackCompletion(12)).toBe(false);
+    context.currentTime = 12;
+    expect(deck.reconcilePlaybackCompletion(12)).toBe(false);
+    context.currentTime = 12.05;
+    expect(deck.reconcilePlaybackCompletion(12.05)).toBe(true);
+    expect(deck.reconcilePlaybackCompletion(12.05)).toBe(false);
+    expect(completions).toEqual([expect.objectContaining({ settledBy: "reconcile", outcome: "recovered" })]);
+  });
+
+  it("starts the source before a deadline-registration failure can recover its completion", () => {
+    const { context, engine } = createEngine();
+    context.state = "running";
+    const deck = engine.getDeck("a");
+    const completions: unknown[] = [];
+    deck.subscribePlaybackCompletion((event) => completions.push(event));
+    deck.loadBuffer({ duration: 2 } as AudioBuffer, "short");
+    let sourceWasStartedAtRegistration = false;
+    engine.onAudioClockDeadline = (() => {
+      const source = context.sources.at(-1)!;
+      sourceWasStartedAtRegistration = source.startCalls.length === 1;
+      const transportGate = source.connections[0] as FakeGainNode;
+      expect(transportGate.gain.events).toContainEqual({ type: "value", value: 1, time: 10 });
+      context.currentTime = 12.1;
+      throw new Error("deadline registration failed");
+    }) as typeof engine.onAudioClockDeadline;
+
+    deck.play(0, 10);
+    const source = context.sources.at(-1)!;
+
+    expect(source.startCalls).toEqual([{ when: 10, offset: 0 }]);
+    expect(sourceWasStartedAtRegistration).toBe(true);
+    expect(completions).toEqual([]);
+    expect(deck.getSnapshot()).toMatchObject({ trackId: "short", status: "playing" });
+    expect(deck.reconcilePlaybackCompletion(12.1)).toBe(true);
+    expect(completions).toEqual([expect.objectContaining({
+      settledBy: "reconcile",
+      outcome: "recovered"
+    })]);
+  });
+
+  it("rebases immediate playback and leaves the transport gate open at the effective start", () => {
+    const { context, engine } = createEngine();
+    context.state = "running";
+    const deck = engine.getDeck("a");
+    deck.loadBuffer({ duration: 2 } as AudioBuffer, "short");
+    const createSource = context.createBufferSource.bind(context);
+    context.createBufferSource = () => {
+      const source = createSource();
+      context.currentTime = 10.1;
+      return source;
+    };
+
+    expect(deck.play(0, 10)).toBe(10.1);
+    const source = context.sources.at(-1)!;
+    const transportGate = source.connections[0] as FakeGainNode;
+    const gateValues = transportGate.gain.events.filter((event) => event.type === "value");
+
+    expect(source.startCalls).toEqual([{ when: 10.1, offset: 0 }]);
+    expect(gateValues.slice(-2)).toEqual([
+      { type: "value", value: 0, time: 10.1 },
+      { type: "value", value: 1, time: 10.1 }
+    ]);
+  });
+
+  it("fails closed when the exact native source ends before its media boundary", () => {
+    const { context, engine } = createEngine();
+    context.state = "running";
+    const deck = engine.getDeck("a");
+    const completions: Array<{ settledBy: string; outcome: string }> = [];
+    deck.subscribe(() => { throw new Error("snapshot observer failed"); });
+    deck.subscribePlaybackCompletion((event) => completions.push(event));
+    deck.loadBuffer({ duration: 5 } as AudioBuffer, "short");
+    deck.play(0, 10);
+
+    context.currentTime = 11;
+    context.sources.at(-1)!.onended?.();
+
+    expect(deck.getSnapshot()).toMatchObject({ status: "recoverable-error", positionSeconds: 1 });
+    expect(completions).toEqual([expect.objectContaining({ settledBy: "source-onended", outcome: "premature" })]);
+  });
+
+  it.each(["suspended", "closed"] as const)(
+    "never declares natural completion from a source callback while the context is %s",
+    (state) => {
+      const { context, engine } = createEngine();
+      context.state = "running";
+      const deck = engine.getDeck("a");
+      const completions: Array<{ settledBy: string; outcome: string }> = [];
+      deck.subscribePlaybackCompletion((event) => completions.push(event));
+      deck.loadBuffer({ duration: 2 } as AudioBuffer, "short");
+      deck.play(0, 10);
+      context.currentTime = 12.2;
+      context.state = state;
+
+      context.sources.at(-1)!.onended?.();
+
+      expect(deck.getSnapshot()).toMatchObject({ status: "recoverable-error" });
+      expect(completions).toEqual([expect.objectContaining({
+        settledBy: "source-onended",
+        outcome: "premature"
+      })]);
+    }
+  );
+
+  it("settles a scheduled stop as paused without emitting natural completion", () => {
+    const { context, engine } = createEngine();
+    context.state = "running";
+    const deck = engine.getDeck("a");
+    const completions: unknown[] = [];
+    deck.subscribePlaybackCompletion((event) => completions.push(event));
+    deck.loadBuffer({ duration: 10 } as AudioBuffer, "short");
+    deck.play(0, 10);
+    expect(deck.stopAt(15)).toBe(true);
+
+    context.currentTime = 15;
+    context.sources.at(-1)!.onended?.();
+
+    expect(deck.getSnapshot()).toMatchObject({ status: "paused", positionSeconds: 5 });
+    expect(completions).toEqual([]);
+  });
+
+  it("settles an exact scheduled stop as paused while the context is suspended", () => {
+    const { context, engine } = createEngine();
+    context.state = "running";
+    const deck = engine.getDeck("b");
+    const completions: unknown[] = [];
+    deck.subscribePlaybackCompletion((event) => completions.push(event));
+    deck.loadBuffer({ duration: 10 } as AudioBuffer, "short");
+    deck.play(0, 10);
+    expect(deck.stopAt(15)).toBe(true);
+    context.currentTime = 15;
+    context.state = "suspended";
+
+    context.sources.at(-1)!.onended?.();
+
+    expect(deck.getSnapshot()).toMatchObject({ status: "paused", positionSeconds: 5 });
+    expect(completions).toEqual([]);
+  });
+
+  it("rejects a rate ramp after an exact scheduled stop is owned", () => {
+    const { context, engine } = createEngine();
+    context.state = "running";
+    const deck = engine.getDeck("a");
+    deck.loadBuffer({ duration: 10 } as AudioBuffer, "short");
+    deck.play(0, 10);
+    expect(deck.stopAt(15)).toBe(true);
+    expect(deck.schedulePlaybackRateRamp(1.2, 12, 2)).toBe(false);
+
+    context.currentTime = 15;
+    context.sources.at(-1)!.onended?.();
+    expect(deck.getSnapshot()).toMatchObject({ status: "paused", positionSeconds: 5 });
+  });
+
+  it("revokes stale source and watchdog completion across pause, reload, and replay", () => {
+    const { context, engine } = createEngine();
+    context.state = "running";
+    const deck = engine.getDeck("b");
+    const completions: unknown[] = [];
+    deck.subscribePlaybackCompletion((event) => completions.push(event));
+    deck.loadBuffer({ duration: 4 } as AudioBuffer, "old");
+    deck.play(0, 10);
+    const oldPrimary = context.sources.at(-1)!.onended;
+    const oldWatchdog = context.oscillators.at(-1)!.onended;
+    context.currentTime = 11;
+    expect(deck.pause()).toBe(true);
+    deck.loadBuffer({ duration: 8 } as AudioBuffer, "new");
+    deck.play(0, 12);
+
+    context.currentTime = 20;
+    oldPrimary?.();
+    oldWatchdog?.();
+
+    expect(deck.getSnapshot()).toMatchObject({ trackId: "new", status: "playing" });
+    expect(completions).toEqual([]);
+  });
+
+  it("revokes native completion before fallible clock and gate cleanup", () => {
+    const { context, engine } = createEngine();
+    context.state = "running";
+    const deck = engine.getDeck("a");
+    const completions: unknown[] = [];
+    deck.subscribePlaybackCompletion((event) => completions.push(event));
+    deck.loadBuffer({ duration: 4 } as AudioBuffer, "old");
+    deck.play(0, 10);
+    const source = context.sources.at(-1)!;
+    const oldPrimary = source.onended;
+    const oldWatchdog = context.oscillators.at(-1)!.onended;
+    const transportGate = source.connections[0] as FakeGainNode;
+    (engine.clock as unknown as { now: () => number }).now = () => {
+      throw new Error("clock failed");
+    };
+    transportGate.gain.cancelScheduledValues = () => {
+      throw new Error("gate failed");
+    };
+
+    expect(() => deck.pause()).not.toThrow();
+    (engine.clock as unknown as { now: () => number }).now = () => context.currentTime;
+    oldPrimary?.();
+    oldWatchdog?.();
+
+    expect(deck.getSnapshot().status).toBe("paused");
+    expect(transportGate.gain.value).toBe(0);
+    expect(completions).toEqual([]);
+  });
+
+  it("revokes native completion during audio-only host teardown", () => {
+    const { context, engine } = createEngine();
+    context.state = "running";
+    const deck = engine.getDeck("b");
+    const completions: unknown[] = [];
+    deck.subscribePlaybackCompletion((event) => completions.push(event));
+    deck.loadBuffer({ duration: 4 } as AudioBuffer, "old");
+    deck.play(0, 10);
+    const oldPrimary = context.sources.at(-1)!.onended;
+    const oldWatchdog = context.oscillators.at(-1)!.onended;
+
+    expect(deck.shutdownForHostTeardown()).toBe(true);
+    context.currentTime = 20;
+    oldPrimary?.();
+    oldWatchdog?.();
+
+    expect(deck.getSnapshot().status).toBe("paused");
+    expect(completions).toEqual([]);
+  });
+
+  it("re-arms the exact completion deadline after an integrated rate ramp", () => {
+    const { context, engine } = createEngine();
+    context.state = "running";
+    const deck = engine.getDeck("a");
+    deck.loadBuffer({ duration: 12 } as AudioBuffer, "ramped");
+    deck.play(0, 10);
+    const oldPrimary = context.sources.at(-1)!.onended;
+    expect(deck.schedulePlaybackRateRamp(1.5, 12, 4)).toBe(true);
+    const rampDeadline = context.oscillators.at(-1)!;
+    // 2 seconds at 1x before the ramp, 5 seconds during it, then 5 seconds at 1.5x.
+    expect(rampDeadline.startCalls[0]).toBeCloseTo(16 + 5 / 1.5 + 0.05);
+
+    context.currentTime = 22;
+    oldPrimary?.();
+    expect(deck.getSnapshot().status).toBe("playing");
+    expect(deck.reconcilePlaybackCompletion(16 + 5 / 1.5 + 0.05)).toBe(true);
+    expect(deck.getSnapshot().status).toBe("ended");
+  });
+
+  it("rejects an overlapping rate ramp whose rendered slope cannot be preserved", () => {
+    const { context, engine } = createEngine();
+    context.state = "running";
+    const deck = engine.getDeck("b");
+    deck.loadBuffer({ duration: 30 } as AudioBuffer, "ramped");
+    deck.play(0, 10);
+    expect(deck.schedulePlaybackRateRamp(1.5, 12, 4)).toBe(true);
+    context.currentTime = 13;
+    expect(deck.schedulePlaybackRateRamp(0.8, 14, 2)).toBe(false);
   });
 
   it("surfaces recoverable errors without pretending a track is ready", () => {

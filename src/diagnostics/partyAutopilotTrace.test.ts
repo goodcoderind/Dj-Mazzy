@@ -32,7 +32,7 @@ const happyTerminalEvents: readonly PartyAutopilotEventInput[] = [
   { type: "transition-scheduled", activeSecond: 410, transition: 2, sourceTrackOrdinal: 2, sourceLoadOrdinal: 2, targetTrackOrdinal: 3, targetLoadOrdinal: 3, ownership: "autopilot", template: "downbeat-cut" },
   { type: "transition-completed", activeSecond: 411, transition: 2, targetTrackOrdinal: 3, targetLoadOrdinal: 3, settledBy: "primary", completionOutcome: "on-time", pauseRequired: false },
   { type: "final-declared", activeSecond: 412, deck: "a", trackOrdinal: 3, loadOrdinal: 3 },
-  { type: "deck-ended", activeSecond: 620, deck: "a", trackOrdinal: 3, loadOrdinal: 3 },
+  { type: "deck-ended", activeSecond: 620, deck: "a", trackOrdinal: 3, loadOrdinal: 3, settledBy: "source-onended", outcome: "on-time" },
   { type: "session-ended", activeSecond: 620, reason: "final-track-ended" }
 ];
 
@@ -55,6 +55,9 @@ describe("Party Autopilot trace", () => {
       transitionCompletionFailures: 0,
       transitionCompletionCleanupFailures: 0,
       coordinatorFailures: 0,
+      deckCompletionRecoveries: 0,
+      lateDeckCompletions: 0,
+      deckCompletionFailures: 0,
       pauses: 0
     });
   });
@@ -78,7 +81,7 @@ describe("Party Autopilot trace", () => {
       { type: "track-played", activeSecond: 0, trackOrdinal: 1, loadOrdinal: 1, cause: "host" },
       { type: "arm-started", activeSecond: 2, operation: 1, origin: "autopilot" },
       { type: "final-declared", activeSecond: 3, deck: "a", trackOrdinal: 1, loadOrdinal: 1 },
-      { type: "deck-ended", activeSecond: 4, deck: "a", trackOrdinal: 1, loadOrdinal: 1 },
+      { type: "deck-ended", activeSecond: 4, deck: "a", trackOrdinal: 1, loadOrdinal: 1, settledBy: "source-onended", outcome: "on-time" },
       { type: "session-ended", activeSecond: 4, reason: "final-track-ended" }
     ]);
     expect(evaluatePartyAutopilotTrace(openArm).failureCodes).toContain("session-ended-with-open-operation");
@@ -228,7 +231,7 @@ describe("Party Autopilot trace", () => {
       { type: "track-played", activeSecond: 0, trackOrdinal: 1, loadOrdinal: 1, cause: "host" },
       { type: "final-declared", activeSecond: 30, deck: "a", trackOrdinal: 1, loadOrdinal: 1 },
       { type: "final-revoked", activeSecond: 31 },
-      { type: "deck-ended", activeSecond: 32, deck: "a", trackOrdinal: 1, loadOrdinal: 1 },
+      { type: "deck-ended", activeSecond: 32, deck: "a", trackOrdinal: 1, loadOrdinal: 1, settledBy: "source-onended", outcome: "on-time" },
       { type: "session-ended", activeSecond: 32, reason: "final-track-ended" }
     ]);
     expect(evaluatePartyAutopilotTrace(trace).failureCodes).toContain("session-ended-without-final");
@@ -274,7 +277,7 @@ describe("Party Autopilot trace", () => {
     const afterTerminal = record([
       { type: "session-started", activeSecond: 0 },
       { type: "final-declared", activeSecond: 1, deck: "a", trackOrdinal: 1, loadOrdinal: 1 },
-      { type: "deck-ended", activeSecond: 2, deck: "a", trackOrdinal: 1, loadOrdinal: 1 },
+      { type: "deck-ended", activeSecond: 2, deck: "a", trackOrdinal: 1, loadOrdinal: 1, settledBy: "source-onended", outcome: "on-time" },
       { type: "session-ended", activeSecond: 2, reason: "final-track-ended" },
       { type: "final-revoked", activeSecond: 2 }
     ]);
@@ -522,6 +525,95 @@ describe("Party Autopilot trace", () => {
       .toContain("transition-completion-unresolved");
   });
 
+  it("binds native deck completion provenance and requires exact terminal ordering", () => {
+    const recoveredEvents = happyTerminalEvents.map((event) => event.type === "deck-ended"
+      ? { ...event, settledBy: "audio-clock" as const, outcome: "recovered" as const }
+      : event);
+    const recovered = evaluatePartyAutopilotTrace(record(recoveredEvents));
+    expect(recovered.failureCodes).toEqual([]);
+    expect(recovered.counters.deckCompletionRecoveries).toBe(1);
+
+    const lateEvents = happyTerminalEvents.map((event) => event.type === "deck-ended"
+      ? { ...event, outcome: "late" as const }
+      : event);
+    const late = evaluatePartyAutopilotTrace(record(lateEvents));
+    expect(late.failureCodes).toEqual([]);
+    expect(late.counters.lateDeckCompletions).toBe(1);
+
+    const duplicateIndex = recoveredEvents.findIndex((event) => event.type === "session-ended");
+    const duplicateEvents = [...recoveredEvents];
+    duplicateEvents.splice(duplicateIndex, 0, {
+      type: "deck-ended",
+      activeSecond: 620,
+      deck: "a",
+      trackOrdinal: 3,
+      loadOrdinal: 3,
+      settledBy: "audio-clock",
+      outcome: "recovered"
+    });
+    expect(evaluatePartyAutopilotTrace(record(duplicateEvents)).failureCodes)
+      .toContain("duplicate-deck-completion");
+
+    const delayedTerminal = [...happyTerminalEvents];
+    const terminalIndex = delayedTerminal.findIndex((event) => event.type === "session-ended");
+    delayedTerminal.splice(terminalIndex, 0, {
+      type: "queue-committed",
+      activeSecond: 620,
+      revision: 4,
+      trackOrdinals: []
+    });
+    expect(evaluatePartyAutopilotTrace(record(delayedTerminal)).failureCodes)
+      .toContain("session-ended-without-final");
+
+    const pausedTerminal = [...happyTerminalEvents];
+    const finalEndIndex = pausedTerminal.findIndex((event) => event.type === "deck-ended");
+    pausedTerminal.splice(finalEndIndex, 0, {
+      type: "session-paused",
+      activeSecond: 620,
+      reason: "host-request"
+    });
+    expect(evaluatePartyAutopilotTrace(record(pausedTerminal)).failureCodes)
+      .toContain("invalid-session-lifecycle");
+  });
+
+  it("requires a safety pause after premature exact-source completion", () => {
+    const prefix: PartyAutopilotEventInput[] = [
+      { type: "session-started", activeSecond: 0 },
+      { type: "track-played", activeSecond: 0, trackOrdinal: 1, loadOrdinal: 1, cause: "host" },
+      { type: "deck-completion-failed", activeSecond: 2, deck: "a", trackOrdinal: 1, loadOrdinal: 1, settledBy: "source-onended", reason: "premature", pauseRequired: true }
+    ];
+    const valid = evaluatePartyAutopilotTrace(record([
+      ...prefix,
+      { type: "session-paused", activeSecond: 2, reason: "deck-completion" }
+    ]));
+    expect(valid.failureCodes).toEqual([]);
+    expect(valid.counters.deckCompletionFailures).toBe(1);
+    expect(evaluatePartyAutopilotTrace(record(prefix)).failureCodes)
+      .toContain("deck-completion-not-paused");
+  });
+
+  it("keeps a transition unresolved until paused deck-completion recovery finishes", () => {
+    const prefix: PartyAutopilotEventInput[] = [
+      { type: "session-started", activeSecond: 0 },
+      { type: "track-played", activeSecond: 0, trackOrdinal: 1, loadOrdinal: 1, cause: "host" },
+      { type: "arm-started", activeSecond: 1, operation: 1, origin: "host" },
+      { type: "arm-settled", activeSecond: 1, operation: 1, outcome: "scheduled", pauseRequired: false },
+      { type: "transition-scheduled", activeSecond: 1, transition: 1, sourceTrackOrdinal: 1, sourceLoadOrdinal: 1, targetTrackOrdinal: 2, targetLoadOrdinal: 2, ownership: "host", template: "safe-fade" },
+      { type: "deck-completion-failed", activeSecond: 2, deck: "a", trackOrdinal: 1, loadOrdinal: 1, settledBy: "source-onended", reason: "premature", pauseRequired: true },
+      { type: "session-paused", activeSecond: 2, reason: "deck-completion" }
+    ];
+    expect(evaluatePartyAutopilotTrace(record(prefix)).failureCodes)
+      .toContain("transition-completion-unresolved");
+    expect(evaluatePartyAutopilotTrace(record([
+      ...prefix,
+      { type: "transition-rescued", activeSecond: 2, transition: 1, kept: "source" }
+    ])).failureCodes).toEqual([]);
+    expect(evaluatePartyAutopilotTrace(record([
+      ...prefix,
+      { type: "transition-cancelled", activeSecond: 2, transition: 1, reason: "stop-all-sound", targetPreserved: false }
+    ])).failureCodes).toEqual([]);
+  });
+
   it("records only bounded allowlisted fields", () => {
     const recorder = createPartyAutopilotTraceRecorder();
     recorder.append({ type: "session-started", activeSecond: 0, filename: "private.mp3", trackId: "secret" } as never);
@@ -539,6 +631,8 @@ describe("Party Autopilot trace", () => {
     expect(hostile.append({ type: "final-declared", activeSecond: 0, deck: "private filename.mp3", trackOrdinal: 1, loadOrdinal: 1 } as never)).toBe(false);
     expect(hostile.append({ type: "queue-committed", activeSecond: 0, revision: "private filename.mp3", trackOrdinals: [1] } as never)).toBe(false);
     expect(hostile.append({ type: "coordinator-failed", activeSecond: 0, operation: 1, phase: "private filename.mp3", pauseRequired: true } as never)).toBe(false);
+    expect(hostile.append({ type: "deck-ended", activeSecond: 0, deck: "a", trackOrdinal: 1, loadOrdinal: 1, settledBy: "timer", outcome: "recovered" } as never)).toBe(false);
+    expect(hostile.append({ type: "deck-ended", activeSecond: 0, deck: "a", trackOrdinal: 1, loadOrdinal: 1, settledBy: "source-onended", outcome: "recovered" } as never)).toBe(false);
     const hostileJson = JSON.stringify(hostile.snapshot());
     expect(hostileJson).not.toContain("private filename.mp3");
     expect(hostile.snapshot().interrupted).toBe(true);

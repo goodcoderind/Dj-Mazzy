@@ -7,6 +7,15 @@ import {
   type PreparedKeyLockFactory,
   type PreparedKeyLockSource
 } from "./keyLockPreparedSource";
+import {
+  createDeckPlaybackCompletionLease,
+  deriveConstantRatePlaybackEndTime,
+  deriveRampedPlaybackEndTime,
+  inspectDeckPlaybackCompletion,
+  ownsDeckPlaybackCompletionLease,
+  type DeckPlaybackCompletionLease,
+  type DeckPlaybackCompletionSignal
+} from "../planning/deckPlaybackCompletionOwnership";
 
 export type DeckStatus =
   | "idle"
@@ -26,10 +35,23 @@ export type DeckSnapshot = Readonly<{
   positionSeconds: number;
   playbackRate: number;
   scheduledStartTime: number | null;
+  completionSettledBy: DeckPlaybackCompletionSignal | null;
+  completionIntent: "natural" | "scheduled-stop" | null;
+  completionOperation: number | null;
+  completionLoadRevision: number | null;
   error: string | null;
 }>;
 
-type PlaybackRateAutomation = {
+export type DeckPlaybackCompletionEvent = Readonly<{
+  channel: DeckChannel;
+  trackId: string | null;
+  operation: number;
+  loadRevision: number;
+  settledBy: DeckPlaybackCompletionSignal;
+  outcome: "on-time" | "recovered" | "late" | "premature";
+}>;
+
+type PlaybackRateSegment = {
   startTime: number;
   endTime: number;
   startRate: number;
@@ -38,6 +60,14 @@ type PlaybackRateAutomation = {
 };
 
 type DeckListener = (snapshot: DeckSnapshot) => void;
+type DeckPlaybackCompletionListener = (event: DeckPlaybackCompletionEvent) => void;
+
+type NativeCompletionRuntime = {
+  lease: DeckPlaybackCompletionLease;
+  source: AudioBufferSourceNode;
+  deadlineCancel: (() => void) | null;
+  wakeTimer: ReturnType<typeof setTimeout> | null;
+};
 
 const clampPlaybackRate = (value: number) => Math.max(0.5, Math.min(1.5, value));
 const clampEqGain = (value: number) => Math.max(-12, Math.min(12, value));
@@ -51,6 +81,7 @@ export class DeckEngine {
   private readonly trackTrim: GainNode;
   private readonly transportGate: GainNode;
   private readonly listeners = new Set<DeckListener>();
+  private readonly playbackCompletionListeners = new Set<DeckPlaybackCompletionListener>();
 
   private buffer: AudioBuffer | null = null;
   private source: AudioBufferSourceNode | null = null;
@@ -65,9 +96,18 @@ export class DeckEngine {
   private startTime = 0;
   private startOffset = 0;
   private playbackRate = 1;
-  private rateAutomation: PlaybackRateAutomation | null = null;
+  private rateTimeline: PlaybackRateSegment[] = [];
   private error: string | null = null;
   private runtimeLoadRevision = 0;
+  private transportRevision = 0;
+  private ratePlanRevision = 0;
+  private playbackCompletionOperation = 0;
+  private sourceId = 0;
+  private nativeCompletion: NativeCompletionRuntime | null = null;
+  private completionSettledBy: DeckPlaybackCompletionSignal | null = null;
+  private completionIntent: "natural" | "scheduled-stop" | null = null;
+  private completionOperation: number | null = null;
+  private completionLoadRevision: number | null = null;
   private preparedKeyLock: PreparedKeyLockSource | null = null;
   private keyLockPreparation: Promise<boolean> | null = null;
   private keyLockAttempt = 0;
@@ -92,14 +132,26 @@ export class DeckEngine {
 
   subscribe(listener: DeckListener) {
     this.listeners.add(listener);
-    listener(this.getSnapshot());
+    try { listener(this.getSnapshot()); } catch { /* Observers cannot revoke audio ownership. */ }
     return () => this.listeners.delete(listener);
   }
 
+  subscribePlaybackCompletion(listener: DeckPlaybackCompletionListener) {
+    this.playbackCompletionListeners.add(listener);
+    return () => this.playbackCompletionListeners.delete(listener);
+  }
+
   private emit() {
-    const snapshot = this.getSnapshot();
+    let snapshot: DeckSnapshot;
+    try { snapshot = this.getSnapshot(); } catch { return; }
     for (const listener of this.listeners) {
-      listener(snapshot);
+      try { listener(snapshot); } catch { /* Observers cannot revoke audio ownership. */ }
+    }
+  }
+
+  private emitPlaybackCompletion(event: DeckPlaybackCompletionEvent) {
+    for (const listener of this.playbackCompletionListeners) {
+      try { listener(event); } catch { /* One observer cannot revoke transport ownership. */ }
     }
   }
 
@@ -120,6 +172,10 @@ export class DeckEngine {
       positionSeconds: this.getPosition(now),
       playbackRate: this.getPlaybackRate(now),
       scheduledStartTime: this.status === "scheduled" ? this.startTime : null,
+      completionSettledBy: this.completionSettledBy,
+      completionIntent: this.completionIntent,
+      completionOperation: this.completionOperation,
+      completionLoadRevision: this.completionLoadRevision,
       error: this.error
     });
   }
@@ -276,7 +332,7 @@ export class DeckEngine {
     this.startTime = when;
     this.startOffset = offsetSeconds;
     this.playbackRate = rate;
-    this.rateAutomation = null;
+    this.rateTimeline = [];
     this.error = null;
     this.activePlaybackBackend = "signalsmith";
     this.status = "scheduled";
@@ -309,8 +365,12 @@ export class DeckEngine {
     this.setTrackTrimDb(0);
     this.startOffset = 0;
     this.playbackRate = 1;
-    this.rateAutomation = null;
+    this.rateTimeline = [];
     this.error = null;
+    this.completionSettledBy = null;
+    this.completionIntent = null;
+    this.completionOperation = null;
+    this.completionLoadRevision = null;
     this.status = "preparing";
     this.emit();
   }
@@ -325,8 +385,12 @@ export class DeckEngine {
     this.trackId = trackId;
     this.startOffset = 0;
     this.playbackRate = 1;
-    this.rateAutomation = null;
+    this.rateTimeline = [];
     this.error = null;
+    this.completionSettledBy = null;
+    this.completionIntent = null;
+    this.completionOperation = null;
+    this.completionLoadRevision = null;
     this.status = "ready";
     this.emit();
   }
@@ -358,7 +422,7 @@ export class DeckEngine {
     }
 
     const context = this.audioEngine.context;
-    const startTime = this.audioEngine.clock.resolveScheduleTime(when);
+    let startTime = this.audioEngine.clock.resolveScheduleTime(when);
     const maxOffset = Math.max(this.buffer.duration - 0.01, 0);
     const requestedOffset =
       offsetSeconds ?? (this.status === "ended" ? 0 : this.getPosition());
@@ -369,29 +433,65 @@ export class DeckEngine {
     source.buffer = this.buffer;
     source.playbackRate.value = this.playbackRate;
     source.connect(this.transportGate);
-    source.onended = () => {
-      if (this.source !== source) {
-        return;
-      }
-      this.startOffset = this.getPosition();
-      this.source = null;
-      this.activePlaybackBackend = null;
-      this.rateAutomation = null;
-      this.status = "ended";
-      this.emit();
-    };
+
+    // Rebase an immediate start after source construction. Web Audio does not
+    // retroactively consume media when start(when) receives a time that became
+    // past during synchronous setup.
+    const gateNow = this.audioEngine.clock.now();
+    startTime = Math.max(startTime, gateNow);
 
     this.source = source;
     this.activePlaybackBackend = "native";
+    this.transportRevision += 1;
+    this.ratePlanRevision += 1;
+    this.sourceId += 1;
     this.startTime = startTime;
     this.startOffset = safeOffset;
-    this.rateAutomation = null;
+    this.rateTimeline = [{
+      startTime,
+      endTime: Number.POSITIVE_INFINITY,
+      startRate: this.playbackRate,
+      targetRate: this.playbackRate,
+      startPosition: safeOffset
+    }];
     this.error = null;
+    this.completionSettledBy = null;
+    this.completionIntent = null;
+    this.completionOperation = null;
+    this.completionLoadRevision = null;
     this.status = startTime > this.audioEngine.clock.now() ? "scheduled" : "playing";
-    source.start(startTime, safeOffset);
-    this.transportGate.gain.cancelScheduledValues(this.audioEngine.clock.now());
-    this.transportGate.gain.setValueAtTime(0, this.audioEngine.clock.now());
-    this.transportGate.gain.setValueAtTime(1, startTime);
+    const expectedEndTime = deriveConstantRatePlaybackEndTime({
+      startTimeSeconds: startTime,
+      startOffsetSeconds: safeOffset,
+      durationSeconds: this.buffer.duration,
+      playbackRate: this.playbackRate
+    });
+    const completionRuntime = this.installNativeCompletion(
+      source,
+      expectedEndTime,
+      this.buffer.duration,
+      "natural",
+      false
+    );
+    try {
+      // Commit the mute/open automation before starting the one-shot source and
+      // before any watchdog adapter can block. A source must never consume its
+      // whole interval behind a still-muted transport gate.
+      this.transportGate.gain.cancelScheduledValues(gateNow);
+      this.transportGate.gain.setValueAtTime(0, gateNow);
+      this.transportGate.gain.setValueAtTime(1, startTime);
+      source.start(startTime, safeOffset);
+    } catch (error) {
+      this.revokeNativeCompletion();
+      this.source = null;
+      this.activePlaybackBackend = null;
+      this.status = "ready";
+      try { this.muteTransportGate(this.audioEngine.clock.now()); }
+      catch { try { this.transportGate.gain.value = 0; } catch { /* Source ownership is revoked. */ } }
+      try { source.disconnect(); } catch { /* The failed source owns no transport. */ }
+      throw error;
+    }
+    this.armNativeCompletionWatchdog(completionRuntime);
     this.emit();
     return startTime;
   }
@@ -400,9 +500,9 @@ export class DeckEngine {
     if (!this.source && this.activePlaybackBackend !== "signalsmith") {
       return false;
     }
-    this.startOffset = this.getPosition();
+    try { this.startOffset = this.getPosition(); } catch { /* Preserve the last known offset. */ }
     this.stopSource();
-    this.rateAutomation = null;
+    this.rateTimeline = [];
     this.status = "paused";
     this.emit();
     return true;
@@ -414,11 +514,31 @@ export class DeckEngine {
       // has an audio-clock completion sentinel and exact state transition.
       return false;
     }
-    if (!this.source) {
+    this.reconcilePlaybackCompletion();
+    if (!this.source || !this.buffer) {
       return false;
     }
     const scheduled = this.audioEngine.clock.resolveScheduleTime(when);
-    this.source.stop(scheduled);
+    const currentCompletion = this.nativeCompletion?.lease;
+    if (!currentCompletion || currentCompletion.intent !== "natural" ||
+      scheduled >= currentCompletion.expectedEndTimeSeconds - 1e-9) {
+      return false;
+    }
+    const naturalEnd = currentCompletion.expectedEndTimeSeconds;
+    const effectiveEnd = Math.max(this.startTime, Math.min(
+      scheduled,
+      naturalEnd
+    ));
+    const endPosition = this.getPosition(effectiveEnd);
+    this.ratePlanRevision += 1;
+    this.installNativeCompletion(this.source, effectiveEnd, endPosition, "scheduled-stop");
+    try {
+      this.source.stop(effectiveEnd);
+    } catch {
+      this.ratePlanRevision += 1;
+      this.installNativeCompletion(this.source, naturalEnd, this.buffer.duration, "natural");
+      return false;
+    }
     return true;
   }
 
@@ -445,22 +565,37 @@ export class DeckEngine {
     this.trackId = null;
     this.startOffset = 0;
     this.playbackRate = 1;
-    this.rateAutomation = null;
+    this.rateTimeline = [];
     this.error = null;
+    this.completionSettledBy = null;
+    this.completionIntent = null;
+    this.completionOperation = null;
+    this.completionLoadRevision = null;
     this.status = "idle";
     this.emit();
+  }
+
+  shutdownForHostTeardown() {
+    const ownedAudio = Boolean(this.source || this.activePlaybackBackend === "signalsmith");
+    if (!ownedAudio) return false;
+    try { this.startOffset = this.getPosition(); } catch { /* Preserve the last known offset. */ }
+    this.stopSource();
+    this.rateTimeline = [];
+    this.status = this.buffer ? "paused" : "idle";
+    return true;
   }
 
   setPlaybackRate(value: number) {
     if (!Number.isFinite(value)) {
       throw new RangeError("playback rate must be finite");
     }
+    this.reconcilePlaybackCompletion();
     const safeRate = clampPlaybackRate(value);
     const position = this.getPosition();
     const wasActive = this.isActive();
     const restartTime = this.status === "scheduled" ? this.startTime : this.audioEngine.clock.now();
     this.playbackRate = safeRate;
-    this.rateAutomation = null;
+    this.rateTimeline = [];
     if (wasActive) {
       this.play(position, restartTime);
     } else {
@@ -471,7 +606,8 @@ export class DeckEngine {
   }
 
   schedulePlaybackRateRamp(targetRate: number, startTime: number, durationSeconds: number) {
-    if (!this.source) {
+    this.reconcilePlaybackCompletion();
+    if (!this.source || !this.nativeCompletion || this.nativeCompletion.lease.intent !== "natural") {
       return false;
     }
     if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) {
@@ -482,33 +618,89 @@ export class DeckEngine {
       this.startTime,
       this.audioEngine.clock.resolveScheduleTime(startTime)
     );
+    const now = this.audioEngine.clock.now();
+    if (this.rateTimeline.some((segment) => Number.isFinite(segment.endTime) &&
+      segment.endTime > now + 1e-9 && scheduledStart > segment.startTime + 1e-9 &&
+      scheduledStart <= segment.endTime + 1e-9)) {
+      // cancelScheduledValues cannot preserve the already-defined slope of an
+      // overlapping linear ramp. Fail closed rather than let media position
+      // and the natural-completion deadline diverge from rendered audio.
+      return false;
+    }
+    if (this.nativeCompletion &&
+      scheduledStart >= this.nativeCompletion.lease.expectedEndTimeSeconds - 1e-9) {
+      return false;
+    }
     const startRate = this.getPlaybackRate(scheduledStart);
     const startPosition = this.getPosition(scheduledStart);
     this.source.playbackRate.cancelScheduledValues(scheduledStart);
     this.source.playbackRate.setValueAtTime(startRate, scheduledStart);
     this.source.playbackRate.linearRampToValueAtTime(safeTarget, scheduledStart + durationSeconds);
-    this.rateAutomation = {
-      startTime: scheduledStart,
-      endTime: scheduledStart + durationSeconds,
-      startRate,
-      targetRate: safeTarget,
-      startPosition
-    };
+    const rampEnd = scheduledStart + durationSeconds;
+    const truncated = this.rateTimeline.flatMap((segment) => {
+      if (segment.startTime >= scheduledStart) return [];
+      if (segment.endTime <= scheduledStart) return [segment];
+      return [{ ...segment, endTime: scheduledStart, targetRate: startRate }];
+    });
+    const rampDistance = (startRate + safeTarget) * 0.5 * durationSeconds;
+    this.rateTimeline = [
+      ...truncated,
+      {
+        startTime: scheduledStart,
+        endTime: rampEnd,
+        startRate,
+        targetRate: safeTarget,
+        startPosition
+      },
+      {
+        startTime: rampEnd,
+        endTime: Number.POSITIVE_INFINITY,
+        startRate: safeTarget,
+        targetRate: safeTarget,
+        startPosition: startPosition + rampDistance
+      }
+    ];
     this.playbackRate = safeTarget;
+    this.ratePlanRevision += 1;
+    this.installNativeCompletion(
+      this.source,
+      deriveRampedPlaybackEndTime({
+        durationSeconds: this.buffer?.duration ?? 0,
+        rampStartTimeSeconds: scheduledStart,
+        rampStartPositionSeconds: startPosition,
+        rampDurationSeconds: durationSeconds,
+        startRate,
+        targetRate: safeTarget
+      }),
+      this.buffer?.duration ?? 0,
+      "natural"
+    );
     this.emit();
     return true;
   }
 
+  reconcilePlaybackCompletion(nowSeconds?: number) {
+    const runtime = this.nativeCompletion;
+    if (!runtime) return false;
+    if (nowSeconds != null && (!Number.isFinite(nowSeconds) || nowSeconds < 0)) return false;
+    let authoritativeNow: number;
+    try { authoritativeNow = this.audioEngine.clock.now(); }
+    catch { return false; }
+    return this.settleNativeCompletion(
+      runtime,
+      "reconcile",
+      nowSeconds == null ? authoritativeNow : Math.min(nowSeconds, authoritativeNow)
+    );
+  }
+
   getPlaybackRate(atTime = this.audioEngine.clock.now()) {
-    const automation = this.rateAutomation;
-    if (!automation || atTime >= automation.endTime) {
-      return this.playbackRate;
-    }
-    if (atTime <= automation.startTime) {
-      return automation.startRate;
-    }
-    const progress = (atTime - automation.startTime) / (automation.endTime - automation.startTime);
-    return automation.startRate + (automation.targetRate - automation.startRate) * progress;
+    if (!this.rateTimeline.length) return this.playbackRate;
+    const segment = [...this.rateTimeline].reverse().find((entry) => atTime >= entry.startTime) ??
+      this.rateTimeline[0];
+    if (!Number.isFinite(segment.endTime) || atTime >= segment.endTime) return segment.targetRate;
+    if (atTime <= segment.startTime) return segment.startRate;
+    const progress = (atTime - segment.startTime) / (segment.endTime - segment.startTime);
+    return segment.startRate + (segment.targetRate - segment.startRate) * progress;
   }
 
   getPosition(atTime = this.audioEngine.clock.now()) {
@@ -519,20 +711,18 @@ export class DeckEngine {
       return this.startOffset;
     }
 
-    const automation = this.rateAutomation;
+    const segment = [...this.rateTimeline].reverse().find((entry) => atTime >= entry.startTime);
     let position: number;
-    if (!automation || atTime <= automation.startTime) {
-      position = this.startOffset + (atTime - this.startTime) * (automation?.startRate ?? this.playbackRate);
+    if (!segment) {
+      position = this.startOffset + (atTime - this.startTime) * this.playbackRate;
     } else {
-      const rampDuration = automation.endTime - automation.startTime;
-      const elapsedRamp = Math.min(atTime, automation.endTime) - automation.startTime;
-      const rateSlope = (automation.targetRate - automation.startRate) / rampDuration;
-      position =
-        automation.startPosition +
-        automation.startRate * elapsedRamp +
-        0.5 * rateSlope * elapsedRamp * elapsedRamp;
-      if (atTime > automation.endTime) {
-        position += (atTime - automation.endTime) * automation.targetRate;
+      const elapsed = Math.max(0, Math.min(atTime, segment.endTime) - segment.startTime);
+      if (!Number.isFinite(segment.endTime) || segment.startRate === segment.targetRate) {
+        position = segment.startPosition + elapsed * segment.startRate;
+      } else {
+        const duration = segment.endTime - segment.startTime;
+        const slope = (segment.targetRate - segment.startRate) / duration;
+        position = segment.startPosition + segment.startRate * elapsed + 0.5 * slope * elapsed * elapsed;
       }
     }
     return Math.max(0, Math.min(position, this.buffer.duration));
@@ -624,21 +814,33 @@ export class DeckEngine {
   }
 
   private stopSource() {
-    const now = this.audioEngine.clock.now();
-    this.muteTransportGate(now);
+    // Revoke every natural/scheduled completion owner before any fallible clock,
+    // AudioParam, stop, disconnect, or processor cleanup operation.
+    this.revokeNativeCompletion();
     const source = this.source;
     this.source = null;
     const preparedWasActive = this.activePlaybackBackend === "signalsmith";
     this.activePlaybackBackend = null;
     const completion = this.preparedCompletion;
     this.preparedCompletion = null;
+    let now = 0;
+    try { now = Number(this.audioEngine.context.currentTime); } catch { /* Use zero as the final fallback. */ }
+    try { now = this.audioEngine.clock.now(); } catch { /* Use the frozen context time below. */ }
+    if (!Number.isFinite(now) || now < 0) now = 0;
+    try {
+      this.muteTransportGate(now);
+    } catch {
+      try { this.transportGate.gain.value = 0; } catch { /* Authority is already revoked. */ }
+    }
     if (completion) {
       completion.onended = null;
       try { completion.stop(); } catch { /* already ended */ }
-      completion.disconnect();
+      try { completion.disconnect(); } catch { /* prepared authority is already revoked */ }
     }
-    if (preparedWasActive && this.preparedKeyLock) {
-      void this.stopPreparedHandle(this.preparedKeyLock, now);
+    const prepared = this.preparedKeyLock;
+    if (preparedWasActive && prepared) {
+      try { void this.stopPreparedHandle(prepared, now); }
+      catch { void this.disposePreparedHandle(prepared); }
     }
     if (!source) return;
     try {
@@ -646,7 +848,197 @@ export class DeckEngine {
     } catch {
       // A one-shot source may already have ended.
     }
-    source.disconnect();
+    try { source.disconnect(); } catch { /* Transport authority is already revoked. */ }
+  }
+
+  private installNativeCompletion(
+    source: AudioBufferSourceNode,
+    expectedEndTimeSeconds: number,
+    endPositionSeconds: number,
+    intent: "natural" | "scheduled-stop",
+    armWatchdog = true
+  ) {
+    const buffer = this.buffer;
+    if (!buffer || this.source !== source || this.activePlaybackBackend !== "native") {
+      throw new Error("native completion requires the exact active source");
+    }
+    this.revokeNativeCompletion();
+    const lease = createDeckPlaybackCompletionLease({
+      operation: ++this.playbackCompletionOperation,
+      channel: this.channel,
+      loadRevision: this.runtimeLoadRevision,
+      transportRevision: this.transportRevision,
+      ratePlanRevision: this.ratePlanRevision,
+      sourceId: this.sourceId,
+      trackId: this.trackId,
+      intent,
+      startTimeSeconds: this.startTime,
+      startOffsetSeconds: this.startOffset,
+      durationSeconds: buffer.duration,
+      endPositionSeconds,
+      expectedEndTimeSeconds
+    });
+    const runtime: NativeCompletionRuntime = {
+      lease,
+      source,
+      deadlineCancel: null,
+      wakeTimer: null
+    };
+    this.nativeCompletion = runtime;
+    source.onended = () => { this.settleNativeCompletion(runtime, "source-onended"); };
+    if (armWatchdog) this.armNativeCompletionWatchdog(runtime);
+    return runtime;
+  }
+
+  private armNativeCompletionWatchdog(runtime: NativeCompletionRuntime) {
+    if (!ownsDeckPlaybackCompletionLease(this.nativeCompletion?.lease, runtime.lease)) return;
+    try {
+      runtime.deadlineCancel = this.audioEngine.onAudioClockDeadline(
+        runtime.lease.watchdogTimeSeconds,
+        () => { this.settleNativeCompletion(runtime, "audio-clock"); }
+      );
+    } catch {
+      runtime.deadlineCancel = null;
+      // The source is already started for new playback. The independent
+      // bounded wake (and explicit coordinator reconcile) owns recovery.
+    }
+    this.scheduleNativeCompletionWake(runtime);
+  }
+
+  private revokeNativeCompletion() {
+    const runtime = this.nativeCompletion;
+    if (!runtime) return false;
+    this.nativeCompletion = null;
+    try { runtime.source.onended = null; } catch { /* Exact authority is already revoked. */ }
+    const cancel = runtime.deadlineCancel;
+    runtime.deadlineCancel = null;
+    if (runtime.wakeTimer != null) globalThis.clearTimeout(runtime.wakeTimer);
+    runtime.wakeTimer = null;
+    try { cancel?.(); } catch { /* Exact completion authority is already revoked. */ }
+    return true;
+  }
+
+  private scheduleNativeCompletionWake(runtime: NativeCompletionRuntime) {
+    if (!ownsDeckPlaybackCompletionLease(this.nativeCompletion?.lease, runtime.lease)) return;
+    if (runtime.wakeTimer != null) globalThis.clearTimeout(runtime.wakeTimer);
+    let remainingMs = 250;
+    try {
+      remainingMs = this.audioEngine.context.state === "running"
+        ? Math.max(25, (runtime.lease.watchdogTimeSeconds - this.audioEngine.clock.now()) * 1_000)
+        : 250;
+    } catch { /* Retry as a bounded wake; the audio clock remains authoritative. */ }
+    runtime.wakeTimer = globalThis.setTimeout(() => {
+      runtime.wakeTimer = null;
+      if (!this.settleNativeCompletion(runtime, "reconcile")) {
+        this.scheduleNativeCompletionWake(runtime);
+      }
+    }, remainingMs);
+    (runtime.wakeTimer as unknown as { unref?: () => void }).unref?.();
+  }
+
+  private settleNativeCompletion(
+    runtime: NativeCompletionRuntime,
+    signal: DeckPlaybackCompletionSignal,
+    observedNowSeconds?: number
+  ) {
+    const sourceSignal = signal === "source-onended";
+    if (!sourceSignal && this.audioEngine.context.state !== "running") return false;
+    let now: number;
+    try { now = observedNowSeconds ?? this.audioEngine.clock.now(); }
+    catch {
+      if (!sourceSignal) return false;
+      now = runtime.lease.intent === "scheduled-stop"
+        ? runtime.lease.expectedEndTimeSeconds
+        : runtime.lease.startTimeSeconds;
+    }
+    const ownershipNow = sourceSignal
+      ? now + 128 / this.audioEngine.context.sampleRate
+      : now;
+    const state = inspectDeckPlaybackCompletion({
+      current: this.nativeCompletion?.lease ?? null,
+      expected: runtime.lease,
+      nowSeconds: ownershipNow,
+      loadRevision: this.runtimeLoadRevision,
+      transportRevision: this.transportRevision,
+      sourceId: this.sourceId,
+      trackId: this.trackId,
+      sourcePresent: this.source === runtime.source && this.activePlaybackBackend === "native",
+      signal
+    });
+    const naturalSourceWhileStopped = sourceSignal && runtime.lease.intent === "natural" &&
+      this.audioEngine.context.state !== "running";
+    if ((state === "waiting" || naturalSourceWhileStopped) && sourceSignal &&
+      ownsDeckPlaybackCompletionLease(this.nativeCompletion?.lease, runtime.lease)) {
+      // The exact native source ended before its integrated media-time
+      // boundary. It is no longer audible, so waiting and later relabelling it
+      // as natural EOF would be false. Revoke it into a recoverable stopped
+      // state; App may then pause unattended authority explicitly.
+      this.nativeCompletion = null;
+      runtime.source.onended = null;
+      const cancelEarly = runtime.deadlineCancel;
+      runtime.deadlineCancel = null;
+      if (runtime.wakeTimer != null) globalThis.clearTimeout(runtime.wakeTimer);
+      runtime.wakeTimer = null;
+      try { cancelEarly?.(); } catch { /* Exact authority is already revoked. */ }
+      try { this.muteTransportGate(now); } catch { /* Source already stopped. */ }
+      try { runtime.source.disconnect(); } catch { /* Source already stopped. */ }
+      if (this.source !== runtime.source) return false;
+      this.startOffset = this.getPosition(now);
+      this.source = null;
+      this.activePlaybackBackend = null;
+      this.rateTimeline = [];
+      this.completionSettledBy = signal;
+      this.completionIntent = runtime.lease.intent;
+      this.completionOperation = runtime.lease.operation;
+      this.completionLoadRevision = runtime.lease.loadRevision;
+      this.error = "Playback ended before its verified audio-clock boundary.";
+      this.status = "recoverable-error";
+      this.emit();
+      this.emitPlaybackCompletion(Object.freeze({
+        channel: this.channel,
+        trackId: runtime.lease.trackId,
+        operation: runtime.lease.operation,
+        loadRevision: runtime.lease.loadRevision,
+        settledBy: signal,
+        outcome: "premature"
+      }));
+      return true;
+    }
+    if (state !== "ready") return false;
+    if (!ownsDeckPlaybackCompletionLease(this.nativeCompletion?.lease, runtime.lease)) return false;
+    this.nativeCompletion = null;
+    runtime.source.onended = null;
+    const cancel = runtime.deadlineCancel;
+    runtime.deadlineCancel = null;
+    if (runtime.wakeTimer != null) globalThis.clearTimeout(runtime.wakeTimer);
+    runtime.wakeTimer = null;
+    try { cancel?.(); } catch { /* Exact completion authority is already revoked. */ }
+    try { this.muteTransportGate(now); } catch { /* The source has already completed. */ }
+    try { runtime.source.disconnect(); } catch { /* The one-shot source has ended. */ }
+    if (this.source !== runtime.source) return false;
+    this.source = null;
+    this.activePlaybackBackend = null;
+    this.startOffset = runtime.lease.endPositionSeconds;
+    this.rateTimeline = [];
+    this.completionSettledBy = signal;
+    this.completionIntent = runtime.lease.intent;
+    this.completionOperation = runtime.lease.operation;
+    this.completionLoadRevision = runtime.lease.loadRevision;
+    this.status = runtime.lease.intent === "natural" ? "ended" : "paused";
+    this.emit();
+    if (runtime.lease.intent === "natural") {
+      this.emitPlaybackCompletion(Object.freeze({
+        channel: this.channel,
+        trackId: runtime.lease.trackId,
+        operation: runtime.lease.operation,
+        loadRevision: runtime.lease.loadRevision,
+        settledBy: signal,
+        outcome: signal === "source-onended"
+          ? (now > runtime.lease.watchdogTimeSeconds ? "late" : "on-time")
+          : "recovered"
+      }));
+    }
+    return true;
   }
 
   private invalidateRuntimeLoad(nextBuffer: AudioBuffer | null) {

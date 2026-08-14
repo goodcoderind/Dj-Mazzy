@@ -2339,6 +2339,48 @@ These are the active backlog, not reasons to discard the prototype.
   while trace tests cover preload/arm settlement and paused Rescue/Stop ownership
   for an active transition. These establish state semantics; browser adapter
   exceptions and audible continuity remain separate live acceptance work.
+- **D-064 — Lease native deck EOF to an exact audio-clock owner:**
+  `deck-playback-completion-ownership/v1` binds each production native
+  `AudioBufferSourceNode` to its deck, monotonic playback operation, runtime load,
+  transport/source and rate-plan revisions, optional local track ID, source
+  offset, duration, intended boundary, integrated expected Web Audio time, and a
+  50 ms watchdog boundary. The source `onended` callback, an independent silent
+  audio-clock sentinel, a bounded window wake, explicit deck reconciliation, and
+  the Autopilot observer converge on one idempotent settlement. Wall time only
+  wakes the inspector; a suspended/interrupted context cannot declare progress.
+
+  Constant playback derives EOF from remaining media divided by the exact rate.
+  Linear rate ramps integrate media consumption and solve the positive quadratic
+  when EOF falls inside a ramp; completion is re-leased on every ramp, seek/rate
+  restart, or source replacement. A ramp that would overlap a still-pending
+  finite ramp is rejected because `cancelScheduledValues` cannot preserve the
+  prior rendered slope exactly. Pause, eject, load, Stop All Sound, and source
+  replacement revoke the old lease and both signals before calling stop or
+  disconnect. `stopAt` is a separate `scheduled-stop` intent that settles to
+  paused without emitting natural completion. An exact source callback arriving
+  more than one render quantum before its integrated boundary becomes a
+  recoverable premature-completion safety failure; it is never held and later
+  relabelled as natural EOF.
+
+  DeckEngine emits one typed completion event directly from the exact arbiter,
+  rather than exposing a React status-edge inference that could replay after a
+  remount. App rechecks the current Party deck/load before recording it. Verified
+  final completion revokes Autopilot authority, pauses the Party clock, ends the
+  trace, releases the wake lock, and terminally clears the paused checkpoint;
+  premature completion pauses unattended authority and requires the existing
+  host recovery action. The Autopilot tick explicitly reconciles both decks at
+  its already-read Web Audio time and rechecks its epoch ticket before planning.
+
+  `party-autopilot-trace/v9` allowlists only session-local deck/track/load
+  ordinals, `source-onended | audio-clock | reconcile`, and bounded on-time,
+  recovered, late, or premature outcomes. It
+  rejects duplicate completion, requires premature failure to be followed by the
+  exact safety pause, and requires a declared-final deck end to be followed
+  immediately by terminal session cleanup. `party-autopilot-coordinator-soak/v9`
+  creates and inspects the same final-deck lease for primary and missing-primary
+  recovery fixtures. These tests establish deterministic ownership and state
+  liveness only; they do not claim browser callback delivery, decoded-audio
+  continuity, musical quality, or speaker output.
 
 ### Open questions
 

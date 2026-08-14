@@ -71,6 +71,28 @@ describe("shared Party Autopilot coordinator soak", () => {
     expect(result.errors).toEqual([]);
   });
 
+  it("uses the exact final-deck completion lease for primary and recovered signals", () => {
+    for (const [signal, recoveries] of [
+      ["source-onended", 0],
+      ["audio-clock", 1],
+      ["reconcile", 1]
+    ] as const) {
+      const result = simulatePartyAutopilotSoak({
+        tracks: library(2, 30),
+        initialTrackId: "track-0",
+        queuedTrackIds: [],
+        includeRestOfLibrary: false,
+        sessionDurationSeconds: 120,
+        finalDeckCompletionSignal: signal
+      });
+      expect(result.schemaVersion).toBe("party-autopilot-coordinator-soak/v9");
+      expect(result.stopReason).toBe("crate-exhausted");
+      expect(result.evaluation.status).toBe("valid-terminal");
+      expect(result.evaluation.counters.deckCompletionRecoveries).toBe(recoveries);
+      expect(result.errors).toEqual([]);
+    }
+  });
+
   it("honors queue order before one-time library continuation", () => {
     const result = simulatePartyAutopilotSoak({
       tracks: library(5, 120),

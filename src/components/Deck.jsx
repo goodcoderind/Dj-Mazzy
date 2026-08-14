@@ -111,7 +111,7 @@ const Deck = forwardRef(function Deck(
     onDeckPlayStart,
     onAuxAudioStart,
     onStopAllSound,
-    onDeckEnded,
+    onDeckPlaybackCompletion,
     onAudioStartError,
     playbackStartLocked = false,
     playbackStartLockRef,
@@ -144,14 +144,17 @@ const Deck = forwardRef(function Deck(
   const interactionLocked = transitionLocked || rehearsalLocked;
   const startOrLoadLocked = interactionLocked || playbackStartLocked || playbackStartLockRef?.current;
   const interactionLockedRef = useRef(interactionLocked);
-  const previousDeckStatusRef = useRef("idle");
-  const onDeckEndedRef = useRef(onDeckEnded);
+  const onDeckPlaybackCompletionRef = useRef(onDeckPlaybackCompletion);
   interactionLockedRef.current = interactionLocked;
-  onDeckEndedRef.current = onDeckEnded;
+  onDeckPlaybackCompletionRef.current = onDeckPlaybackCompletion;
   if (!deckEngineRef.current) {
     deckEngineRef.current = getAudioEngine().getDeck(channel);
   }
   const deckEngine = deckEngineRef.current;
+
+  useEffect(() => deckEngine.subscribePlaybackCompletion((event) => {
+    onDeckPlaybackCompletionRef.current?.(channel, event);
+  }), [channel, deckEngine]);
 
   const [fileReady, setFileReady] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -572,10 +575,6 @@ const Deck = forwardRef(function Deck(
   useEffect(() => {
     createWaveSurfer();
     const unsubscribe = deckEngine.subscribe((snapshot) => {
-      if (snapshot.status === "ended" && previousDeckStatusRef.current !== "ended") {
-        onDeckEndedRef.current?.(channel, snapshot.trackId);
-      }
-      previousDeckStatusRef.current = snapshot.status;
       setDeckStatus(snapshot.status);
       setFileReady(
         snapshot.durationSeconds > 0 &&
@@ -586,6 +585,7 @@ const Deck = forwardRef(function Deck(
     });
 
     const updateDisplay = () => {
+      deckEngine.reconcilePlaybackCompletion();
       const snapshot = deckEngine.getSnapshot();
       setDeckStatus(snapshot.status);
       if (snapshot.durationSeconds > 0) {
@@ -963,6 +963,7 @@ const Deck = forwardRef(function Deck(
         setFilterCutoff: (hz) => deckEngine.setFilterCutoff(hz),
         pause: () => deckEngine.pause()
       }),
+      reconcilePlaybackCompletion: (nowSeconds) => deckEngine.reconcilePlaybackCompletion(nowSeconds),
       getDecodedBufferForRehearsal: () => deckEngine.getDecodedBufferForRehearsal(),
       pause: () => pause(),
       stopAllSound: () => {

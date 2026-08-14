@@ -20,8 +20,12 @@ import {
   createAutoPilotTransitionCompletionLease,
   inspectAutoPilotTransitionCompletion
 } from "../planning/autoPilotTransitionCompletionOwnership";
+import {
+  createDeckPlaybackCompletionLease,
+  inspectDeckPlaybackCompletion
+} from "../planning/deckPlaybackCompletionOwnership";
 
-export const PARTY_AUTOPILOT_SOAK_SCHEMA_VERSION = "party-autopilot-coordinator-soak/v8" as const;
+export const PARTY_AUTOPILOT_SOAK_SCHEMA_VERSION = "party-autopilot-coordinator-soak/v9" as const;
 
 export type SimulatedPartyTrack = Readonly<{
   id: string;
@@ -69,6 +73,8 @@ export type PartyAutopilotSoakOptions = Readonly<{
   supersededCompletionAttempts?: readonly number[];
   /** One synthetic coordinator tick that fails before mutating its decision. */
   coordinatorFailureIteration?: number;
+  /** Exact final-deck completion signal; non-primary values model a lost source callback. */
+  finalDeckCompletionSignal?: "source-onended" | "audio-clock" | "reconcile";
 }>;
 
 export type SimulatedPartyRescueEvent = Readonly<{
@@ -114,6 +120,10 @@ const validate = (options: PartyAutopilotSoakOptions) => {
   if (options.coordinatorFailureIteration != null &&
     (!Number.isSafeInteger(options.coordinatorFailureIteration) || options.coordinatorFailureIteration < 1)) {
     throw new RangeError("coordinatorFailureIteration must be a positive safe integer");
+  }
+  if (options.finalDeckCompletionSignal != null &&
+    !["source-onended", "audio-clock", "reconcile"].includes(options.finalDeckCompletionSignal)) {
+    throw new RangeError("finalDeckCompletionSignal must be allowlisted");
   }
   const rescueAttempts = new Set<number>();
   for (const rescue of options.rescues ?? []) {
@@ -582,12 +592,60 @@ export const simulatePartyAutopilotSoak = (options: PartyAutopilotSoakOptions): 
     if (decision.kind === "declare-final") {
       append({ type: "final-declared", activeSecond: 0, deck: sourceDeck, trackOrdinal: ordinals.get(sourceId)!, loadOrdinal: sourceLoad });
       const remaining = Math.max(0, (source.durationSeconds - sourcePosition) / sourcePlaybackRate);
+      const completionSignal = options.finalDeckCompletionSignal ?? "source-onended";
+      const expectedEndTimeSeconds = now + remaining;
+      const completionLease = createDeckPlaybackCompletionLease({
+        operation: 1,
+        channel: sourceDeck,
+        loadRevision: sourceLoad,
+        transportRevision: sourceLoad,
+        ratePlanRevision: sourceLoad,
+        sourceId: sourceLoad,
+        trackId: sourceId,
+        intent: "natural",
+        startTimeSeconds: now,
+        startOffsetSeconds: sourcePosition,
+        durationSeconds: source.durationSeconds,
+        endPositionSeconds: source.durationSeconds,
+        expectedEndTimeSeconds
+      });
       const rendered = advance(remaining);
       if (rendered + 1e-9 < remaining) {
         stopReason = "observation-horizon";
         break;
       }
-      append({ type: "deck-ended", activeSecond: 0, deck: sourceDeck, trackOrdinal: ordinals.get(sourceId)!, loadOrdinal: sourceLoad });
+      if (completionSignal !== "source-onended") {
+        const grace = completionLease.watchdogTimeSeconds - now;
+        const graceRendered = advance(grace);
+        if (graceRendered + 1e-9 < grace) {
+          stopReason = "observation-horizon";
+          break;
+        }
+      }
+      const completionState = inspectDeckPlaybackCompletion({
+        current: completionLease,
+        expected: completionLease,
+        nowSeconds: now,
+        loadRevision: sourceLoad,
+        transportRevision: sourceLoad,
+        sourceId: sourceLoad,
+        trackId: sourceId,
+        sourcePresent: true,
+        signal: completionSignal
+      });
+      if (completionState !== "ready") {
+        errors.push(`final deck completion did not settle: ${completionState}`);
+        break;
+      }
+      append({
+        type: "deck-ended",
+        activeSecond: 0,
+        deck: sourceDeck,
+        trackOrdinal: ordinals.get(sourceId)!,
+        loadOrdinal: sourceLoad,
+        settledBy: completionSignal,
+        outcome: completionSignal === "source-onended" ? "on-time" : "recovered"
+      });
       append({ type: "session-ended", activeSecond: 0, reason: "final-track-ended" });
       stopReason = "crate-exhausted";
       break;

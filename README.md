@@ -241,7 +241,7 @@ A deterministic three-hour Party Autopilot coordinator soak now drives the same
 `party-autopilot-decision/v4` function used by the live app. It therefore exercises the real
 queue-first two-song lookahead, library continuation, transition-plan arm
 windows, target cue offsets, no-repeat history, exact final-track ownership, and
-`party-autopilot-trace/v8` evaluator. A Rescue correctly ends the unattended observation
+`party-autopilot-trace/v9` evaluator. A Rescue correctly ends the unattended observation
 in a paused state. This is state/coordinator evidence only: it does not exercise
 browser decoding, Web Audio rendering, analysis workers, musical quality, or
 speaker output, and it does not replace the visible two-hour device check.
@@ -271,7 +271,7 @@ the queue/history unchanged. Mazzy retries once only when enough source-song
 runway remains; a second consecutive failure, or one without retry runway, pauses
 Autopilot while the current song keeps playing. Host control, recovery, or load
 replacement cancels the exact arm without consuming that budget, and late async
-settlement cannot schedule or clear a successor. The v8 synthetic coordinator
+settlement cannot schedule or clear a successor. The v9 synthetic coordinator
 soak covers fail-once/succeed, two-failure pause, timeout, and short-runway pause;
 it remains state evidence rather than browser timing or audible-output evidence.
 
@@ -284,10 +284,10 @@ the target exactly once. A missing primary callback is recovered after the
 cleanup-degraded, or ownership-lost completion pauses Autopilot or locks new
 playback with a persistent host action. Rescue, Stop All
 Sound, recovery, remote authority loss, and unmount revoke both completion
-signals before touching deck audio. The v8 trace distinguishes primary,
+signals before touching deck audio. The v9 trace distinguishes primary,
 watchdog, late, cleanup-degraded, combined late-and-degraded, and failed
 settlement; Stop also records whether the exact target remained preserved. The
-v8 soak injects missing, late, and replaced-target outcomes. This is deterministic ownership evidence, not
+v9 soak injects missing, late, and replaced-target outcomes. This is deterministic ownership evidence, not
 proof of browser callback delivery or speaker continuity.
 
 Every live coordinator observation also owns a session epoch and monotonic tick
@@ -296,11 +296,34 @@ pause, restart, restore, New Party, remote authority loss, and unmount invalidat
 older tickets. One current-epoch unexpected planning, preload, arm, or transition
 watchdog failure is claimed exactly once, settles its owned operation, pauses
 Autopilot and the Party clock, releases the wake lock, and shows a persistent
-host action while leaving the current song alone. Trace v8 requires the matching
-immediate safety pause; the v8 coordinator soak includes a decision-phase failure
+host action while leaving the current song alone. Trace v9 requires the matching
+immediate safety pause; the v9 coordinator soak includes a decision-phase failure
 fixture, while pure boundary and trace tests cover overlapping tickets and
 active-transition recovery ownership. This is fail-closed state evidence, not
 proof that every browser or file error has been reproduced.
+
+Native deck playback now has its own exact natural-completion lease. Each source
+binds its local load, transport, source, and playback-rate-plan revisions to an
+integrated Web Audio end time. The source `onended` signal, a separate silent
+audio-clock sentinel 50 ms later, a bounded window wake, the deck display loop,
+and the Autopilot observer all converge on one idempotent arbiter; window time
+never declares progress. Constant rates, offsets, and linear rate ramps use
+media-time integration; an overlapping ramp is rejected when its rendered slope
+cannot be preserved. Every seek, rate restart, pause, eject, replacement
+load, or Stop All Sound revokes the old owner before stopping its source. A
+scheduled `stopAt` becomes paused and never masquerades as natural EOF. An exact
+source that ends materially early becomes a recoverable safety failure rather
+than being relabelled later as a valid end.
+
+`party-autopilot-trace/v9` records only the deck/load ordinal plus the fixed
+`source-onended`, `audio-clock`, or `reconcile` provenance, distinguishes a
+source callback observed after the watchdog boundary, and requires a final
+deck end to be followed immediately by terminal session cleanup. The v9 soak
+creates and inspects the same final-deck lease and models a missing source
+callback recovered by either the silent audio-clock sentinel or explicit
+audio-clock reconciliation. This is deterministic
+ownership/state evidence; it does not prove callback delivery, decoded-audio
+continuity, or speaker output in a real browser.
 
 Tempo-changing phrase blends also remain fail-closed until pitch-preserving
 playback is ready on the exact loaded decks. A developer-only Signalsmith
