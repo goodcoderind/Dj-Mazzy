@@ -49,6 +49,7 @@ order, risks, and release gates are maintained in the canonical
 - Confidence-gated automatic transitions with a visible safe fallback
 - Opt-in Party Autopilot that preloads the queue and arms the audited transition near track end
 - One-action Rescue that keeps the stronger side of an active transition and pauses Autopilot
+- Always-reachable **Stop All Sound** safety control that pauses both decks and every local preview without deleting the party plan
 - Three-track safety-first lookahead with played-track exclusion and a host-selected energy journey
 - Queue ranking by transition safety, cue continuity, energy intent, confident key, and octave-aware tempo
 - Pre-party readiness check for source playback, next-track availability, queue analysis, and timing-tool state
@@ -148,6 +149,15 @@ song using the current planned transition,
 pause Autopilot, or stop an automatic transition. The technical mixer remains
 available under **Show Advanced Mixer**. Library tracks and queue ordering are
 keyboard operable, and preflight focus moves to its result when opened.
+An always-enabled **Stop All Sound** action is kept in the ordinary Party Mode
+surface and inside the advanced timing dialog. It immediately revokes pending preload and transition starts, cancels
+automatic gain/EQ/filter automation, transition rehearsal, and timing clicks,
+then pauses both decks, the Party clock, and the private activity check. It does
+not eject ready songs, erase the queue or played-song history, delete music, or
+discard the paused recovery plan. Starting sound again always requires a fresh
+host action. Mazzy unlocks new starts only after both decks and every scheduled
+audio owner are confirmed inactive; if that cannot be verified, the lock remains
+in place and the host is told to retry and use system/device mute if sound remains.
 The host also chooses a one- to six-hour target and explicitly chooses whether
 Mazzy may continue beyond the queue; library continuation is off by default.
 Progress comes from accumulated
@@ -231,7 +241,7 @@ A deterministic three-hour Party Autopilot coordinator soak now drives the same
 `party-autopilot-decision/v4` function used by the live app. It therefore exercises the real
 queue-first two-song lookahead, library continuation, transition-plan arm
 windows, target cue offsets, no-repeat history, exact final-track ownership, and
-`party-autopilot-trace/v5` evaluator. A Rescue correctly ends the unattended observation
+`party-autopilot-trace/v6` evaluator. A Rescue correctly ends the unattended observation
 in a paused state. This is state/coordinator evidence only: it does not exercise
 browser decoding, Web Audio rendering, analysis workers, musical quality, or
 speaker output, and it does not replace the visible two-hour device check.

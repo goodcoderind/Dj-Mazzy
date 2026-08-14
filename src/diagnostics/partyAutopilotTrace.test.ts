@@ -49,6 +49,7 @@ describe("Party Autopilot trace", () => {
       armTimeouts: 0,
       transitionsCompleted: 2,
       transitionsRescued: 0,
+      transitionsCancelled: 0,
       pauses: 0
     });
   });
@@ -164,6 +165,56 @@ describe("Party Autopilot trace", () => {
     expect(sourceKept.counters.playedTracks).toBe(1);
     expect(targetKept.status).toBe("valid-in-progress");
     expect(targetKept.counters.playedTracks).toBe(2);
+  });
+
+  it("preserves a committed target across Stop All Sound and a paused resume", () => {
+    const evaluation = evaluatePartyAutopilotTrace(record([
+      { type: "session-started", activeSecond: 0 },
+      { type: "queue-committed", activeSecond: 0, revision: 1, trackOrdinals: [2] },
+      { type: "track-played", activeSecond: 0, trackOrdinal: 1, loadOrdinal: 1, cause: "host" },
+      { type: "preload-started", activeSecond: 2, operation: 1, generation: 1, deck: "b", trackOrdinal: 2, loadOrdinal: 2, selectionSource: "queue" },
+      { type: "preload-settled", activeSecond: 3, operation: 1, outcome: "committed" },
+      { type: "queue-committed", activeSecond: 3, revision: 2, trackOrdinals: [] },
+      { type: "arm-started", activeSecond: 8, operation: 1, origin: "autopilot" },
+      { type: "arm-settled", activeSecond: 9, operation: 1, outcome: "scheduled", pauseRequired: false },
+      { type: "transition-scheduled", activeSecond: 9, transition: 1, sourceTrackOrdinal: 1, sourceLoadOrdinal: 1, targetTrackOrdinal: 2, targetLoadOrdinal: 2, ownership: "autopilot", template: "safe-fade" },
+      { type: "transition-cancelled", activeSecond: 10, transition: 1, reason: "stop-all-sound", targetPreserved: true },
+      { type: "session-paused", activeSecond: 10, reason: "stop-all-sound" },
+      { type: "session-resumed", activeSecond: 11 },
+      { type: "arm-started", activeSecond: 12, operation: 2, origin: "autopilot" },
+      { type: "arm-settled", activeSecond: 12, operation: 2, outcome: "scheduled", pauseRequired: false },
+      { type: "transition-scheduled", activeSecond: 12, transition: 2, sourceTrackOrdinal: 1, sourceLoadOrdinal: 1, targetTrackOrdinal: 2, targetLoadOrdinal: 2, ownership: "autopilot", template: "safe-fade" },
+      { type: "transition-completed", activeSecond: 16, transition: 2, targetTrackOrdinal: 2, targetLoadOrdinal: 2 }
+    ]));
+
+    expect(evaluation.status).toBe("valid-in-progress");
+    expect(evaluation.failureCodes).toEqual([]);
+    expect(evaluation.counters).toMatchObject({ transitionsCancelled: 1, transitionsCompleted: 1, pauses: 1 });
+  });
+
+  it("requires the stop-specific pause immediately after a transition cancellation", () => {
+    const cancellation: readonly PartyAutopilotEventInput[] = [
+      { type: "session-started", activeSecond: 0 },
+      { type: "track-played", activeSecond: 0, trackOrdinal: 1, loadOrdinal: 1, cause: "host" },
+      { type: "arm-started", activeSecond: 1, operation: 1, origin: "host" },
+      { type: "arm-settled", activeSecond: 1, operation: 1, outcome: "scheduled", pauseRequired: false },
+      { type: "transition-scheduled", activeSecond: 1, transition: 1, sourceTrackOrdinal: 1, sourceLoadOrdinal: 1, targetTrackOrdinal: 2, targetLoadOrdinal: 2, ownership: "host", template: "safe-fade" },
+      { type: "transition-cancelled", activeSecond: 2, transition: 1, reason: "stop-all-sound", targetPreserved: true }
+    ];
+    const missing = evaluatePartyAutopilotTrace(record(cancellation));
+    const wrongReason = evaluatePartyAutopilotTrace(record([
+      ...cancellation,
+      { type: "session-paused", activeSecond: 2, reason: "host-request" }
+    ]));
+    const delayed = evaluatePartyAutopilotTrace(record([
+      ...cancellation,
+      { type: "queue-committed", activeSecond: 2, revision: 1, trackOrdinals: [] },
+      { type: "session-paused", activeSecond: 2, reason: "stop-all-sound" }
+    ]));
+
+    expect(missing.failureCodes).toContain("stop-all-sound-not-paused");
+    expect(wrongReason.failureCodes).toContain("stop-all-sound-not-paused");
+    expect(delayed.failureCodes).toContain("stop-all-sound-not-paused");
   });
 
   it("revokes stale final ownership and rejects the old deck end", () => {

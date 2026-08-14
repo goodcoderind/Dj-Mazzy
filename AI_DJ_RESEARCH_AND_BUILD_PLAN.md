@@ -2204,7 +2204,7 @@ These are the active backlog, not reasons to discard the prototype.
   successfully scheduled transition resets the budget. Host/recovery cancellation
   and load replacement do not consume or reset it.
 
-  `party-autopilot-trace/v5` records timeout and whether the owned settlement
+  `party-autopilot-trace/v6` records timeout and whether the owned settlement
   requires the immediately following `transition-arm` pause, rejects a missing or
   premature pause, and exposes only aggregate failure/timeout counts. It retains
   session-local ordinals and no metadata. `party-autopilot-coordinator-soak/v6`
@@ -2251,6 +2251,37 @@ These are the active backlog, not reasons to discard the prototype.
   tab-memory-only recovery limitation in D-048, but it is not gapless crash
   recovery: the last few seconds may repeat, browser storage may be evicted, and
   a crash before a stable write remains unrecoverable.
+- **D-061 — Give the non-DJ host one synchronous Stop All Sound boundary:**
+  `party-stop-all-sound/v1` is an always-reachable Party Mode safety action, not a
+  transport reset or destructive library command. Its ordered best-effort
+  coordinator first locks new starts, invalidates and settles the exact pending
+  preload and transition-arm owners, cancels any active crossfade plus completion
+  callback, restores deterministic source gain and owned low-EQ/filter state,
+  cancels protected rehearsal and timing-click sources, then stops both deck
+  transports, pauses the Party clock/diagnostic, and releases the wake lock. A
+  failure in one independent cleanup stage cannot prevent either deck or the
+  session from being stopped. Completion authority is revoked before any fallible
+  Web Audio or DSP cleanup. `party-autopilot-trace/v6` records a stop-specific
+  transition cancellation and pause while retaining the exact committed target,
+  rather than misclassifying this safety action as Rescue. The visible result
+  remains persistent and becomes an alert if any stage failed.
+
+  Each Deck also owns a monotonic transport-start revision. Play and timing-click
+  commands capture it before an asynchronous AudioContext resume and recheck it
+  before scheduling; Stop All Sound, Pause, Eject, a replacement load, and unmount
+  invalidate it. A late resume/load/click continuation therefore cannot restart
+  sound after the safety action. Pending FileReader and isolated analysis work is
+  aborted/disposed; browser-owned decode work may finish internally but cannot
+  publish or start transport. The action preserves library records, queue order,
+  played history, committed recovery intent, and ready deck buffers. Resuming any
+  audible path requires a later explicit host gesture. The control is native,
+  keyboard reachable from Party Mode and the focus-trapped timing dialog, at
+  least 44 px high, has text rather than color-only meaning, and announces the
+  durable outcome without adding persistence, networking, or media identifiers.
+  Success is shown only after both Deck owners, the active crossfade, transition
+  completion, preload, arm, and rehearsal owners are confirmed inactive. Any
+  unverifiable audio-critical cleanup keeps the synchronous playback-start lock
+  active and tells the host to retry and use system/device mute if sound remains.
 
 ### Open questions
 

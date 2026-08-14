@@ -17,6 +17,12 @@ import {
 } from "../analysis/beatGridCorrections";
 import BeatGridOverlay from "./BeatGridOverlay";
 import { startBeatGridAudition } from "../audio/BeatGridAudition";
+import {
+  captureDeckTransportAuthority,
+  createDeckTransportAuthority,
+  invalidateDeckTransportAuthority,
+  ownsDeckTransportAuthority
+} from "../audio/deckTransportAuthority";
 import { appendTap, applyTapTempo, estimateTapTempo, MIN_TAP_COUNT } from "../analysis/tapTempo";
 import { createTimingReview, isTimingReviewCurrent } from "../domain/timingReview";
 import { analyzeEnhancedRhythm } from "@mazzy/enhanced-rhythm";
@@ -103,6 +109,8 @@ const Deck = forwardRef(function Deck(
     onTimingReviewRemove,
     librarySaveStatus,
     onDeckPlayStart,
+    onAuxAudioStart,
+    onStopAllSound,
     onDeckEnded,
     onAudioStartError,
     playbackStartLocked = false,
@@ -121,6 +129,7 @@ const Deck = forwardRef(function Deck(
   const releaseRafRef = useRef(0);
   const currentTrackIdRef = useRef(null);
   const loadGenerationRef = useRef(0);
+  const transportAuthorityRef = useRef(createDeckTransportAuthority());
   const loadAbortControllerRef = useRef(null);
   const isolatedAnalysisClientRef = useRef(null);
   const metronomeCancelRef = useRef(null);
@@ -235,20 +244,23 @@ const Deck = forwardRef(function Deck(
 
   const play = async (offset = null, when = null, notifyMaster = true, startAuthority = null) => {
     if (playbackStartLocked || playbackStartLockRef?.current) return false;
+    const transportRevision = captureDeckTransportAuthority(transportAuthorityRef.current);
     try {
       await ensureGraphReady();
     } catch {
       onAudioStartError?.(getAudioEngine().context.state);
       return false;
     }
-    if (playbackStartLockRef?.current || (startAuthority && !startAuthority())) return false;
+    if (!ownsDeckTransportAuthority(transportAuthorityRef.current, transportRevision) ||
+      playbackStartLockRef?.current || (startAuthority && !startAuthority())) return false;
     if (!deckEngine.isReady()) {
       return false;
     }
 
     const statusBeforePlay = deckEngine.getSnapshot().status;
     const startAt = when == null ? getAudioEngine().clock.now() : when;
-    if (startAuthority && !startAuthority()) return false;
+    if (!ownsDeckTransportAuthority(transportAuthorityRef.current, transportRevision) ||
+      (startAuthority && !startAuthority())) return false;
     deckEngine.play(offset ?? undefined, startAt);
     if (when == null) {
       if (notifyMaster) {
@@ -262,6 +274,7 @@ const Deck = forwardRef(function Deck(
   };
 
   const pause = () => {
+    invalidateDeckTransportAuthority(transportAuthorityRef.current);
     stopMetronomeAudition();
     return deckEngine.pause();
   };
@@ -332,9 +345,11 @@ const Deck = forwardRef(function Deck(
       return;
     }
     if (playbackStartLocked || playbackStartLockRef?.current || !deckEngine.isActive() || !previewGrid.beatsSeconds.length) return;
+    const transportRevision = captureDeckTransportAuthority(transportAuthorityRef.current);
     const engine = getAudioEngine();
     await engine.resume();
-    if (playbackStartLocked || playbackStartLockRef?.current) return;
+    if (!ownsDeckTransportAuthority(transportAuthorityRef.current, transportRevision) ||
+      playbackStartLocked || playbackStartLockRef?.current) return;
     const audition = startBeatGridAudition(engine, {
       beatsSeconds: previewGrid.beatsSeconds,
       downbeatsSeconds: previewGrid.downbeatsSeconds,
@@ -343,6 +358,7 @@ const Deck = forwardRef(function Deck(
       maxBeats: 16
     });
     if (!audition.events.length) return;
+    onAuxAudioStart?.();
     metronomeCancelRef.current = audition.cancel;
     setMetronomeActive(true);
     clickPulseTimersRef.current = audition.events.flatMap((event) => {
@@ -589,6 +605,7 @@ const Deck = forwardRef(function Deck(
     rafRef.current = requestAnimationFrame(updateDisplay);
 
     return () => {
+      invalidateDeckTransportAuthority(transportAuthorityRef.current);
       cancelAnimationFrame(rafRef.current);
       cancelAnimationFrame(releaseRafRef.current);
       metronomeCancelRef.current?.();
@@ -610,6 +627,7 @@ const Deck = forwardRef(function Deck(
     }
     if (!(file instanceof Blob)) return DECK_LOAD_OUTCOME.unplayableFile;
 
+    invalidateDeckTransportAuthority(transportAuthorityRef.current);
     loadAbortControllerRef.current?.abort?.();
     isolatedAnalysisClientRef.current?.dispose?.();
     isolatedAnalysisClientRef.current = null;
@@ -946,8 +964,36 @@ const Deck = forwardRef(function Deck(
       }),
       getDecodedBufferForRehearsal: () => deckEngine.getDecodedBufferForRehearsal(),
       pause: () => pause(),
+      stopAllSound: () => {
+        invalidateDeckTransportAuthority(transportAuthorityRef.current);
+        stopMetronomeAudition();
+        loadAbortControllerRef.current?.abort?.();
+        loadAbortControllerRef.current = null;
+        isolatedAnalysisClientRef.current?.dispose?.();
+        isolatedAnalysisClientRef.current = null;
+        loadGenerationRef.current += 1;
+        if (deckEngine.getSnapshot().status !== "preparing") {
+          return { cancelledLoad: false, paused: deckEngine.pause(), auxiliaryStopped: !metronomeCancelRef.current };
+        }
+        wavesurferRef.current?.empty?.();
+        if (lastObjectUrlRef.current) {
+          URL.revokeObjectURL(lastObjectUrlRef.current);
+          lastObjectUrlRef.current = null;
+        }
+        currentTrackIdRef.current = null;
+        setAnalysisRecord(null);
+        setFileReady(false);
+        setTrackName("NO TRACK LOADED");
+        setCurrentTimeSec(0);
+        setTimingWizard(null);
+        setTapTimes([]);
+        setTimingReviewSaveStatus("idle");
+        deckEngine.eject();
+        return { cancelledLoad: true, paused: false, auxiliaryStopped: !metronomeCancelRef.current };
+      },
       stopAt: (when) => stopAt(when),
       eject: () => {
+        invalidateDeckTransportAuthority(transportAuthorityRef.current);
         stopMetronomeAudition();
         loadAbortControllerRef.current?.abort?.();
         loadAbortControllerRef.current = null;
@@ -983,7 +1029,7 @@ const Deck = forwardRef(function Deck(
       scheduleFilterSweep: (fromHz, toHz, startTime, duration) =>
         deckEngine.scheduleFilterSweep(fromHz, toHz, startTime, duration)
     }),
-    [analysisRecord, originalBpm, tempo, eq]
+    [analysisRecord, originalBpm, tempo, eq, playbackStartLocked]
   );
 
   const statusLabel =
@@ -1125,6 +1171,14 @@ const Deck = forwardRef(function Deck(
             <p id={timingWizardDescriptionId} className="timing-wizard-privacy">
               Your audio and adjustments stay in this browser profile on this device. Nothing is uploaded.
             </p>
+            <button
+              className="timing-stop-all"
+              type="button"
+              onClick={() => {
+                onStopAllSound?.();
+                closeTimingWizard();
+              }}
+            >STOP ALL SOUND</button>
             <div className="wizard-progress" aria-hidden="true">
               {Array.from({ length: 6 }, (_, index) => <span key={index} className={index <= timingWizard.step ? "done" : ""} />)}
             </div>

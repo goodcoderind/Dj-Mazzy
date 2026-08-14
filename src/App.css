@@ -90,7 +90,8 @@ body {
 .party-mode-heading button,
 .party-mode-flow button,
 .party-mode-controls button,
-.party-mode-readiness button {
+.party-mode-readiness button,
+.party-stop-all {
   min-height: 44px;
   border: 1px solid #454545;
   background: #171717;
@@ -136,6 +137,37 @@ body {
 .party-mode-flow strong { font-size: 14px; }
 .party-mode-flow small { color: #888; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .party-mode button:disabled { cursor: not-allowed; opacity: 0.45; }
+
+.party-stop-all-panel {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.6fr) minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.party-stop-all {
+  display: grid;
+  gap: 3px;
+  min-height: 58px;
+  padding: 9px 14px;
+  border-color: #a84c54;
+  background: #221013;
+  color: #ffb0b7;
+  text-align: left;
+}
+
+.party-stop-all strong { font-size: 14px; letter-spacing: 0.08em; }
+.party-stop-all small { color: #c88f94; font-size: 11px; line-height: 1.35; }
+
+.party-stop-all-status {
+  margin: 0;
+  color: #9fd0ad;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.party-stop-all-status.error { color: #ffb0b7; }
 
 .party-mode-now-next {
   display: grid;
@@ -1086,6 +1118,19 @@ body {
   font-size: 24px;
 }
 
+.timing-stop-all {
+  min-height: 48px;
+  width: calc(100% - 44px);
+  margin: 0 22px 12px;
+  border: 1px solid #a84c54;
+  background: #221013;
+  color: #ffb0b7;
+  font: inherit;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+}
+
 .timing-wizard-privacy {
   margin: 0;
   padding: 0 22px 15px;
@@ -1241,7 +1286,8 @@ summary:focus-visible {
   .party-mode-heading h1 { font-size: 20px; }
   .party-mode-flow,
   .party-mode-now-next,
-  .party-mode-controls { grid-template-columns: 1fr; }
+  .party-mode-controls,
+  .party-stop-all-panel { grid-template-columns: 1fr; }
   .party-mode-readiness > div { align-items: stretch; flex-direction: column; }
   .party-mode-readiness button { width: 100%; min-width: 0; }
   .party-mode-options { align-items: stretch; flex-direction: column; }
