@@ -208,24 +208,34 @@ const shortTermSummary = (
   } as const;
 };
 
-export const deriveProgramTrim = (measurement: ProgramLevelMeasurement) => {
+export const deriveCandidateProgramTrim = (
+  measurement: ProgramLevelMeasurement,
+  targetLufs: number
+) => {
+  if (!Number.isFinite(targetLufs) || targetLufs < -40 || targetLufs > 0) {
+    throw new RangeError("candidate target must be finite and between -40 and 0 LUFS");
+  }
   let trimDb = 0;
   if (
     measurement.status === "measured" &&
     measurement.integratedLufs != null &&
     measurement.estimatedTruePeakDbtp != null
   ) {
-    const desiredTrim = PARTY_LEVEL_TARGET_LUFS - measurement.integratedLufs;
+    const desiredTrim = targetLufs - measurement.integratedLufs;
     const peakLimitedTrim = PARTY_DECODED_PEAK_CEILING_DBTP - measurement.estimatedTruePeakDbtp;
     trimDb = clamp(Math.min(desiredTrim, peakLimitedTrim), MINIMUM_TRIM_DB, MAXIMUM_TRIM_DB);
   }
   return {
-    policyVersion: PARTY_LEVEL_TRIM_POLICY_VERSION,
-    targetLufs: PARTY_LEVEL_TARGET_LUFS,
+    targetLufs,
     decodedPeakCeilingDbtp: PARTY_DECODED_PEAK_CEILING_DBTP,
     trimDb: roundTrimDownTenth(trimDb)
   } as const;
 };
+
+export const deriveProgramTrim = (measurement: ProgramLevelMeasurement) => ({
+  policyVersion: PARTY_LEVEL_TRIM_POLICY_VERSION,
+  ...deriveCandidateProgramTrim(measurement, PARTY_LEVEL_TARGET_LUFS)
+});
 
 const buildAnalysis = (measurement: ProgramLevelMeasurement): ProgramLevelAnalysis => ({
   schemaVersion: PROGRAM_LEVEL_SCHEMA_VERSION,

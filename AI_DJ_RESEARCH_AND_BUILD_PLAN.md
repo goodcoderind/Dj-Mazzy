@@ -2049,6 +2049,26 @@ These are the active backlog, not reasons to discard the prototype.
   cannot silently alter playback or imply that high/low range is good or bad.
   It remains a local diagnostic descriptor, not certified EBU Mode, genre
   judgment, a calibrated party target, or output-safety evidence.
+- **D-054 — Calibrate the party target only through private human listening:**
+  the diagnostics-only `party-level-private-listening/v1` lab compares −16,
+  −14, and −12 LUFS candidates without changing `party-level-trim/v3` or the
+  production master. Two local mono/stereo songs are decoded and measured by
+  the production analysis worker; the page then retains only anonymous
+  eight-second stereo excerpts and normalized level records in tab memory.
+  Playback applies the same bounded candidate trim and uses the protected
+  `mazzy-master/v1` preview path. A rating is enabled only after both excerpts
+  complete with bounded browser-audio health evidence and neither candidate is
+  constrained away from the selected target by the −6/+3 dB trim or −2 dBTP
+  decoded-peak policy. Cancel, interruption, unhealthy output, or a constrained
+  pair cannot produce a rating. The DOM summary contains only aggregate counts
+  by target and fixed judgment enum; it contains no audio, filenames, track or
+  device identity, exact measurements, timestamps, persistence, upload, or
+  export. A fresh Chromium run with generated stereo tones verified local
+  preparation, two healthy protected playbacks, rating unlock, aggregate-only
+  recording, and authoritative mid-play cancellation. That proves only the lab
+  workflow. Selecting a production target still requires consented,
+  counterbalanced real-music listening across the required genres and devices;
+  this implementation does not manufacture that human evidence.
 
 ### Open questions
 

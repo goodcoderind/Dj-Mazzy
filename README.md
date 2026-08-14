@@ -105,6 +105,20 @@ used to change playback, and it does not certify a −14 LUFS product target or
 prove the post-EQ, overlapped master output is true-peak safe. Files with more than two channels
 receive neutral trim until a verified layout-aware measurement exists.
 
+A diagnostics-only **private party-level listening lab** now provides a bounded
+way to compare −16, −14, and −12 LUFS candidates before changing that
+provisional policy. It analyzes two local songs through the production stereo
+worker, keeps only anonymous eight-second excerpts and measurements in tab
+memory, and plays them through the protected `mazzy-master/v1` path. A rating
+unlocks only after both excerpts complete with healthy browser-audio evidence
+and both can reach the selected target inside Mazzy's trim/decoded-peak bounds.
+The visible summary contains aggregate human judgments only—no audio,
+filenames, level measurements, timestamps, persistence, upload, or export. A
+fresh Chromium run exercised preparation, two clean protected playbacks,
+rating, and mid-play cancellation with synthetic stereo tones. This is lab
+workflow evidence, not a chosen target, listening result, real-music coverage,
+output-device proof, or permission to change `party-level-trim/v3`.
+
 During an active transition, **STOP TRANSITION SAFELY** cancels pending gain automation,
 keeps whichever deck owns more of the mix, restores stable bass EQ, pauses the
 other deck, and turns Party Autopilot off until the host starts it again.

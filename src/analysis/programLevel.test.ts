@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   analyzeProgramLevel,
+  deriveCandidateProgramTrim,
   deriveProgramTrim,
   normalizeProgramLevel,
   PARTY_DECODED_PEAK_CEILING_DBTP,
@@ -217,6 +218,15 @@ describe("perceptual program level v4", () => {
     expect(
       (analysis.measurement.estimatedTruePeakDbtp ?? 0) + analysis.normalization.trimDb
     ).toBeLessThanOrEqual(PARTY_DECODED_PEAK_CEILING_DBTP);
+  });
+
+  it("keeps listening-only target candidates inside the same trim and peak bounds", () => {
+    const measurement = analyzeProgramLevel([sine(-24)], 48_000).measurement;
+    expect(deriveCandidateProgramTrim(measurement, -16).trimDb).toBe(3);
+    const hot = { ...measurement, integratedLufs: -20, estimatedTruePeakDbtp: -1.95 };
+    expect(deriveCandidateProgramTrim(hot, -12).trimDb).toBe(-0.1);
+    expect(() => deriveCandidateProgramTrim(measurement, Number.NaN)).toThrow(RangeError);
+    expect(() => deriveCandidateProgramTrim(measurement, 1)).toThrow(RangeError);
   });
 
   it("rejects stale or hostile persisted records instead of trusting their trim", () => {
