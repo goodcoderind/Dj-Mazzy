@@ -5,7 +5,7 @@
 [![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)](https://react.dev/)
 [![Vite](https://img.shields.io/badge/Vite-7-646CFF?logo=vite&logoColor=white)](https://vite.dev/)
 [![Web Audio API](https://img.shields.io/badge/audio-Web%20Audio%20API-c8a96e)](https://developer.mozilla.org/en-US/docs/Web/API/Web_Audio_API)
-[![License](https://img.shields.io/badge/license-ISC-green)](./package.json)
+[![License](https://img.shields.io/badge/license-ISC-green)](./LICENSE)
 
 Mazzy is a local-first DJ application with two independent decks, waveform
 navigation, tempo sync, three-band EQ, a music library, queue management, and
@@ -366,10 +366,13 @@ Imported audio file
 Decoded AudioBuffer
         │
         ▼
-Low EQ ─► Mid EQ ─► High EQ ─► Deck gain ─► Audio output
-                                      ▲
-                                      │
-                           Crossfader / Auto Mix
+Transport gate ─► Low/Mid/High EQ ─► transition filter ─► track trim
+        │                                                        │
+        └────────────────────────────────────────────────────────▼
+                    Deck gain / crossfade automation
+                                   │
+                                   ▼
+                   Master headroom ─► limiter ─► meter ─► output
 ```
 
 WaveSurfer renders the visual waveform, while the Web Audio API handles the
