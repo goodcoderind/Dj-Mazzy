@@ -39,7 +39,7 @@ order, risks, and release gates are maintained in the canonical
 - Tempo control from `0.5x` to `1.5x`
 - One-click BPM synchronization
 - High, mid, and low EQ with kill switches
-- Conservative per-track program-level trim, separate from crossfader automation
+- Stereo-aware K-weighted per-track loudness trim, separate from crossfader automation
 - Equal-power crossfader
 - Folder-based library importing
 - Persistent local library powered by IndexedDB
@@ -79,6 +79,23 @@ using
 the decks' actual trim and EQ state. Live scheduling consumes that description;
 the DSP compiler cannot change transition eligibility or silently substitute a
 different template.
+
+Decoded mono and stereo tracks now receive a local `program-level/v2`
+measurement in the existing analysis worker. It keeps the rhythm detector on
+channel 1, but measures level from both channels independently using
+sample-rate-adjusted K-weighting, 400 ms blocks with 75% overlap, the −70 LUFS
+absolute gate, and the −10 LU relative gate. A separately versioned provisional
+party policy applies at most −6 to +3 dB of deck trim toward −14 LUFS, while a
+conservative −2 dBFS decoded sample-peak ceiling can reduce that boost. Old or
+malformed level records are ignored and regenerated; a new deck load starts at
+0 dB trim instead of inheriting the previous song's value. Synthetic stereo
+calibration and EBU gate vectors cover 44.1, 48, and 96 kHz; fixed 50 Hz and
+10 kHz results are within 0.1 LU of FFmpeg 8.1.1's independent `ebur128`
+meter. This is a BS.1770-derived local
+consistency aid, not certified EBU Mode metering: it does not yet measure
+decoded true peak, certify a −14 LUFS product target, or prove the post-EQ,
+overlapped master output is true-peak safe. Files with more than two channels
+receive neutral trim until a verified layout-aware measurement exists.
 
 During an active transition, **STOP TRANSITION SAFELY** cancels pending gain automation,
 keeps whichever deck owns more of the mix, restores stable bass EQ, pauses the

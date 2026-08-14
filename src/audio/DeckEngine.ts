@@ -306,6 +306,7 @@ export class DeckEngine {
     this.invalidateRuntimeLoad(null);
     this.buffer = null;
     this.trackId = trackId;
+    this.setTrackTrimDb(0);
     this.startOffset = 0;
     this.playbackRate = 1;
     this.rateAutomation = null;

@@ -37,24 +37,43 @@ export class AnalysisClient {
   }
 
   analyzeAudioBuffer(audioBuffer: AudioBuffer) {
-    const pcm = new Float32Array(audioBuffer.getChannelData(0));
-    return this.analyzePcm(pcm, audioBuffer.sampleRate, audioBuffer.duration);
+    const channels = Array.from(
+      { length: Math.min(audioBuffer.numberOfChannels, 2) },
+      (_, channel) => new Float32Array(audioBuffer.getChannelData(channel))
+    );
+    return this.analyzeChannels(
+      channels,
+      audioBuffer.sampleRate,
+      audioBuffer.duration,
+      audioBuffer.numberOfChannels
+    );
   }
 
   analyzePcm(pcm: Float32Array, sampleRate: number, durationSeconds: number) {
+    return this.analyzeChannels([pcm], sampleRate, durationSeconds, 1);
+  }
+
+  private analyzeChannels(
+    channels: Float32Array[],
+    sampleRate: number,
+    durationSeconds: number,
+    sourceChannelCount: number
+  ) {
     const requestId = this.nextRequestId;
     this.nextRequestId += 1;
     return new Promise<BasicAnalysisResult>((resolve, reject) => {
       this.pending.set(requestId, { resolve, reject });
+      const pcmBuffers = channels.map((channel) => channel.buffer);
       this.worker.postMessage(
         {
           type: "analyze",
           requestId,
-          pcmBuffer: pcm.buffer,
+          pcmBuffers,
+          sourceChannelCount,
           sampleRate,
           durationSeconds
         },
-        [pcm.buffer]
+        pcmBuffers
       );
     });
   }

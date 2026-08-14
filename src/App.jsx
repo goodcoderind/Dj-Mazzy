@@ -62,6 +62,8 @@ import { createPartyWakeLockController } from "./power/partyWakeLock";
 import { audioRecoveryMessage, needsHostAudioRecovery } from "./audio/audioContextRecovery";
 import { OUTPUT_DEVICE_RECOVERY_MESSAGE, supportsOutputDeviceChangeMonitoring } from "./audio/outputDeviceRecovery";
 import { DECK_LOAD_OUTCOME, shouldQuarantineAutoPilotLoad } from "./audio/deckLoadOutcome";
+import { normalizeProgramLevel } from "./analysis/programLevel";
+import { applyQueuedAnalysisFailure } from "./analysis/analysisQueueSettlement";
 
 const audioExt = [".mp3", ".wav", ".flac", ".aiff", ".m4a"];
 const stripExt = (name) => name.replace(/\.[^/.]+$/, "");
@@ -114,7 +116,7 @@ const persistedTrack = (track) => ({
   structureBoundaries: track.structureBoundaries ?? [],
   phraseCandidates: track.phraseCandidates ?? [],
   automaticRhythmTrust: track.automaticRhythmTrust ?? null,
-  programLevel: track.programLevel ?? null,
+  programLevel: normalizeProgramLevel(track.programLevel),
   rhythmDetector: track.rhythmDetector ?? null,
   rhythmAnalysisVersion: track.rhythmAnalysisVersion ?? null,
   rhythmModelSha256: track.rhythmModelSha256 ?? null,
@@ -541,7 +543,8 @@ export default function App() {
             structureBoundaries: track.structureBoundaries ?? [],
             phraseCandidates: track.phraseCandidates ?? [],
             automaticRhythmTrust: track.automaticRhythmTrust ?? null,
-            programLevel: track.programLevel ?? null,
+            programLevel: normalizeProgramLevel(track.programLevel),
+            programLevelStatus: normalizeProgramLevel(track.programLevel) ? "ready" : "pending",
             rhythmDetector: track.rhythmDetector ?? null,
             rhythmAnalysisVersion: track.rhythmAnalysisVersion ?? null,
             rhythmModelSha256: track.rhythmModelSha256 ?? null,
@@ -802,21 +805,27 @@ export default function App() {
   };
 
   const analyzeQueuedTrack = async (track, generation) => {
+    const needsBasicAnalysis = !hasCurrentBasicAnalysis(track);
+    const needsProgramLevel = !normalizeProgramLevel(track.programLevel);
     setAnalyzingIds((prev) => ({ ...prev, [track.id]: true }));
     try {
       const decoded = await decodeForAnalysis(track.file);
       if (generation !== analysisGenerationRef.current) return;
-      let combined = track;
-      if (!hasCurrentBasicAnalysis(track)) {
+      let basicResult = null;
+      let programLevel = null;
+      let enhancedResult = null;
+      if (needsBasicAnalysis) {
+        basicResult = await getAnalysisClient().analyzeAudioBuffer(decoded);
+        if (generation !== analysisGenerationRef.current) return;
+      } else if (needsProgramLevel && track.programLevelStatus !== "failed") {
         const result = await getAnalysisClient().analyzeAudioBuffer(decoded);
         if (generation !== analysisGenerationRef.current) return;
-        combined = mergeGeneratedAnalysis(track, result);
+        programLevel = result.programLevel;
       }
       if (enhancedTimingAvailable) {
         try {
-          const enhanced = await analyzeEnhancedRhythm(decoded, undefined, track.id);
+          enhancedResult = await analyzeEnhancedRhythm(decoded, undefined, track.id);
           if (generation !== analysisGenerationRef.current) return;
-          combined = mergeEnhancedRhythm(combined, enhanced);
           setEnhancedFailureByTrack((current) => ({ ...current, [track.id]: false }));
         } catch {
           setEnhancedFailureByTrack((current) => ({ ...current, [track.id]: true }));
@@ -827,7 +836,14 @@ export default function App() {
       setLibrary((prev) =>
         prev.map((item) =>
           item.id === track.id && !removedTrackIdsRef.current.has(track.id)
-            ? { ...item, ...combined }
+            ? (() => {
+                let current = basicResult
+                  ? { ...mergeGeneratedAnalysis(item, basicResult), programLevelStatus: "ready" }
+                  : item;
+                if (programLevel) current = { ...current, programLevel, programLevelStatus: "ready" };
+                if (enhancedResult) current = mergeEnhancedRhythm(current, enhancedResult);
+                return current;
+              })()
             : item
         )
       );
@@ -836,7 +852,7 @@ export default function App() {
       setLibrary((prev) =>
         prev.map((item) =>
           item.id === track.id && !removedTrackIdsRef.current.has(track.id)
-            ? { ...item, analysisStatus: "failed", bpm: null, key: null, scale: null }
+            ? applyQueuedAnalysisFailure(item, needsBasicAnalysis, needsProgramLevel)
             : item
         )
       );
@@ -908,6 +924,7 @@ export default function App() {
       .filter(
         (track) =>
           (!hasCurrentBasicAnalysis(track) ||
+            (!normalizeProgramLevel(track.programLevel) && track.programLevelStatus !== "failed") ||
             (enhancedTimingAvailable === true && !hasCurrentEnhancedRhythm(track))) &&
           track.analysisStatus !== "failed" &&
           !queuedAnalysisIdsRef.current.has(track.id)
@@ -1018,6 +1035,7 @@ export default function App() {
         phraseCandidates: [],
         automaticRhythmTrust: null,
         programLevel: null,
+        programLevelStatus: "pending",
         rhythmDetector: null,
         rhythmAnalysisVersion: null,
         rhythmModelSha256: null,
@@ -1159,7 +1177,7 @@ export default function App() {
     setLibrary((prev) =>
       prev.map((track) =>
         track.id === trackId && !removedTrackIdsRef.current.has(trackId)
-          ? mergeGeneratedAnalysis(track, result)
+          ? { ...mergeGeneratedAnalysis(track, result), programLevelStatus: "ready" }
           : track
       )
     );
@@ -1174,8 +1192,10 @@ export default function App() {
 
   const onProgramLevelDetected = (trackId, programLevel) => {
     if (!trackId || libraryWritesBlocked() || removedTrackIdsRef.current.has(trackId)) return;
+    const currentProgramLevel = normalizeProgramLevel(programLevel);
+    if (!currentProgramLevel) return;
     setLibrary((previous) => previous.map((track) =>
-      track.id === trackId ? { ...track, programLevel } : track
+      track.id === trackId ? { ...track, programLevel: currentProgramLevel, programLevelStatus: "ready" } : track
     ));
   };
 
@@ -2959,6 +2979,10 @@ export default function App() {
             <span>{`${library.filter((track) => hasCurrentEnhancedRhythm(track) && ["bar-cut-candidate", "short-sync-candidate", "long-candidate"].includes(track.automaticRhythmTrust?.tier)).length} bar handoff candidates`}</span>
             <span>{`${library.filter((track) => !analyzingIds[track.id] && hasCurrentBasicAnalysis(track) && !(hasCurrentEnhancedRhythm(track) && ["bar-cut-candidate", "short-sync-candidate", "long-candidate"].includes(track.automaticRhythmTrust?.tier))).length} safe-transition tracks`}</span>
             <span>{`${library.filter((track) => analyzingIds[track.id]).length} analyzing`}</span>
+            <span>{`${library.filter((track) => {
+              const level = normalizeProgramLevel(track.programLevel);
+              return track.programLevelStatus === "failed" || (level && level.measurement.status !== "measured");
+            }).length} level checks unavailable · neutral trim`}</span>
           </div>
 
           <div className="library-grid">
@@ -2975,6 +2999,9 @@ export default function App() {
               const loadedB = loadedByDeck.b === track.id;
               const analyzing = !!analyzingIds[track.id];
               const enhancedFailed = !!enhancedFailureByTrack[track.id];
+              const programLevel = normalizeProgramLevel(track.programLevel);
+              const levelUnavailable = track.programLevelStatus === "failed" ||
+                (programLevel && programLevel.measurement.status !== "measured");
               const keyCompatible =
                 deckAPlaying &&
                 deckATrack?.key &&
@@ -3002,6 +3029,13 @@ export default function App() {
                     <span className="row-indicator row-q">{`[${queuePositionMap.get(track.id)}]`}</span>
                     )}
                     {track.name}
+                    {levelUnavailable && (
+                      <span className="level-unavailable">
+                        {track.programLevelStatus === "failed"
+                          ? " · LEVEL CHECK FAILED · LOAD TO RETRY"
+                          : " · LEVEL TRIM OFF"}
+                      </span>
+                    )}
                     <button
                       className="library-track-action"
                       type="button"

@@ -4,6 +4,8 @@ import { getAudioEngine } from "../audioContext";
 import { DECK_LOAD_OUTCOME } from "../audio/deckLoadOutcome";
 import { getAnalysisClient } from "../analysis/AnalysisClient";
 import { hasCurrentBasicAnalysis } from "../analysis/analysisVersion";
+import { normalizeProgramLevel } from "../analysis/programLevel";
+import { programLevelFailurePolicy } from "../analysis/programLevelRuntime";
 import {
   buildEffectiveBeatGrid,
   emptyBeatGridOverrides,
@@ -140,6 +142,7 @@ const Deck = forwardRef(function Deck(
   const [eqKill, setEqKill] = useState({ low: false, mid: false, high: false });
   const [deckStatus, setDeckStatus] = useState(deckEngine.getSnapshot().status);
   const [analysisRecord, setAnalysisRecord] = useState(null);
+  const [programLevelRuntimeStatus, setProgramLevelRuntimeStatus] = useState("pending");
   const [metronomeActive, setMetronomeActive] = useState(false);
   const [clickPulse, setClickPulse] = useState(null);
   const [timingWizard, setTimingWizard] = useState(null);
@@ -174,6 +177,18 @@ const Deck = forwardRef(function Deck(
     ? analysisRecord.timingReview
     : null;
   const automaticTrust = analysisRecord?.automaticRhythmTrust ?? null;
+  const currentProgramLevel = normalizeProgramLevel(analysisRecord?.programLevel);
+  const programLevelLabel = programLevelRuntimeStatus === "failed"
+    ? "level check failed · no trim"
+    : !currentProgramLevel
+    ? "automatic loudness trim pending"
+    : currentProgramLevel.measurement.status === "measured"
+      ? `automatic loudness trim ${currentProgramLevel.normalization.trimDb > 0 ? "+" : ""}${currentProgramLevel.normalization.trimDb.toFixed(1)} dB`
+      : currentProgramLevel.measurement.status === "unsupported-channels"
+        ? "loudness matching unavailable for this file · no trim"
+        : currentProgramLevel.measurement.status === "silence"
+          ? "loudness not measured · no trim"
+          : "loudness analysis unavailable · no trim";
   const currentEnhancedTiming = hasCurrentEnhancedRhythm(analysisRecord);
   const automaticBarHandoff = currentEnhancedTiming &&
     ["bar-cut-candidate", "short-sync-candidate", "long-candidate"].includes(automaticTrust?.tier);
@@ -596,18 +611,19 @@ const Deck = forwardRef(function Deck(
       setTapTimes([]);
       currentTrackIdRef.current = trackId;
       setAnalysisRecord(null);
+      setProgramLevelRuntimeStatus("pending");
       deckEngine.beginPreparing(trackId);
     } catch {
       return DECK_LOAD_OUTCOME.cancelled;
     }
     let decoded;
+    const hadCurrentBasicAnalysis = !!knownAnalysis && hasCurrentBasicAnalysis(knownAnalysis);
     try {
       const arrayBuffer = await readFileAsArrayBuffer(file);
       decoded = await audioContext.decodeAudioData(arrayBuffer.slice(0));
       if (loadGenerationRef.current !== loadGeneration || currentTrackIdRef.current !== trackId) {
         return DECK_LOAD_OUTCOME.cancelled;
       }
-      deckEngine.loadBuffer(decoded, trackId);
     } catch (error) {
       if (loadGenerationRef.current !== loadGeneration || currentTrackIdRef.current !== trackId) {
         return DECK_LOAD_OUTCOME.cancelled;
@@ -627,7 +643,7 @@ const Deck = forwardRef(function Deck(
     try {
       if (loadGenerationRef.current !== loadGeneration || currentTrackIdRef.current !== trackId) return DECK_LOAD_OUTCOME.cancelled;
       let generatedAnalysis = null;
-      if (knownAnalysis && hasCurrentBasicAnalysis(knownAnalysis)) {
+      if (hadCurrentBasicAnalysis) {
         applyAnalysis(
           {
             ...knownAnalysis,
@@ -645,13 +661,16 @@ const Deck = forwardRef(function Deck(
           trackId
         );
       }
-      const activeProgramLevel = knownAnalysis?.programLevel ?? generatedAnalysis?.programLevel ?? null;
+      const activeProgramLevel = normalizeProgramLevel(generatedAnalysis?.programLevel) ??
+        normalizeProgramLevel(knownAnalysis?.programLevel);
       if (activeProgramLevel) {
-        deckEngine.setTrackTrimDb(activeProgramLevel.trimDb);
+        deckEngine.setTrackTrimDb(activeProgramLevel.normalization.trimDb);
+        setProgramLevelRuntimeStatus("ready");
       } else {
         const current = await getAnalysisClient().analyzeAudioBuffer(decoded);
         if (loadGenerationRef.current !== loadGeneration || currentTrackIdRef.current !== trackId) return DECK_LOAD_OUTCOME.cancelled;
-        deckEngine.setTrackTrimDb(current.programLevel.trimDb);
+        deckEngine.setTrackTrimDb(current.programLevel.normalization.trimDb);
+        setProgramLevelRuntimeStatus("ready");
         setAnalysisRecord((record) => record ? { ...record, programLevel: current.programLevel } : record);
         if (trackId) onProgramLevelDetected?.(trackId, current.programLevel);
       }
@@ -677,12 +696,21 @@ const Deck = forwardRef(function Deck(
       }
     } catch {
       if (loadGenerationRef.current !== loadGeneration || currentTrackIdRef.current !== trackId) return DECK_LOAD_OUTCOME.cancelled;
-      setOriginalBpm(null);
-      setBpmLabel("n/a");
-      setKeyLabel("--");
-      onBpmChange(channel, null);
+      const failure = programLevelFailurePolicy(hadCurrentBasicAnalysis);
+      deckEngine.setTrackTrimDb(failure.trimDb);
+      setProgramLevelRuntimeStatus(failure.levelStatus);
+      if (!failure.preserveBasicAnalysis) {
+        setOriginalBpm(null);
+        setBpmLabel("n/a");
+        setKeyLabel("--");
+        onBpmChange(channel, null);
+      }
     }
     if (loadGenerationRef.current !== loadGeneration || currentTrackIdRef.current !== trackId) return DECK_LOAD_OUTCOME.cancelled;
+    // Publish deck readiness only after the current track has either a valid
+    // v2 trim or an explicit neutral fallback. Manual Play cannot observe a
+    // ready buffer and then receive a late multi-decibel trim step.
+    deckEngine.loadBuffer(decoded, trackId);
     onTrackLoaded?.(channel, trackId, file.name);
     return DECK_LOAD_OUTCOME.loaded;
   };
@@ -997,7 +1025,7 @@ const Deck = forwardRef(function Deck(
             <span>{`${effectiveGrid.beatsSeconds.length} beats · ${effectiveGrid.downbeatsSeconds.length} bar starts`}</span>
             <span>{automaticTrust ? `machine check ${automaticTrust.trustIndex}/100 · ${automaticTrust.tier.replaceAll("-", " ")}` : "machine check pending"}</span>
             <span>{automaticTrust?.reasons?.[0] ?? "Long mixes require a calibrated detector."}</span>
-            <span>{analysisRecord?.programLevel ? `automatic level trim ${analysisRecord.programLevel.trimDb > 0 ? "+" : ""}${analysisRecord.programLevel.trimDb.toFixed(1)} dB` : "automatic level trim pending"}</span>
+            <span role="status" aria-live="polite">{programLevelLabel}</span>
             <span>
               {currentTrackIdRef.current
                 ? librarySaveStatus === "saving" ? "SAVING…" : librarySaveStatus === "error" ? "COULDN'T SAVE" : "STORED IN THIS BROWSER PROFILE"

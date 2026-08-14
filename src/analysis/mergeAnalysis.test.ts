@@ -58,7 +58,25 @@ describe("generated analysis merge", () => {
           usableCutBeatIndices: [],
           usable16BeatWindows: []
         },
-        programLevel: { schemaVersion: "program-level/v1", activeRmsDbfs: -14, samplePeakDbfs: -3, trimDb: 0, activeBlockCount: 2 }
+        programLevel: {
+          schemaVersion: "program-level/v2",
+          measurement: {
+            algorithmVersion: "bs1770-k-weighted-gated/v1",
+            status: "measured",
+            sampleRate: 44_100,
+            channelCount: 2,
+            integratedLufs: -14,
+            samplePeakDbfs: -3,
+            absoluteGatedBlockCount: 2,
+            relativeGatedBlockCount: 2
+          },
+          normalization: {
+            policyVersion: "party-level-trim/v2",
+            targetLufs: -14,
+            samplePeakCeilingDbfs: -2,
+            trimDb: 0
+          }
+        }
       }
     );
     expect(merged).toMatchObject({

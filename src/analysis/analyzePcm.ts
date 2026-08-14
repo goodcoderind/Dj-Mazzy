@@ -203,7 +203,9 @@ export const analyzeMusicTempoRhythm = (pcm: Float32Array, sampleRate: number) =
 export const analyzePcm = (
   pcm: Float32Array,
   sampleRate: number,
-  durationSeconds = pcm.length / sampleRate
+  durationSeconds = pcm.length / sampleRate,
+  programChannels: readonly Float32Array[] = [pcm],
+  sourceChannelCount = programChannels.length
 ): BasicAnalysisResult => {
   if (!Number.isFinite(sampleRate) || sampleRate <= 0) {
     throw new RangeError("sampleRate must be a positive finite number");
@@ -228,7 +230,7 @@ export const analyzePcm = (
     downbeatsSeconds: [],
     energyByBeat: features.energyByBeat
   });
-  const programLevel = analyzeProgramLevel([pcm], sampleRate);
+  const programLevel = analyzeProgramLevel(programChannels, sampleRate, sourceChannelCount);
   return {
     schemaVersion: TRACK_ANALYSIS_SCHEMA_VERSION,
     analyzerVersion: BASIC_ANALYZER_VERSION,

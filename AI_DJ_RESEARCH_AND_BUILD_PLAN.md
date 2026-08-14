@@ -1215,8 +1215,9 @@ before musical or operational reliability are:
 - beat-synchronous energy and structural/vocal-frequency proxies now support
   safety-bounded cue ranking and Filtered Fade, but they are not calibrated as
   semantic vocal or musical-quality truth on annotated real music;
-- master peak protection and conservative program-level trim exist, but
-  perceptual loudness normalization and true-peak evaluation are not complete;
+- stereo K-weighted integrated-loudness trim now replaces the earlier raw-RMS
+  estimate, but its party target still needs listening calibration and decoded
+  true-peak plus post-master true-peak evaluation remain incomplete;
 - the shared Autopilot coordinator now provides queue-first three-track
   lookahead, played-track exclusion, energy-storyline intent, Rescue, and
   deterministic final-track ownership, but live real-party validation and
@@ -1446,13 +1447,21 @@ These are the active backlog, not reasons to discard the prototype.
   and octave-aware tempo distance; equal scores preserve host queue order. The
   chosen track and primary reason are visible, and low-confidence key estimates
   are treated as unknown rather than musical fact.
-- **Conservative level matching:** Each decoded track receives a local active
-  program RMS/sample-peak estimate and a separate per-deck trim stage. The trim
-  is capped from −6 to +3 dB and boost is additionally limited by a −1 dBFS
-  sample-peak ceiling. Stereo energy is measured per channel so phase-opposed
-  material is not mistaken for silence. This improves party-to-party level
-  consistency without calling the approximation standards-compliant LUFS;
-  master headroom and the limiter remain final protection.
+- **Conservative level matching:** Each decoded mono/stereo track receives a
+  local `program-level/v2` measurement and a separate per-deck trim stage. The
+  worker preserves channel 1 for the existing rhythm path while measuring both
+  level channels independently with sample-rate-adjusted K-weighting, 400 ms
+  blocks at 75% overlap, a −70 LUFS absolute gate, and a −10 LU relative gate.
+  A separately versioned provisional party policy caps trim from −6 to +3 dB
+  toward −14 LUFS and limits boost against a conservative −2 dBFS decoded
+  sample-peak ceiling. Phase-opposed stereo is not mistaken for silence;
+  unsupported layouts, malformed input, and stale v1 records receive neutral
+  trim. Synthetic stereo calibration, EBU gate cases, and fixed independent
+  FFmpeg `ebur128` reference readings are within 0.1 LU at 44.1, 48, and 96
+  kHz. This is a
+  BS.1770-derived consistency aid, not certified EBU Mode metering or decoded
+  dBTP. The target still needs listening calibration, and EQ, resampling,
+  overlap, and master processing require separate post-DSP true-peak evidence.
 - **Local data deletion:** Library context actions now remove the selected
   IndexedDB record through an awaited delete transaction, remove it from the
   queue and analysis backlog, and safely eject it from either loaded deck. This
@@ -1975,6 +1984,20 @@ These are the active backlog, not reasons to discard the prototype.
   file. A later successful manual load or New Party clears the skip. Synthetic
   `party-autopilot-coordinator-soak/v4` can inject read/decode failures to prove
   failover and no-repeat behavior without claiming browser decode evidence.
+- **D-050 — Version perceptual level measurement separately from party trim and
+  output safety:** `program-level/v2` replaces the mono-left raw-RMS heuristic
+  with a streaming mono/stereo BS.1770-derived measurement: per-channel
+  sample-rate-adjusted K-weighting, 400 ms blocks with 75% overlap, a −70 LUFS
+  absolute gate, and a −10 LU relative gate. Rhythm/key/features deliberately
+  continue using channel 1 so this change cannot silently alter their evidence.
+  `party-level-trim/v2` remains a distinct provisional policy: target −14 LUFS,
+  range −6 to +3 dB, and boost bounded by a −2 dBFS decoded sample-peak ceiling.
+  Old, malformed, silent, invalid, and unsupported-layout measurements apply
+  0 dB; a new load resets prior trim immediately. The nested level schema is
+  migrated lazily without relabelling or invalidating an otherwise current
+  beat-grid/timing review. This is not an EBU compliance claim, a decoded dBTP
+  measurement, a calibrated party target, or proof of post-EQ/overlap/master
+  true-peak safety. Those remain separate acceptance milestones.
 
 ### Open questions
 

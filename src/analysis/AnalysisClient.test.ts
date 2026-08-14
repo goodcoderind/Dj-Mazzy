@@ -62,7 +62,25 @@ const result: BasicAnalysisResult = {
     usableCutBeatIndices: [],
     usable16BeatWindows: []
   },
-  programLevel: { schemaVersion: "program-level/v1", activeRmsDbfs: -14, samplePeakDbfs: -3, trimDb: 0, activeBlockCount: 2 }
+  programLevel: {
+    schemaVersion: "program-level/v2",
+    measurement: {
+      algorithmVersion: "bs1770-k-weighted-gated/v1",
+      status: "measured",
+      sampleRate: 8000,
+      channelCount: 1,
+      integratedLufs: -14,
+      samplePeakDbfs: -3,
+      absoluteGatedBlockCount: 2,
+      relativeGatedBlockCount: 2
+    },
+    normalization: {
+      policyVersion: "party-level-trim/v2",
+      targetLufs: -14,
+      samplePeakCeilingDbfs: -2,
+      trimDb: 0
+    }
+  }
 };
 
 describe("AnalysisClient", () => {
@@ -75,12 +93,33 @@ describe("AnalysisClient", () => {
     expect(worker.messages[0].message).toMatchObject({
       type: "analyze",
       requestId: 1,
+      sourceChannelCount: 1,
       sampleRate: 8000,
       durationSeconds: 1
     });
+    expect(worker.messages[0].message.pcmBuffers).toEqual([pcm.buffer]);
     expect(worker.messages[0].transfer).toEqual([pcm.buffer]);
     worker.respond(1, result);
     await expect(pending).resolves.toEqual(result);
+  });
+
+  it("transfers both decoded stereo channels while keeping the first channel first", async () => {
+    const worker = new FakeWorker();
+    const client = new AnalysisClient(worker as unknown as Worker);
+    const left = new Float32Array([0.1, 0.2]);
+    const right = new Float32Array([0.8, 0.9]);
+    const pending = client.analyzeAudioBuffer({
+      numberOfChannels: 2,
+      sampleRate: 48_000,
+      duration: 2 / 48_000,
+      getChannelData: (channel: number) => channel === 0 ? left : right
+    } as AudioBuffer);
+    expect(worker.messages[0].message).toMatchObject({ sourceChannelCount: 2 });
+    expect(worker.messages[0].transfer).toHaveLength(2);
+    expect(Array.from(new Float32Array(worker.messages[0].transfer[0] as ArrayBuffer))).toEqual(Array.from(left));
+    expect(Array.from(new Float32Array(worker.messages[0].transfer[1] as ArrayBuffer))).toEqual(Array.from(right));
+    worker.respond(1, result);
+    await pending;
   });
 
   it("keeps concurrent worker replies associated with their request IDs", async () => {

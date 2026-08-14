@@ -1,23 +1,18 @@
 import type { TRACK_ANALYSIS_SCHEMA_VERSION } from "./versions";
 import type { BeatGridOverrides } from "./beatGrid";
 import type { AutomaticRhythmTrust } from "../analysis/automaticRhythmTrust";
+import type { ProgramLevelAnalysis } from "../analysis/programLevel";
 
 export type Confidence = number;
 
-export type TrackAnalysisV4 = {
+export type TrackAnalysisV5 = {
   trackId: string;
   contentHash: string;
   schemaVersion: typeof TRACK_ANALYSIS_SCHEMA_VERSION;
   analyzerVersion: string;
   durationSeconds: number;
   sampleRate: number;
-  loudness: {
-    integratedLufs: number | null;
-    shortTermLufs: number[];
-    loudnessRange: number | null;
-    samplePeakDb: number | null;
-    truePeakDbtp: number | null;
-  };
+  programLevel: ProgramLevelAnalysis;
   rhythm: {
     bpm: number | null;
     bpmCandidates: Array<{ bpm: number; confidence: Confidence }>;

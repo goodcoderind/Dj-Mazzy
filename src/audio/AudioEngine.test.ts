@@ -213,6 +213,8 @@ describe("AudioEngine", () => {
     expect(deckA.setTrackTrimDb(8)).toBe(3);
     expect(context.gains[3].gain.value).toBeCloseTo(10 ** (3 / 20));
     expect(engine.getDeckGain("a")).toBe(0);
+    deckA.beginPreparing("next-track");
+    expect(context.gains[3].gain.value).toBe(1);
   });
 
   it("schedules an immutable equal-power crossfade on the audio clock", () => {

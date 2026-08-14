@@ -1,68 +1,316 @@
-export type ProgramLevelAnalysis = {
-  schemaVersion: "program-level/v1";
-  activeRmsDbfs: number | null;
+export const PROGRAM_LEVEL_SCHEMA_VERSION = "program-level/v2" as const;
+export const PROGRAM_LEVEL_ALGORITHM_VERSION = "bs1770-k-weighted-gated/v1" as const;
+export const PARTY_LEVEL_TRIM_POLICY_VERSION = "party-level-trim/v2" as const;
+
+export type ProgramLevelMeasurementStatus =
+  | "measured"
+  | "silence"
+  | "invalid-input"
+  | "unsupported-channels";
+
+export type ProgramLevelMeasurement = {
+  algorithmVersion: typeof PROGRAM_LEVEL_ALGORITHM_VERSION;
+  status: ProgramLevelMeasurementStatus;
+  sampleRate: number;
+  channelCount: number;
+  integratedLufs: number | null;
   samplePeakDbfs: number | null;
-  trimDb: number;
-  activeBlockCount: number;
+  absoluteGatedBlockCount: number;
+  relativeGatedBlockCount: number;
 };
 
-const db = (amplitude: number) => amplitude > 0 ? 20 * Math.log10(amplitude) : -Infinity;
-const clamp = (value: number, minimum: number, maximum: number) =>
-  Math.max(minimum, Math.min(maximum, value));
-
-export const analyzeProgramLevel = (
-  channels: readonly Float32Array[],
-  sampleRate: number
-): ProgramLevelAnalysis => {
-  if (!Number.isFinite(sampleRate) || sampleRate <= 0) throw new RangeError("sampleRate must be positive and finite");
-  if (!channels.length) return { schemaVersion: "program-level/v1", activeRmsDbfs: null, samplePeakDbfs: null, trimDb: 0, activeBlockCount: 0 };
-  const length = Math.min(...channels.map((channel) => channel.length));
-  const blockFrames = Math.max(1, Math.round(sampleRate * 0.4));
-  const hopFrames = Math.max(1, Math.round(sampleRate * 0.2));
-  const blockLevels: number[] = [];
-  let peak = 0;
-  for (let start = 0; start < length; start += hopFrames) {
-    const end = Math.min(length, start + blockFrames);
-    if (end - start < blockFrames / 2) break;
-    let sumSquares = 0;
-    for (let index = start; index < end; index += 1) {
-      let channelSquares = 0;
-      for (const channel of channels) {
-        const sample = Number.isFinite(channel[index]) ? channel[index] : 0;
-        peak = Math.max(peak, Math.abs(sample));
-        channelSquares += sample * sample;
-      }
-      sumSquares += channelSquares / channels.length;
-    }
-    const level = db(Math.sqrt(sumSquares / (end - start)));
-    if (level >= -50) blockLevels.push(level);
-  }
-  if (!blockLevels.length) {
-    return {
-      schemaVersion: "program-level/v1",
-      activeRmsDbfs: null,
-      samplePeakDbfs: peak > 0 ? db(peak) : null,
-      trimDb: 0,
-      activeBlockCount: 0
-    };
-  }
-  blockLevels.sort((left, right) => left - right);
-  const activeRmsDbfs = blockLevels[Math.floor((blockLevels.length - 1) * 0.6)];
-  const samplePeakDbfs = db(peak);
-  const desiredTrim = -14 - activeRmsDbfs;
-  const peakLimitedTrim = -1 - samplePeakDbfs;
-  const trimDb = clamp(Math.min(desiredTrim, peakLimitedTrim), -6, 3);
-  return {
-    schemaVersion: "program-level/v1",
-    activeRmsDbfs: Math.round(activeRmsDbfs * 10) / 10,
-    samplePeakDbfs: Math.round(samplePeakDbfs * 10) / 10,
-    trimDb: Math.round(trimDb * 10) / 10,
-    activeBlockCount: blockLevels.length
+export type ProgramLevelAnalysis = {
+  schemaVersion: typeof PROGRAM_LEVEL_SCHEMA_VERSION;
+  measurement: ProgramLevelMeasurement;
+  normalization: {
+    policyVersion: typeof PARTY_LEVEL_TRIM_POLICY_VERSION;
+    targetLufs: number;
+    samplePeakCeilingDbfs: number;
+    trimDb: number;
   };
 };
 
-export const analyzeAudioBufferProgramLevel = (buffer: AudioBuffer) =>
-  analyzeProgramLevel(
-    Array.from({ length: buffer.numberOfChannels }, (_, channel) => buffer.getChannelData(channel)),
-    buffer.sampleRate
+export const PARTY_LEVEL_TARGET_LUFS = -14;
+// This is intentionally a sample-peak ceiling with one extra decibel of
+// headroom. It is not a decoded true-peak or post-master safety claim.
+export const PARTY_SAMPLE_PEAK_CEILING_DBFS = -2;
+
+const ABSOLUTE_GATE_LUFS = -70;
+const RELATIVE_GATE_LU = -10;
+const MINIMUM_TRIM_DB = -6;
+const MAXIMUM_TRIM_DB = 3;
+const ROUNDING_TOLERANCE = 0.051;
+
+const roundTenth = (value: number) => Math.round(value * 10) / 10;
+const roundPeakUpTenth = (value: number) => Math.ceil(value * 10 - Number.EPSILON) / 10;
+const roundTrimDownTenth = (value: number) => Math.floor(value * 10 + Number.EPSILON) / 10;
+const db = (amplitude: number) => amplitude > 0 ? 20 * Math.log10(amplitude) : -Infinity;
+const loudnessFromPower = (power: number) => power > 0 ? -0.691 + 10 * Math.log10(power) : -Infinity;
+const clamp = (value: number, minimum: number, maximum: number) =>
+  Math.max(minimum, Math.min(maximum, value));
+
+type BiquadCoefficients = {
+  b0: number;
+  b1: number;
+  b2: number;
+  a1: number;
+  a2: number;
+};
+
+type BiquadState = BiquadCoefficients & {
+  x1: number;
+  x2: number;
+  y1: number;
+  y2: number;
+};
+
+const kWeightingCoefficients = (sampleRate: number) => {
+  // These continuous-design parameters reproduce the coefficients published
+  // by ITU-R BS.1770 at 48 kHz while adapting the response to the actual rate.
+  const shelfFrequency = 1681.974450955533;
+  const shelfGainDb = 3.999843853973347;
+  const shelfQ = 0.7071752369554196;
+  const shelfK = Math.tan(Math.PI * shelfFrequency / sampleRate);
+  const shelfVh = 10 ** (shelfGainDb / 20);
+  const shelfVb = shelfVh ** 0.4996667741545416;
+  const shelfA0 = 1 + shelfK / shelfQ + shelfK * shelfK;
+  const shelf: BiquadCoefficients = {
+    b0: (shelfVh + shelfVb * shelfK / shelfQ + shelfK * shelfK) / shelfA0,
+    b1: 2 * (shelfK * shelfK - shelfVh) / shelfA0,
+    b2: (shelfVh - shelfVb * shelfK / shelfQ + shelfK * shelfK) / shelfA0,
+    a1: 2 * (shelfK * shelfK - 1) / shelfA0,
+    a2: (1 - shelfK / shelfQ + shelfK * shelfK) / shelfA0
+  };
+
+  const highPassFrequency = 38.13547087602444;
+  const highPassQ = 0.5003270373238773;
+  const highPassK = Math.tan(Math.PI * highPassFrequency / sampleRate);
+  const highPassA0 = 1 + highPassK / highPassQ + highPassK * highPassK;
+  const highPass: BiquadCoefficients = {
+    // BS.1770 deliberately specifies unity numerator coefficients here.
+    b0: 1,
+    b1: -2,
+    b2: 1,
+    a1: 2 * (highPassK * highPassK - 1) / highPassA0,
+    a2: (1 - highPassK / highPassQ + highPassK * highPassK) / highPassA0
+  };
+  return { shelf, highPass };
+};
+
+const createBiquadState = (coefficients: BiquadCoefficients): BiquadState => ({
+  ...coefficients,
+  x1: 0,
+  x2: 0,
+  y1: 0,
+  y2: 0
+});
+
+const processBiquad = (state: BiquadState, input: number) => {
+  const output = state.b0 * input + state.b1 * state.x1 + state.b2 * state.x2 -
+    state.a1 * state.y1 - state.a2 * state.y2;
+  state.x2 = state.x1;
+  state.x1 = input;
+  state.y2 = state.y1;
+  state.y1 = output;
+  return output;
+};
+
+const emptyMeasurement = (
+  status: Exclude<ProgramLevelMeasurementStatus, "measured">,
+  sampleRate: number,
+  channelCount: number
+): ProgramLevelMeasurement => ({
+  algorithmVersion: PROGRAM_LEVEL_ALGORITHM_VERSION,
+  status,
+  sampleRate,
+  channelCount,
+  integratedLufs: null,
+  samplePeakDbfs: null,
+  absoluteGatedBlockCount: 0,
+  relativeGatedBlockCount: 0
+});
+
+export const deriveProgramTrim = (measurement: ProgramLevelMeasurement) => {
+  let trimDb = 0;
+  if (
+    measurement.status === "measured" &&
+    measurement.integratedLufs != null &&
+    measurement.samplePeakDbfs != null
+  ) {
+    const desiredTrim = PARTY_LEVEL_TARGET_LUFS - measurement.integratedLufs;
+    const peakLimitedTrim = PARTY_SAMPLE_PEAK_CEILING_DBFS - measurement.samplePeakDbfs;
+    trimDb = clamp(Math.min(desiredTrim, peakLimitedTrim), MINIMUM_TRIM_DB, MAXIMUM_TRIM_DB);
+  }
+  return {
+    policyVersion: PARTY_LEVEL_TRIM_POLICY_VERSION,
+    targetLufs: PARTY_LEVEL_TARGET_LUFS,
+    samplePeakCeilingDbfs: PARTY_SAMPLE_PEAK_CEILING_DBFS,
+    trimDb: roundTrimDownTenth(trimDb)
+  } as const;
+};
+
+const buildAnalysis = (measurement: ProgramLevelMeasurement): ProgramLevelAnalysis => ({
+  schemaVersion: PROGRAM_LEVEL_SCHEMA_VERSION,
+  measurement,
+  normalization: deriveProgramTrim(measurement)
+});
+
+export const analyzeProgramLevel = (
+  channels: readonly Float32Array[],
+  sampleRate: number,
+  sourceChannelCount = channels.length
+): ProgramLevelAnalysis => {
+  if (!Number.isFinite(sampleRate) || sampleRate < 8_000 || sampleRate > 384_000) {
+    throw new RangeError("sampleRate must be finite and between 8 kHz and 384 kHz");
+  }
+  if (sourceChannelCount !== 1 && sourceChannelCount !== 2) {
+    return buildAnalysis(emptyMeasurement("unsupported-channels", sampleRate, sourceChannelCount));
+  }
+  if (channels.length !== sourceChannelCount || channels.some((channel) => !(channel instanceof Float32Array))) {
+    return buildAnalysis(emptyMeasurement("invalid-input", sampleRate, sourceChannelCount));
+  }
+  const length = channels[0]?.length ?? 0;
+  if (!length || channels.some((channel) => channel.length !== length)) {
+    return buildAnalysis(emptyMeasurement(length ? "invalid-input" : "silence", sampleRate, sourceChannelCount));
+  }
+
+  let samplePeak = 0;
+  for (const channel of channels) {
+    for (const sample of channel) {
+      if (!Number.isFinite(sample)) {
+        return buildAnalysis(emptyMeasurement("invalid-input", sampleRate, sourceChannelCount));
+      }
+      samplePeak = Math.max(samplePeak, Math.abs(sample));
+    }
+  }
+
+  const blockFrames = Math.max(1, Math.round(sampleRate * 0.4));
+  const hopFrames = Math.max(1, Math.round(blockFrames * 0.25));
+  if (length < blockFrames) {
+    const measurement = emptyMeasurement("silence", sampleRate, sourceChannelCount);
+    measurement.samplePeakDbfs = samplePeak > 0 ? roundPeakUpTenth(db(samplePeak)) : null;
+    return buildAnalysis(measurement);
+  }
+
+  const coefficients = kWeightingCoefficients(sampleRate);
+  const filters = channels.map(() => ({
+    shelf: createBiquadState(coefficients.shelf),
+    highPass: createBiquadState(coefficients.highPass)
+  }));
+  const energyRing = new Float64Array(blockFrames);
+  const blockPowers: number[] = [];
+  let rollingPower = 0;
+
+  for (let frame = 0; frame < length; frame += 1) {
+    let framePower = 0;
+    for (let channelIndex = 0; channelIndex < channels.length; channelIndex += 1) {
+      const sample = channels[channelIndex][frame];
+      const filter = filters[channelIndex];
+      const weighted = processBiquad(
+        filter.highPass,
+        processBiquad(filter.shelf, sample)
+      );
+      framePower += weighted * weighted;
+    }
+    const ringIndex = frame % blockFrames;
+    rollingPower += framePower - energyRing[ringIndex];
+    energyRing[ringIndex] = framePower;
+    const completeFrames = frame + 1;
+    if (completeFrames >= blockFrames && (completeFrames - blockFrames) % hopFrames === 0) {
+      blockPowers.push(rollingPower / blockFrames);
+    }
+  }
+
+  const absoluteGated = blockPowers.filter((power) => loudnessFromPower(power) > ABSOLUTE_GATE_LUFS);
+  if (!absoluteGated.length) {
+    const measurement = emptyMeasurement("silence", sampleRate, sourceChannelCount);
+    measurement.samplePeakDbfs = samplePeak > 0 ? roundPeakUpTenth(db(samplePeak)) : null;
+    return buildAnalysis(measurement);
+  }
+  const absoluteMeanPower = absoluteGated.reduce((sum, power) => sum + power, 0) / absoluteGated.length;
+  const relativeThreshold = loudnessFromPower(absoluteMeanPower) + RELATIVE_GATE_LU;
+  const relativeGated = absoluteGated.filter((power) => loudnessFromPower(power) > relativeThreshold);
+  if (!relativeGated.length) {
+    return buildAnalysis(emptyMeasurement("invalid-input", sampleRate, sourceChannelCount));
+  }
+  const integratedPower = relativeGated.reduce((sum, power) => sum + power, 0) / relativeGated.length;
+  const measurement: ProgramLevelMeasurement = {
+    algorithmVersion: PROGRAM_LEVEL_ALGORITHM_VERSION,
+    status: "measured",
+    sampleRate,
+    channelCount: sourceChannelCount,
+    integratedLufs: roundTenth(loudnessFromPower(integratedPower)),
+    samplePeakDbfs: roundPeakUpTenth(db(samplePeak)),
+    absoluteGatedBlockCount: absoluteGated.length,
+    relativeGatedBlockCount: relativeGated.length
+  };
+  return buildAnalysis(measurement);
+};
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  value !== null && typeof value === "object" && !Array.isArray(value);
+const isNullableFinite = (value: unknown): value is number | null =>
+  value === null || (typeof value === "number" && Number.isFinite(value));
+const closeTo = (left: number, right: number) => Math.abs(left - right) <= ROUNDING_TOLERANCE;
+
+export const normalizeProgramLevel = (value: unknown): ProgramLevelAnalysis | null => {
+  if (!isRecord(value) || value.schemaVersion !== PROGRAM_LEVEL_SCHEMA_VERSION) return null;
+  const rawMeasurement = value.measurement;
+  const rawNormalization = value.normalization;
+  if (!isRecord(rawMeasurement) || !isRecord(rawNormalization)) return null;
+  const status = rawMeasurement.status;
+  const sampleRate = rawMeasurement.sampleRate;
+  const channelCount = rawMeasurement.channelCount;
+  const integratedLufs = rawMeasurement.integratedLufs;
+  const samplePeakDbfs = rawMeasurement.samplePeakDbfs;
+  const absoluteGatedBlockCount = rawMeasurement.absoluteGatedBlockCount;
+  const relativeGatedBlockCount = rawMeasurement.relativeGatedBlockCount;
+  if (
+    rawMeasurement.algorithmVersion !== PROGRAM_LEVEL_ALGORITHM_VERSION ||
+    !["measured", "silence", "invalid-input", "unsupported-channels"].includes(String(status)) ||
+    typeof sampleRate !== "number" || !Number.isFinite(sampleRate) || sampleRate < 8_000 || sampleRate > 384_000 ||
+    typeof channelCount !== "number" || !Number.isInteger(channelCount) || channelCount < 1 || channelCount > 32 ||
+    !isNullableFinite(integratedLufs) || !isNullableFinite(samplePeakDbfs) ||
+    (samplePeakDbfs != null && (samplePeakDbfs < -1_000 || samplePeakDbfs > 1_000)) ||
+    typeof absoluteGatedBlockCount !== "number" || !Number.isInteger(absoluteGatedBlockCount) || absoluteGatedBlockCount < 0 ||
+    typeof relativeGatedBlockCount !== "number" || !Number.isInteger(relativeGatedBlockCount) || relativeGatedBlockCount < 0 ||
+    relativeGatedBlockCount > absoluteGatedBlockCount
+  ) return null;
+  if (
+    status === "measured" &&
+    (channelCount > 2 || integratedLufs == null || integratedLufs < -70 || integratedLufs > 1_000 ||
+      samplePeakDbfs == null ||
+      absoluteGatedBlockCount === 0 || relativeGatedBlockCount === 0)
+  ) return null;
+  if (status !== "measured" && integratedLufs !== null) return null;
+  if ((status === "measured" || status === "silence") && channelCount > 2) return null;
+  if (status === "unsupported-channels" && channelCount <= 2) return null;
+
+  const measurement: ProgramLevelMeasurement = {
+    algorithmVersion: PROGRAM_LEVEL_ALGORITHM_VERSION,
+    status: status as ProgramLevelMeasurementStatus,
+    sampleRate,
+    channelCount,
+    integratedLufs,
+    samplePeakDbfs,
+    absoluteGatedBlockCount,
+    relativeGatedBlockCount
+  };
+  const normalization = deriveProgramTrim(measurement);
+  if (
+    rawNormalization.policyVersion !== PARTY_LEVEL_TRIM_POLICY_VERSION ||
+    rawNormalization.targetLufs !== PARTY_LEVEL_TARGET_LUFS ||
+    rawNormalization.samplePeakCeilingDbfs !== PARTY_SAMPLE_PEAK_CEILING_DBFS ||
+    typeof rawNormalization.trimDb !== "number" || !Number.isFinite(rawNormalization.trimDb) ||
+    !closeTo(rawNormalization.trimDb, normalization.trimDb)
+  ) return null;
+  return { schemaVersion: PROGRAM_LEVEL_SCHEMA_VERSION, measurement, normalization };
+};
+
+export const analyzeAudioBufferProgramLevel = (buffer: AudioBuffer) => {
+  const channels = Array.from(
+    { length: Math.min(buffer.numberOfChannels, 2) },
+    (_, channel) => buffer.getChannelData(channel)
   );
+  return analyzeProgramLevel(channels, buffer.sampleRate, buffer.numberOfChannels);
+};

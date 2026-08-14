@@ -5,7 +5,8 @@ import { analyzePcm } from "../analysis/analyzePcm";
 type AnalysisWorkerRequest = {
   type: "analyze";
   requestId: number;
-  pcmBuffer: ArrayBuffer;
+  pcmBuffers: ArrayBuffer[];
+  sourceChannelCount: number;
   sampleRate: number;
   durationSeconds: number;
 };
@@ -16,10 +17,15 @@ workerScope.onmessage = (event: MessageEvent<AnalysisWorkerRequest>) => {
   const request = event.data;
   if (request.type !== "analyze") return;
   try {
+    const channels = request.pcmBuffers.map((buffer) => new Float32Array(buffer));
+    const rhythmPcm = channels[0];
+    if (!rhythmPcm) throw new Error("analysis requires at least one channel");
     const result = analyzePcm(
-      new Float32Array(request.pcmBuffer),
+      rhythmPcm,
       request.sampleRate,
-      request.durationSeconds
+      request.durationSeconds,
+      channels,
+      request.sourceChannelCount
     );
     workerScope.postMessage({ type: "result", requestId: request.requestId, result });
   } catch (error) {
