@@ -36,7 +36,7 @@ const toneSequence = (
   return channel;
 };
 
-describe("perceptual program level v3", () => {
+describe("perceptual program level v4", () => {
   it.each([44_100, 48_000, 96_000])("matches the EBU stereo calibration tone at %i Hz", (sampleRate) => {
     const channel = sine(-18, 5, sampleRate);
     const result = analyzeProgramLevel([channel, channel], sampleRate);
@@ -79,6 +79,55 @@ describe("perceptual program level v3", () => {
   ])("matches the EBU Tech 3341 $name vector", ({ segments, expected }) => {
     const channel = toneSequence(segments);
     expect(analyzeProgramLevel([channel, channel], 48_000).measurement.integratedLufs).toBe(expected);
+  });
+
+  it.each([
+    { name: "10 LU two-level range", expected: 10, segments: [
+      { peakDbfs: -20, seconds: 20 }, { peakDbfs: -30, seconds: 20 }
+    ] },
+    { name: "5 LU two-level range", expected: 5, segments: [
+      { peakDbfs: -20, seconds: 20 }, { peakDbfs: -15, seconds: 20 }
+    ] },
+    { name: "20 LU two-level range", expected: 20, segments: [
+      { peakDbfs: -40, seconds: 20 }, { peakDbfs: -20, seconds: 20 }
+    ] },
+    { name: "relative-gated five-level range", expected: 15, segments: [
+      { peakDbfs: -50, seconds: 20 }, { peakDbfs: -35, seconds: 20 },
+      { peakDbfs: -20, seconds: 20 }, { peakDbfs: -35, seconds: 20 },
+      { peakDbfs: -50, seconds: 20 }
+    ] }
+  ])("matches the EBU Tech 3342 $name vector", ({ segments, expected }) => {
+    const channel = toneSequence(segments);
+    const measurement = analyzeProgramLevel([channel, channel], 48_000).measurement;
+    expect(measurement.loudnessRangeLu).toBeGreaterThanOrEqual(expected - 1);
+    expect(measurement.loudnessRangeLu).toBeLessThanOrEqual(expected + 1);
+    expect(measurement.loudnessRangeStatus).toBe(channel.length / 48_000 < 60 ? "provisional" : "stable");
+    expect(measurement.loudnessRangeGatedBlockCount).toBeGreaterThan(0);
+  });
+
+  it("uses complete 3-second windows at a 10 Hz cadence and marks early LRA provisional", () => {
+    const short = analyzeProgramLevel([sine(-23, 2.999)], 48_000).measurement;
+    expect(short).toMatchObject({
+      shortTermBlockCount: 0,
+      shortTermMinimumLufs: null,
+      shortTermMaximumLufs: null,
+      loudnessRangeLu: null,
+      loudnessRangeStatus: "unavailable"
+    });
+    const exact = analyzeProgramLevel([sine(-23, 3)], 48_000).measurement;
+    expect(exact).toMatchObject({
+      shortTermWindowSeconds: 3,
+      shortTermHopSeconds: 0.1,
+      shortTermBlockCount: 1,
+      shortTermMinimumLufs: -26,
+      shortTermMaximumLufs: -26,
+      loudnessRangeLu: 0,
+      loudnessRangeGatedBlockCount: 1,
+      loudnessRangeStatus: "provisional"
+    });
+    const stable = analyzeProgramLevel([sine(-23, 60)], 48_000).measurement;
+    expect(stable.shortTermBlockCount).toBe(571);
+    expect(stable.loudnessRangeStatus).toBe("stable");
   });
 
   it("keeps stereo channels independent of phase and channel order", () => {
@@ -178,6 +227,7 @@ describe("perceptual program level v3", () => {
     })).toBeNull();
     const valid = analyzeProgramLevel([sine(-18)], 48_000);
     expect(normalizeProgramLevel(valid)).toEqual(valid);
+    expect(normalizeProgramLevel({ ...valid, schemaVersion: "program-level/v3" })).toBeNull();
     expect(normalizeProgramLevel({
       ...valid,
       normalization: { ...valid.normalization, trimDb: Number.NaN }
@@ -199,6 +249,22 @@ describe("perceptual program level v3", () => {
     expect(normalizeProgramLevel({
       ...valid,
       normalization: { ...valid.normalization, decodedPeakCeilingDbtp: 0 }
+    })).toBeNull();
+    expect(normalizeProgramLevel({
+      ...valid,
+      measurement: { ...valid.measurement, shortTermBlockCount: valid.measurement.shortTermBlockCount + 1 }
+    })).toBeNull();
+    expect(normalizeProgramLevel({
+      ...valid,
+      measurement: { ...valid.measurement, loudnessRangeStatus: "stable" }
+    })).toBeNull();
+    expect(normalizeProgramLevel({
+      ...valid,
+      measurement: { ...valid.measurement, loudnessRangeLu: -1 }
+    })).toBeNull();
+    expect(normalizeProgramLevel({
+      ...valid,
+      measurement: { ...valid.measurement, loudnessRangeLu: 100 }
     })).toBeNull();
   });
 

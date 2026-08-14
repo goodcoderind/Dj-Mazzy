@@ -4,8 +4,8 @@ import {
   estimateDecodedTruePeakLinear
 } from "./decodedTruePeak";
 
-export const PROGRAM_LEVEL_SCHEMA_VERSION = "program-level/v3" as const;
-export const PROGRAM_LEVEL_ALGORITHM_VERSION = "bs1770-k-weighted-gated/v1" as const;
+export const PROGRAM_LEVEL_SCHEMA_VERSION = "program-level/v4" as const;
+export const PROGRAM_LEVEL_ALGORITHM_VERSION = "bs1770-k-weighted-gated+lra/v2" as const;
 export const PARTY_LEVEL_TRIM_POLICY_VERSION = "party-level-trim/v3" as const;
 
 export type ProgramLevelMeasurementStatus =
@@ -19,6 +19,7 @@ export type ProgramLevelMeasurement = {
   status: ProgramLevelMeasurementStatus;
   sampleRate: number;
   channelCount: number;
+  measuredFrames: number;
   integratedLufs: number | null;
   samplePeakDbfs: number | null;
   decodedPeakAlgorithmVersion: typeof DECODED_TRUE_PEAK_ALGORITHM_VERSION;
@@ -26,6 +27,14 @@ export type ProgramLevelMeasurement = {
   estimatedTruePeakDbtp: number | null;
   absoluteGatedBlockCount: number;
   relativeGatedBlockCount: number;
+  shortTermWindowSeconds: 3;
+  shortTermHopSeconds: 0.1;
+  shortTermBlockCount: number;
+  shortTermMinimumLufs: number | null;
+  shortTermMaximumLufs: number | null;
+  loudnessRangeLu: number | null;
+  loudnessRangeGatedBlockCount: number;
+  loudnessRangeStatus: "stable" | "provisional" | "unavailable";
 };
 
 export type ProgramLevelAnalysis = {
@@ -47,6 +56,10 @@ export const PARTY_DECODED_PEAK_CEILING_DBTP = -2;
 
 const ABSOLUTE_GATE_LUFS = -70;
 const RELATIVE_GATE_LU = -10;
+const LRA_RELATIVE_GATE_LU = -20;
+const SHORT_TERM_WINDOW_SECONDS = 3 as const;
+const SHORT_TERM_HOP_SECONDS = 0.1 as const;
+const LRA_STABLE_AFTER_SECONDS = 60;
 const MINIMUM_TRIM_DB = -6;
 const MAXIMUM_TRIM_DB = 3;
 const ROUNDING_TOLERANCE = 0.051;
@@ -128,20 +141,72 @@ const processBiquad = (state: BiquadState, input: number) => {
 const emptyMeasurement = (
   status: Exclude<ProgramLevelMeasurementStatus, "measured">,
   sampleRate: number,
-  channelCount: number
+  channelCount: number,
+  measuredFrames = 0
 ): ProgramLevelMeasurement => ({
   algorithmVersion: PROGRAM_LEVEL_ALGORITHM_VERSION,
   status,
   sampleRate,
   channelCount,
+  measuredFrames,
   integratedLufs: null,
   samplePeakDbfs: null,
   decodedPeakAlgorithmVersion: DECODED_TRUE_PEAK_ALGORITHM_VERSION,
   decodedPeakOversampleFactor: DECODED_TRUE_PEAK_OVERSAMPLE_FACTOR,
   estimatedTruePeakDbtp: null,
   absoluteGatedBlockCount: 0,
-  relativeGatedBlockCount: 0
+  relativeGatedBlockCount: 0,
+  shortTermWindowSeconds: SHORT_TERM_WINDOW_SECONDS,
+  shortTermHopSeconds: SHORT_TERM_HOP_SECONDS,
+  shortTermBlockCount: 0,
+  shortTermMinimumLufs: null,
+  shortTermMaximumLufs: null,
+  loudnessRangeLu: null,
+  loudnessRangeGatedBlockCount: 0,
+  loudnessRangeStatus: "unavailable"
 });
+
+const shortTermSummary = (
+  values: readonly (number | null)[],
+  measuredFrames: number,
+  sampleRate: number
+) => {
+  const finite = values.filter((value): value is number => value != null && Number.isFinite(value));
+  const absoluteGated = finite.filter((value) => value >= ABSOLUTE_GATE_LUFS);
+  let relativeGated: number[] = [];
+  if (absoluteGated.length) {
+    const meanPower = absoluteGated.reduce((sum, value) => sum + 10 ** (value / 10), 0) /
+      absoluteGated.length;
+    const relativeThreshold = 10 * Math.log10(meanPower) + LRA_RELATIVE_GATE_LU;
+    relativeGated = absoluteGated.filter((value) => value >= relativeThreshold).sort((left, right) => left - right);
+  }
+  let loudnessRangeLu: number | null = null;
+  if (relativeGated.length) {
+    const low = relativeGated[Math.round((relativeGated.length - 1) * 0.1)];
+    const high = relativeGated[Math.round((relativeGated.length - 1) * 0.95)];
+    loudnessRangeLu = roundTenth(Math.max(0, high - low));
+  }
+  let shortTermMinimumLufs: number | null = null;
+  let shortTermMaximumLufs: number | null = null;
+  for (const value of finite) {
+    shortTermMinimumLufs = shortTermMinimumLufs == null ? value : Math.min(shortTermMinimumLufs, value);
+    shortTermMaximumLufs = shortTermMaximumLufs == null ? value : Math.max(shortTermMaximumLufs, value);
+  }
+  return {
+    shortTermWindowSeconds: SHORT_TERM_WINDOW_SECONDS,
+    shortTermHopSeconds: SHORT_TERM_HOP_SECONDS,
+    shortTermBlockCount: values.length,
+    shortTermMinimumLufs: shortTermMinimumLufs == null ? null : roundTenth(shortTermMinimumLufs),
+    shortTermMaximumLufs: shortTermMaximumLufs == null ? null : roundTenth(shortTermMaximumLufs),
+    loudnessRangeLu,
+    loudnessRangeGatedBlockCount: relativeGated.length,
+    loudnessRangeStatus: loudnessRangeLu == null
+      ? "unavailable"
+      : measuredFrames / sampleRate < LRA_STABLE_AFTER_SECONDS
+        ? "provisional"
+        : "stable"
+  } as const;
+};
 
 export const deriveProgramTrim = (measurement: ProgramLevelMeasurement) => {
   let trimDb = 0;
@@ -201,7 +266,7 @@ export const analyzeProgramLevel = (
   const blockFrames = Math.max(1, Math.round(sampleRate * 0.4));
   const hopFrames = Math.max(1, Math.round(blockFrames * 0.25));
   if (length < blockFrames) {
-    const measurement = emptyMeasurement("silence", sampleRate, sourceChannelCount);
+    const measurement = emptyMeasurement("silence", sampleRate, sourceChannelCount, length);
     measurement.samplePeakDbfs = samplePeak > 0 ? roundPeakUpTenth(db(samplePeak)) : null;
     measurement.estimatedTruePeakDbtp = estimatedTruePeak > 0
       ? roundPeakUpTenth(db(estimatedTruePeak))
@@ -215,8 +280,13 @@ export const analyzeProgramLevel = (
     highPass: createBiquadState(coefficients.highPass)
   }));
   const energyRing = new Float64Array(blockFrames);
+  const shortTermFrames = Math.max(1, Math.round(sampleRate * SHORT_TERM_WINDOW_SECONDS));
+  const shortTermHopFrames = Math.max(1, Math.round(sampleRate * SHORT_TERM_HOP_SECONDS));
+  const shortTermEnergyRing = new Float64Array(shortTermFrames);
+  const shortTermValues: Array<number | null> = [];
   const blockPowers: number[] = [];
   let rollingPower = 0;
+  let shortTermRollingPower = 0;
 
   for (let frame = 0; frame < length; frame += 1) {
     let framePower = 0;
@@ -232,19 +302,32 @@ export const analyzeProgramLevel = (
     const ringIndex = frame % blockFrames;
     rollingPower += framePower - energyRing[ringIndex];
     energyRing[ringIndex] = framePower;
+    const shortTermRingIndex = frame % shortTermFrames;
+    shortTermRollingPower += framePower - shortTermEnergyRing[shortTermRingIndex];
+    shortTermEnergyRing[shortTermRingIndex] = framePower;
     const completeFrames = frame + 1;
     if (completeFrames >= blockFrames && (completeFrames - blockFrames) % hopFrames === 0) {
       blockPowers.push(rollingPower / blockFrames);
     }
+    if (
+      completeFrames >= shortTermFrames &&
+      (completeFrames - shortTermFrames) % shortTermHopFrames === 0
+    ) {
+      const loudness = loudnessFromPower(shortTermRollingPower / shortTermFrames);
+      shortTermValues.push(Number.isFinite(loudness) ? loudness : null);
+    }
   }
+
+  const shortTerm = shortTermSummary(shortTermValues, length, sampleRate);
 
   const absoluteGated = blockPowers.filter((power) => loudnessFromPower(power) > ABSOLUTE_GATE_LUFS);
   if (!absoluteGated.length) {
-    const measurement = emptyMeasurement("silence", sampleRate, sourceChannelCount);
+    const measurement = emptyMeasurement("silence", sampleRate, sourceChannelCount, length);
     measurement.samplePeakDbfs = samplePeak > 0 ? roundPeakUpTenth(db(samplePeak)) : null;
     measurement.estimatedTruePeakDbtp = estimatedTruePeak > 0
       ? roundPeakUpTenth(db(estimatedTruePeak))
       : null;
+    Object.assign(measurement, shortTerm);
     return buildAnalysis(measurement);
   }
   const absoluteMeanPower = absoluteGated.reduce((sum, power) => sum + power, 0) / absoluteGated.length;
@@ -259,13 +342,15 @@ export const analyzeProgramLevel = (
     status: "measured",
     sampleRate,
     channelCount: sourceChannelCount,
+    measuredFrames: length,
     integratedLufs: roundTenth(loudnessFromPower(integratedPower)),
     samplePeakDbfs: roundPeakUpTenth(db(samplePeak)),
     decodedPeakAlgorithmVersion: DECODED_TRUE_PEAK_ALGORITHM_VERSION,
     decodedPeakOversampleFactor: DECODED_TRUE_PEAK_OVERSAMPLE_FACTOR,
     estimatedTruePeakDbtp: roundPeakUpTenth(db(estimatedTruePeak)),
     absoluteGatedBlockCount: absoluteGated.length,
-    relativeGatedBlockCount: relativeGated.length
+    relativeGatedBlockCount: relativeGated.length,
+    ...shortTerm
   };
   return buildAnalysis(measurement);
 };
@@ -284,16 +369,26 @@ export const normalizeProgramLevel = (value: unknown): ProgramLevelAnalysis | nu
   const status = rawMeasurement.status;
   const sampleRate = rawMeasurement.sampleRate;
   const channelCount = rawMeasurement.channelCount;
+  const measuredFrames = rawMeasurement.measuredFrames;
   const integratedLufs = rawMeasurement.integratedLufs;
   const samplePeakDbfs = rawMeasurement.samplePeakDbfs;
   const estimatedTruePeakDbtp = rawMeasurement.estimatedTruePeakDbtp;
   const absoluteGatedBlockCount = rawMeasurement.absoluteGatedBlockCount;
   const relativeGatedBlockCount = rawMeasurement.relativeGatedBlockCount;
+  const shortTermWindowSeconds = rawMeasurement.shortTermWindowSeconds;
+  const shortTermHopSeconds = rawMeasurement.shortTermHopSeconds;
+  const shortTermBlockCount = rawMeasurement.shortTermBlockCount;
+  const shortTermMinimumLufs = rawMeasurement.shortTermMinimumLufs;
+  const shortTermMaximumLufs = rawMeasurement.shortTermMaximumLufs;
+  const loudnessRangeLu = rawMeasurement.loudnessRangeLu;
+  const loudnessRangeGatedBlockCount = rawMeasurement.loudnessRangeGatedBlockCount;
+  const loudnessRangeStatus = rawMeasurement.loudnessRangeStatus;
   if (
     rawMeasurement.algorithmVersion !== PROGRAM_LEVEL_ALGORITHM_VERSION ||
     !["measured", "silence", "invalid-input", "unsupported-channels"].includes(String(status)) ||
     typeof sampleRate !== "number" || !Number.isFinite(sampleRate) || sampleRate < 8_000 || sampleRate > 384_000 ||
     typeof channelCount !== "number" || !Number.isInteger(channelCount) || channelCount < 1 || channelCount > 32 ||
+    typeof measuredFrames !== "number" || !Number.isSafeInteger(measuredFrames) || measuredFrames < 0 ||
     !isNullableFinite(integratedLufs) || !isNullableFinite(samplePeakDbfs) ||
     rawMeasurement.decodedPeakAlgorithmVersion !== DECODED_TRUE_PEAK_ALGORITHM_VERSION ||
     rawMeasurement.decodedPeakOversampleFactor !== DECODED_TRUE_PEAK_OVERSAMPLE_FACTOR ||
@@ -302,12 +397,41 @@ export const normalizeProgramLevel = (value: unknown): ProgramLevelAnalysis | nu
     (estimatedTruePeakDbtp != null && (estimatedTruePeakDbtp < -1_000 || estimatedTruePeakDbtp > 1_000)) ||
     typeof absoluteGatedBlockCount !== "number" || !Number.isInteger(absoluteGatedBlockCount) || absoluteGatedBlockCount < 0 ||
     typeof relativeGatedBlockCount !== "number" || !Number.isInteger(relativeGatedBlockCount) || relativeGatedBlockCount < 0 ||
-    relativeGatedBlockCount > absoluteGatedBlockCount
+    relativeGatedBlockCount > absoluteGatedBlockCount ||
+    shortTermWindowSeconds !== SHORT_TERM_WINDOW_SECONDS || shortTermHopSeconds !== SHORT_TERM_HOP_SECONDS ||
+    typeof shortTermBlockCount !== "number" || !Number.isSafeInteger(shortTermBlockCount) || shortTermBlockCount < 0 ||
+    !isNullableFinite(shortTermMinimumLufs) || !isNullableFinite(shortTermMaximumLufs) ||
+    !isNullableFinite(loudnessRangeLu) ||
+    typeof loudnessRangeGatedBlockCount !== "number" || !Number.isSafeInteger(loudnessRangeGatedBlockCount) ||
+    loudnessRangeGatedBlockCount < 0 || loudnessRangeGatedBlockCount > shortTermBlockCount ||
+    !["stable", "provisional", "unavailable"].includes(String(loudnessRangeStatus))
+  ) return null;
+  const expectedShortTermBlockCount = measuredFrames >= Math.round(sampleRate * SHORT_TERM_WINDOW_SECONDS)
+    ? Math.floor((measuredFrames - Math.round(sampleRate * SHORT_TERM_WINDOW_SECONDS)) /
+      Math.round(sampleRate * SHORT_TERM_HOP_SECONDS)) + 1
+    : 0;
+  if (
+    shortTermBlockCount !== expectedShortTermBlockCount ||
+    (shortTermMinimumLufs == null) !== (shortTermMaximumLufs == null) ||
+    (shortTermBlockCount === 0 && shortTermMinimumLufs != null) ||
+    (shortTermMinimumLufs != null && shortTermMaximumLufs != null && shortTermMinimumLufs > shortTermMaximumLufs) ||
+    (shortTermMinimumLufs != null && (shortTermMinimumLufs < -1_000 || shortTermMinimumLufs > 1_000)) ||
+    (shortTermMaximumLufs != null && (shortTermMaximumLufs < -1_000 || shortTermMaximumLufs > 1_000)) ||
+    (loudnessRangeStatus === "unavailable") !== (loudnessRangeLu == null) ||
+    (loudnessRangeLu != null && (loudnessRangeLu < 0 || loudnessRangeLu > 2_000)) ||
+    (loudnessRangeLu != null && (shortTermMinimumLufs == null || shortTermMaximumLufs == null)) ||
+    (loudnessRangeLu != null && shortTermMinimumLufs != null && shortTermMaximumLufs != null &&
+      loudnessRangeLu > shortTermMaximumLufs - shortTermMinimumLufs + 0.11) ||
+    (loudnessRangeLu != null && loudnessRangeGatedBlockCount === 0) ||
+    (loudnessRangeLu == null && loudnessRangeGatedBlockCount !== 0) ||
+    (loudnessRangeStatus === "stable" && measuredFrames / sampleRate < LRA_STABLE_AFTER_SECONDS) ||
+    (loudnessRangeStatus === "provisional" && measuredFrames / sampleRate >= LRA_STABLE_AFTER_SECONDS)
   ) return null;
   if (
     status === "measured" &&
     (channelCount > 2 || integratedLufs == null || integratedLufs < -70 || integratedLufs > 1_000 ||
       samplePeakDbfs == null || estimatedTruePeakDbtp == null ||
+      measuredFrames < Math.round(sampleRate * 0.4) ||
       absoluteGatedBlockCount === 0 || relativeGatedBlockCount === 0)
   ) return null;
   if (
@@ -318,19 +442,35 @@ export const normalizeProgramLevel = (value: unknown): ProgramLevelAnalysis | nu
   if (status !== "measured" && integratedLufs !== null) return null;
   if ((status === "measured" || status === "silence") && channelCount > 2) return null;
   if (status === "unsupported-channels" && channelCount <= 2) return null;
+  if ((status === "invalid-input" || status === "unsupported-channels") && measuredFrames !== 0) return null;
+  if (
+    (status === "invalid-input" || status === "unsupported-channels") &&
+    (samplePeakDbfs != null || estimatedTruePeakDbtp != null || absoluteGatedBlockCount !== 0 ||
+      relativeGatedBlockCount !== 0 || shortTermBlockCount !== 0 || shortTermMinimumLufs != null ||
+      shortTermMaximumLufs != null || loudnessRangeLu != null || loudnessRangeGatedBlockCount !== 0)
+  ) return null;
 
   const measurement: ProgramLevelMeasurement = {
     algorithmVersion: PROGRAM_LEVEL_ALGORITHM_VERSION,
     status: status as ProgramLevelMeasurementStatus,
     sampleRate,
     channelCount,
+    measuredFrames,
     integratedLufs,
     samplePeakDbfs,
     decodedPeakAlgorithmVersion: DECODED_TRUE_PEAK_ALGORITHM_VERSION,
     decodedPeakOversampleFactor: DECODED_TRUE_PEAK_OVERSAMPLE_FACTOR,
     estimatedTruePeakDbtp,
     absoluteGatedBlockCount,
-    relativeGatedBlockCount
+    relativeGatedBlockCount,
+    shortTermWindowSeconds: SHORT_TERM_WINDOW_SECONDS,
+    shortTermHopSeconds: SHORT_TERM_HOP_SECONDS,
+    shortTermBlockCount,
+    shortTermMinimumLufs,
+    shortTermMaximumLufs,
+    loudnessRangeLu,
+    loudnessRangeGatedBlockCount,
+    loudnessRangeStatus: loudnessRangeStatus as ProgramLevelMeasurement["loudnessRangeStatus"]
   };
   const normalization = deriveProgramTrim(measurement);
   if (

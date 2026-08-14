@@ -178,12 +178,15 @@ const Deck = forwardRef(function Deck(
     : null;
   const automaticTrust = analysisRecord?.automaticRhythmTrust ?? null;
   const currentProgramLevel = normalizeProgramLevel(analysisRecord?.programLevel);
+  const programLevelRangeLabel = currentProgramLevel?.measurement.loudnessRangeLu == null
+    ? "level range unavailable"
+    : `level range ${currentProgramLevel.measurement.loudnessRangeLu.toFixed(1)} LU${currentProgramLevel.measurement.loudnessRangeStatus === "provisional" ? " · early estimate" : ""}`;
   const programLevelLabel = programLevelRuntimeStatus === "failed"
     ? "level check failed · no trim"
     : !currentProgramLevel
     ? "automatic loudness trim pending"
     : currentProgramLevel.measurement.status === "measured"
-      ? `automatic loudness trim ${currentProgramLevel.normalization.trimDb > 0 ? "+" : ""}${currentProgramLevel.normalization.trimDb.toFixed(1)} dB`
+      ? `automatic loudness trim ${currentProgramLevel.normalization.trimDb > 0 ? "+" : ""}${currentProgramLevel.normalization.trimDb.toFixed(1)} dB · ${programLevelRangeLabel}`
       : currentProgramLevel.measurement.status === "unsupported-channels"
         ? "loudness matching unavailable for this file · no trim"
         : currentProgramLevel.measurement.status === "silence"

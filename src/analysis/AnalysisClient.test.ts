@@ -63,19 +63,28 @@ const result: BasicAnalysisResult = {
     usable16BeatWindows: []
   },
   programLevel: {
-    schemaVersion: "program-level/v3",
+    schemaVersion: "program-level/v4",
     measurement: {
-      algorithmVersion: "bs1770-k-weighted-gated/v1",
+      algorithmVersion: "bs1770-k-weighted-gated+lra/v2",
       status: "measured",
       sampleRate: 8000,
       channelCount: 1,
+      measuredFrames: 24_000,
       integratedLufs: -14,
       samplePeakDbfs: -3,
       decodedPeakAlgorithmVersion: "itu-r-bs1770-5-annex2-4x-fir-estimate/v1",
       decodedPeakOversampleFactor: 4,
       estimatedTruePeakDbtp: -3,
       absoluteGatedBlockCount: 2,
-      relativeGatedBlockCount: 2
+      relativeGatedBlockCount: 2,
+      shortTermWindowSeconds: 3,
+      shortTermHopSeconds: 0.1,
+      shortTermBlockCount: 1,
+      shortTermMinimumLufs: -14,
+      shortTermMaximumLufs: -14,
+      loudnessRangeLu: 0,
+      loudnessRangeGatedBlockCount: 1,
+      loudnessRangeStatus: "provisional"
     },
     normalization: {
       policyVersion: "party-level-trim/v3",

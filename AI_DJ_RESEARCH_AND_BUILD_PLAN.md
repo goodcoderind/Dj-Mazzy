@@ -1215,11 +1215,11 @@ before musical or operational reliability are:
 - beat-synchronous energy and structural/vocal-frequency proxies now support
   safety-bounded cue ranking and Filtered Fade, but they are not calibrated as
   semantic vocal or musical-quality truth on annotated real music;
-- stereo K-weighted integrated-loudness trim now replaces the earlier raw-RMS
-  estimate and includes a conservative four-times decoded intersample-peak
-  estimate, but its party target still needs listening calibration, the peak
-  estimator is not meter-certified, and post-master true-peak evaluation
-  remains incomplete;
+- stereo K-weighted integrated/short-term loudness, aggregate Tech 3342-style
+  LRA, and conservative four-times decoded intersample-peak estimation replace
+  the earlier raw-RMS estimate, but the party target still needs listening
+  calibration, neither meter is compliance-certified, and post-master
+  true-peak evaluation remains incomplete;
 - the shared Autopilot coordinator now provides queue-first three-track
   lookahead, played-track exclusion, energy-storyline intent, Rescue, and
   deterministic final-track ownership, but live real-party validation and
@@ -1450,21 +1450,25 @@ These are the active backlog, not reasons to discard the prototype.
   chosen track and primary reason are visible, and low-confidence key estimates
   are treated as unknown rather than musical fact.
 - **Conservative level matching:** Each decoded mono/stereo track receives a
-  local `program-level/v3` measurement and a separate per-deck trim stage. The
+  local `program-level/v4` measurement and a separate per-deck trim stage. The
   worker preserves channel 1 for the existing rhythm path while measuring both
   level channels independently with sample-rate-adjusted K-weighting, 400 ms
   blocks at 75% overlap, a −70 LUFS absolute gate, and a −10 LU relative gate.
+  Three-second windows at 10 Hz feed a −70 LUFS absolute/−20 LU relative gate
+  and 10th-to-95th-percentile aggregate range; values from the first 60 seconds
+  are marked provisional, and no per-window time series is persisted.
   A separately versioned provisional party policy caps trim from −6 to +3 dB
   toward −14 LUFS and limits boost against a conservative −2 dBTP per-file
   ceiling using a four-times decoded intersample-peak estimate based on the
   order-48, four-phase FIR coefficients published in ITU-R BS.1770-5 Annex 2.
   Phase-opposed stereo is not mistaken for silence;
-  unsupported layouts, malformed input, and stale v1 records receive neutral
+  unsupported layouts, malformed input, and stale nested records receive neutral
   trim. Synthetic stereo calibration, EBU gate cases, and fixed independent
   FFmpeg `ebur128` reference readings are within 0.1 LU at 44.1, 48, and 96
   kHz. This is a
   BS.1770-derived consistency aid, not certified EBU Mode or true-peak
-  metering. The target still needs listening calibration, and EQ, resampling,
+  metering. LRA is diagnostic only and cannot alter trim or transition choice.
+  The target still needs listening calibration, and EQ, resampling,
   overlap, and master processing require separate post-DSP true-peak evidence.
 - **Local data deletion:** Library context actions now remove the selected
   IndexedDB record through an awaited delete transaction, remove it from the
@@ -2021,7 +2025,8 @@ These are the active backlog, not reasons to discard the prototype.
   `OfflineAudioContext` master graph configured by the same shared helper and
   immutable `mazzy-master/v1` settings as the live `AudioEngine`. The
   diagnostics-only `post-master-peak-check/v1` evaluates the post-limiter
-  channels with the v3 four-times decoded peak estimator and fails on silence,
+  channels with the four-times decoded peak estimator introduced in D-051 and
+  fails on silence,
   non-finite input, or an estimated peak above 0 dBTP. In a fresh 48 kHz browser
   run, all seven v4 checks passed; the stress path measured −2.5 dBFS sample
   peak and −2.5 dBTP estimated peak. The report retains only synthetic numeric
@@ -2030,6 +2035,20 @@ These are the active backlog, not reasons to discard the prototype.
   main-thread load, output-device or speaker behavior, certified meter
   conformance, or a product true-peak ceiling. `mazzy-master/v1` therefore does
   not change, and a real post-master conformance/release gate remains open.
+- **D-053 — Add aggregate short-term/LRA evidence without changing level
+  policy:** `program-level/v4` extends the same per-channel K-weighted stream
+  with complete 3-second windows every 100 ms. A Tech 3342-style range applies
+  a −70 LUFS absolute gate, a −20 LU relative gate, then subtracts the 10th
+  percentile from the 95th. The worker persists only fixed aggregate fields:
+  complete-window count, gated count, minimum, maximum, range, and
+  `stable|provisional|unavailable`; it does not retain a per-window party
+  timeline. Values before 60 seconds are explicitly provisional as required by
+  Tech 3341. The four formula-defined synthetic minimum-requirement cases land
+  within their ±1 LU bands, and exact 2.999/3.000-second plus hostile-schema
+  boundaries fail closed. `party-level-trim/v3` does not consume LRA, so this
+  cannot silently alter playback or imply that high/low range is good or bad.
+  It remains a local diagnostic descriptor, not certified EBU Mode, genre
+  judgment, a calibrated party target, or output-safety evidence.
 
 ### Open questions
 
@@ -2107,6 +2126,7 @@ Mazzy version 1 is ready to ship when:
 12. [Demucs source separation](https://github.com/facebookresearch/demucs).
 13. [Microsoft CLAP](https://github.com/microsoft/CLAP).
 14. [Spotify Developer Policy](https://developer.spotify.com/policy).
+15. [EBU Tech 3342 loudness-range specification](https://tech.ebu.ch/docs/tech/tech3342.pdf).
 
 ---
 

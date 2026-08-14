@@ -80,24 +80,29 @@ the decks' actual trim and EQ state. Live scheduling consumes that description;
 the DSP compiler cannot change transition eligibility or silently substitute a
 different template.
 
-Decoded mono and stereo tracks now receive a local `program-level/v3`
+Decoded mono and stereo tracks now receive a local `program-level/v4`
 measurement in the existing analysis worker. It keeps the rhythm detector on
 channel 1, but measures level from both channels independently using
 sample-rate-adjusted K-weighting, 400 ms blocks with 75% overlap, the −70 LUFS
-absolute gate, and the −10 LU relative gate. A separately versioned provisional
+absolute gate, and the −10 LU relative gate. Three-second windows sampled at
+10 Hz also produce a Tech 3342-style 10th-to-95th-percentile loudness range
+after −70 LUFS/−20 LU gating. Only aggregate range/count/min/max values are
+stored; the first 60 seconds are visibly marked as an early estimate. A
+separately versioned provisional
 party policy applies at most −6 to +3 dB of deck trim toward −14 LUFS, while a
 four-times decoded intersample-peak estimate based on the FIR coefficients in
 ITU-R BS.1770-5 Annex 2 can reduce that boost against a conservative −2 dBTP
-per-file ceiling. Old or
-malformed level records are ignored and regenerated; a new deck load starts at
-0 dB trim instead of inheriting the previous song's value. Synthetic stereo
-calibration and EBU gate vectors cover 44.1, 48, and 96 kHz; fixed 50 Hz and
+per-file ceiling. Old or malformed level records are ignored and regenerated;
+a new deck load starts at 0 dB trim instead of inheriting the previous song's
+value. Synthetic stereo
+calibration and EBU gate vectors cover 44.1, 48, and 96 kHz; four synthetic
+Tech 3342 range cases run at 48 kHz. Fixed 50 Hz and
 10 kHz results are within 0.1 LU of FFmpeg 8.1.1's independent `ebur128`
 meter. A phase-offset quarter-rate vector proves that the decoded peak estimate
 can detect a peak between stored samples. This is a BS.1770-derived local
-consistency aid, not certified EBU Mode or true-peak metering: it does not
-certify a −14 LUFS product target or prove the post-EQ,
-overlapped master output is true-peak safe. Files with more than two channels
+consistency aid, not certified EBU Mode or true-peak metering: range is not yet
+used to change playback, and it does not certify a −14 LUFS product target or
+prove the post-EQ, overlapped master output is true-peak safe. Files with more than two channels
 receive neutral trim until a verified layout-aware measurement exists.
 
 During an active transition, **STOP TRANSITION SAFELY** cancels pending gain automation,
