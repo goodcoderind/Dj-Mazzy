@@ -2081,6 +2081,23 @@ These are the active backlog, not reasons to discard the prototype.
   with the full official set. This additional evidence does not rename the
   field, change the estimator schema, promote it to a compliant meter, or prove
   the live post-master/output path.
+- **D-056 — Fail the current master before evaluating a bounded peak guard:**
+  `post-master-peak-check/v2` lowers the diagnostics overload ceiling from 0 to
+  −1 dBTP. `transition-rehearsal-browser-check/v5` keeps the existing hot
+  transition check and adds a two-tone overload at 44.1, 48, and 96 kHz. In a
+  fresh Chromium `OfflineAudioContext` run, the unchanged live
+  `mazzy-master/v1` path reached −0.1 dBFS sample peak and +0.3 dBTP estimated
+  peak at every rate, so it correctly fails the stronger gate. A separate
+  `mazzy-master-peak-guard-candidate/v1` inserts a four-times-oversampled final
+  safety curve that is identity below −3 dBFS and bounded above it; the same
+  cells measured −2.7 dBFS sample peak and −2.5 dBTP estimated peak. All other
+  v5 rehearsal checks passed. The report explicitly stores
+  `liveMasterPromotionReady: false`, and normal builds do not import the
+  candidate. A hard safety curve may introduce audible overload distortion, so
+  real-music current/candidate listening, a new master/audio-engine contract,
+  and a fresh device soak are mandatory before any live wiring. This is a
+  viable diagnostics candidate, not output-device, speaker, certified-meter,
+  or production peak-ceiling evidence.
 
 ### Open questions
 

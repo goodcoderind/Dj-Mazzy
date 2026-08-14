@@ -3,8 +3,10 @@ import { TRANSITION_DSP_VERSION, type TransitionDspV2 } from "../audio/transitio
 import { TRANSITION_PLAN_SCHEMA_VERSION } from "../domain/versions";
 import {
   renderProtectedMasterRehearsalCheck,
-  renderTransitionRehearsal
+  renderTransitionRehearsal,
+  type PreMasterStereoPreview
 } from "./transitionRehearsal";
+import { renderMasterPeakGuardCandidateCheck } from "./masterPeakGuardCandidate";
 
 type Check = Readonly<{ name: string; passed: boolean; evidence: string }>;
 
@@ -75,6 +77,29 @@ const peakStressDsp = (): TransitionDspV2 => {
     ...base,
     source: Object.freeze({ ...base.source, playbackRate: 1 }),
     target: Object.freeze({ ...base.target, trimDb: 3 })
+  });
+};
+
+const protectedMasterStressPreview = (outputSampleRate: number): PreMasterStereoPreview => {
+  const frameCount = outputSampleRate * 2;
+  const fadeFrames = Math.round(outputSampleRate * 0.05);
+  const channel = Float32Array.from({ length: frameCount }, (_, frame) => {
+    const fadeIn = Math.min(1, frame / fadeFrames);
+    const fadeOut = Math.min(1, (frameCount - 1 - frame) / fadeFrames);
+    const time = frame / outputSampleRate;
+    return Math.min(fadeIn, fadeOut) * (
+      1.8 * Math.sin(2 * Math.PI * 997 * time) +
+      0.45 * Math.sin(2 * Math.PI * (outputSampleRate / 4) * time + Math.PI / 4)
+    );
+  });
+  return Object.freeze({
+    kind: "pre-master-stereo/v1",
+    requiredMasterVersion: MASTER_DSP_V1.version,
+    sampleRate: outputSampleRate,
+    channels: Object.freeze([
+      channel,
+      new Float32Array(channel)
+    ]) as readonly [Float32Array, Float32Array]
   });
 };
 
@@ -176,6 +201,27 @@ const run = async () => {
       : postMasterPeak.peak.failureCodes.join(", ")
   });
 
+  const multiRatePeakComparison = await Promise.all(
+    [44_100, 48_000, 96_000].map(async (outputSampleRate) => {
+      const preview = protectedMasterStressPreview(outputSampleRate);
+      const [currentMaster, peakGuardCandidate] = await Promise.all([
+        renderProtectedMasterRehearsalCheck(preview),
+        renderMasterPeakGuardCandidateCheck(preview)
+      ]);
+      return { outputSampleRate, currentMaster, peakGuardCandidate };
+    })
+  );
+  for (const { outputSampleRate, peakGuardCandidate } of multiRatePeakComparison) {
+    const check = peakGuardCandidate.peak;
+    checks.push({
+      name: `Diagnostics-only peak-guard candidate at ${outputSampleRate / 1_000} kHz`,
+      passed: check.passed,
+      evidence: check.passed
+        ? `sample ${check.samplePeakDbfs?.toFixed(1)} dBFS · estimated ${check.estimatedTruePeakDbtp?.toFixed(1)} dBTP · ceiling ${check.ceilingDbtp.toFixed(1)} dBTP`
+        : check.failureCodes.join(", ")
+    });
+  }
+
   const filterSource = createBuffer(tone(3_000), () => 0);
   const unfiltered = await renderTransitionRehearsal(filterSource, targetTone, unfilteredComparisonDsp(), options);
   const filtered = await renderTransitionRehearsal(filterSource, targetTone, filteredDsp(), options);
@@ -204,14 +250,18 @@ const run = async () => {
     return row;
   }));
   const report = Object.freeze({
-    schemaVersion: "transition-rehearsal-browser-check/v4",
+    schemaVersion: "transition-rehearsal-browser-check/v5",
     sampleRate,
     passed: checks.every((check) => check.passed),
+    liveMasterPromotionReady: false,
     checks,
     postMasterPeak: postMasterPeak.peak,
-    evidenceScope: "Synthetic OfflineAudioContext transition DSP and protected-master render path; not live scheduling, decoded music, output-device, speaker, or certified true-peak evidence."
+    multiRatePeakComparison,
+    evidenceScope: "Synthetic OfflineAudioContext transition DSP, current protected-master render path, and diagnostics-only peak-guard candidate; not a live-master promotion, live scheduling, decoded music, output-device, speaker, or certified true-peak claim."
   });
-  status.textContent = report.passed ? "All local Web Audio checks passed." : "One or more local Web Audio checks failed.";
+  status.textContent = report.passed
+    ? "All bounded Web Audio checks passed. The peak guard remains diagnostics-only."
+    : "One or more local Web Audio checks failed.";
   summary.textContent = JSON.stringify(report, null, 2);
 };
 

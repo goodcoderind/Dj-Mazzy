@@ -7,11 +7,12 @@ describe("post-master peak check", () => {
       0.5 * Math.sin(2 * Math.PI * 1_000 * frame / 48_000)
     );
     expect(assessPostMasterPeak([tone, tone], 48_000)).toMatchObject({
-      schemaVersion: "post-master-peak-check/v1",
+      schemaVersion: "post-master-peak-check/v2",
       requiredMasterVersion: "mazzy-master/v1",
       outputStage: "post-limiter",
       samplePeakDbfs: -6,
       estimatedTruePeakDbtp: -6,
+      ceilingDbtp: -1,
       passed: true,
       failureCodes: []
     });

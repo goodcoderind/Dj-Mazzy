@@ -183,6 +183,17 @@ run measured −2.5 dBFS sample peak and −2.5 dBTP estimated peak against a
 it is not live scheduling, decoded-music, output-device, speaker, or certified
 true-peak evidence.
 
+The current diagnostics-only `transition-rehearsal-browser-check/v5` tightens
+that overload gate to −1 dBTP and adds a deliberately harsher mixed-frequency
+stress at 44.1, 48, and 96 kHz. It correctly exposes that the live
+`mazzy-master/v1` compressor can reach about +0.3 dBTP on this bounded overload.
+A separate non-production `mazzy-master-peak-guard-candidate/v1`—a 4×
+oversampled final safety curve that stays linear below −3 dBFS—measured −2.5
+dBTP at all three rates. The report hard-codes `liveMasterPromotionReady:
+false`; the candidate is not bundled into the normal app graph. Real-music
+listening for overload distortion, a newly versioned live graph, and a fresh
+device soak are required before promotion.
+
 A deterministic three-hour Party Autopilot coordinator soak now drives the same
 `party-autopilot-decision/v3` function used by the live app. It therefore exercises the real
 queue-first two-song lookahead, library continuation, transition-plan arm

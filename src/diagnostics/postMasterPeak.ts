@@ -5,8 +5,8 @@ import {
 } from "../analysis/decodedTruePeak";
 import { MASTER_DSP_V1 } from "../audio/masterDsp";
 
-export const POST_MASTER_PEAK_CHECK_SCHEMA_VERSION = "post-master-peak-check/v1" as const;
-export const POST_MASTER_PEAK_CEILING_DBTP = 0;
+export const POST_MASTER_PEAK_CHECK_SCHEMA_VERSION = "post-master-peak-check/v2" as const;
+export const POST_MASTER_PEAK_CEILING_DBTP = -1;
 
 export type PostMasterPeakCheck = Readonly<{
   schemaVersion: typeof POST_MASTER_PEAK_CHECK_SCHEMA_VERSION;
