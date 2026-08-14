@@ -43,6 +43,7 @@ order, risks, and release gates are maintained in the canonical
 - Equal-power crossfader
 - Folder-based library importing
 - Persistent local library powered by IndexedDB
+- Strict local paused party-plan checkpoint and host-confirmed restore after refresh
 - Per-track local deletion that removes the stored audio, analysis, and timing review
 - Reorderable playback queue and “Play Next” controls
 - Confidence-gated automatic transitions with a visible safe fallback
@@ -154,8 +155,14 @@ active Party Autopilot time on the Web Audio clock, not from queue length or UI
 timers; pauses do not advance the storyline and overtime never stops playback.
 Mazzy requests the browser's standard confirmation before a reload or tab close
 while Autopilot, an automatic transition, or a local rehearsal is active. The
-browser may suppress that prompt; force-quit and crash recovery remain outside
-the tab-memory session contract.
+browser may suppress that prompt. During a settled party state, Mazzy also keeps
+one strict local **paused party-plan checkpoint** in IndexedDB. After a refresh,
+the host may restore the remaining order, played-song repeat protection, settings,
+and coarse active-party progress. Restore never loads a song, starts audio,
+resumes the AudioContext, enables Autopilot, or reconstructs exact playback
+position; the host must explicitly choose and play a song. Recent seconds may
+repeat, browser storage may be evicted, and a crash before a settled checkpoint
+is written remains unrecoverable.
 While Autopilot runs, **Energy Down** and **Energy Up** temporarily shift the
 next-song activity target by up to 30%. This remains a soft selection preference
 and cannot promote a weaker transition or bypass Safe Fade.
@@ -644,7 +651,16 @@ Mazzy is local-first. Imported audio and analysis metadata are stored in your
 browser's IndexedDB database. Nothing in the application uploads your tracks to
 an external service.
 
-Clearing site data for the Mazzy origin will remove the saved local library.
+While a party is in progress, the same local database may contain one paused-plan
+checkpoint: opaque local track IDs, remaining order, played history, coarse
+active-party seconds, and the selected duration/energy/continuation settings. It
+does not contain filenames, audio, content hashes, analysis, BPM/key data, exact
+positions, wall-clock or Web Audio timestamps, device information, or diagnostic
+traces. Restore or Delete consumes the visible recovery copy; New Party, terminal
+completion, track deletion, and Remove All clear or invalidate it.
+
+Clearing site data for the Mazzy origin will remove the saved local library and
+any paused party-plan checkpoint.
 
 ## Project status
 

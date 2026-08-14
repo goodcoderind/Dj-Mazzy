@@ -97,6 +97,13 @@ tslib is provided under the 0BSD License:
 > OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
 > PERFORMANCE OF THIS SOFTWARE.
 
+## Development and test dependencies
+
+- fake-indexeddb 6.2.5 — Apache-2.0. It is used only by the local automated
+  IndexedDB migration and transaction tests and is not included in browser
+  production artifacts. The complete Apache License 2.0 text is distributed as
+  [`APACHE-2.0.txt`](./APACHE-2.0.txt).
+
 ## Beat This `final0` model and preprocessing artifacts
 
 - Project: Beat This! Accurate Beat Tracking Without DBN Postprocessing

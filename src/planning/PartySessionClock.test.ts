@@ -5,6 +5,7 @@ import {
   partySessionClockSnapshot,
   pausePartySessionClock,
   resetPartySessionClock,
+  restorePausedPartySessionClock,
   setPartySessionDuration,
   startPartySessionClock
 } from "./PartySessionClock";
@@ -117,6 +118,23 @@ describe("PartySessionClock", () => {
     expect(resetPartySessionClock(elapsed, 1_800)).toEqual(createPartySessionClock(1_800));
   });
 
+  it("restores persisted progress without reusing an old audio-clock anchor", () => {
+    const restored = restorePausedPartySessionClock(7_200, 1_237);
+
+    expect(restored).toEqual({
+      schemaVersion: PARTY_SESSION_CLOCK_SCHEMA_VERSION,
+      plannedDurationSeconds: 7_200,
+      accumulatedActiveSeconds: 1_237,
+      runningSinceSeconds: null,
+      hasStarted: true
+    });
+    expect(partySessionClockSnapshot(restored, 0)).toMatchObject({
+      status: "paused",
+      isRunning: false,
+      elapsedActiveSeconds: 1_237
+    });
+  });
+
   it("rejects invalid durations, invalid times, and a backwards running clock", () => {
     expect(() => createPartySessionClock(0)).toThrow("positive finite");
     expect(() => setPartySessionDuration(createPartySessionClock(10), Number.NaN)).toThrow(
@@ -125,6 +143,7 @@ describe("PartySessionClock", () => {
     expect(() => startPartySessionClock(createPartySessionClock(10), -1)).toThrow(
       "non-negative finite"
     );
+    expect(() => restorePausedPartySessionClock(10, -1)).toThrow("non-negative finite");
     const running = startPartySessionClock(createPartySessionClock(10), 5);
     expect(() => partySessionClockSnapshot(running, 4)).toThrow("cannot move backwards");
     expect(() => pausePartySessionClock(running, 4)).toThrow("cannot move backwards");

@@ -2,11 +2,13 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import Deck from "./components/Deck";
 import { getAudioEngine } from "./audioContext";
 import {
+  claimPartySessionCheckpoint,
+  clearPartySessionCheckpoint,
   clearTracksFromDb,
   deleteTrackFromDb,
-  loadLibraryFromDb,
-  loadLibraryEpoch,
+  loadLibraryRecoveryBundle,
   patchTrackInDb,
+  savePartySessionCheckpointToDb,
   saveImportedTracksToDb,
   saveTracksToDb,
   subscribeToLibraryMutations
@@ -60,9 +62,17 @@ import {
   partySessionClockSnapshot,
   pausePartySessionClock,
   resetPartySessionClock,
+  restorePausedPartySessionClock,
   setPartySessionDuration,
   startPartySessionClock
 } from "./planning/PartySessionClock";
+import {
+  createPartySessionCheckpoint,
+  normalizePartySessionCheckpointRecord,
+  partySessionCheckpointFingerprint,
+  projectPausedPartySessionCheckpoint,
+  reconcilePartySessionCheckpoint
+} from "./domain/partySessionCheckpoint";
 import {
   createPartyAutopilotTraceRecorder,
   evaluatePartyAutopilotTrace
@@ -139,6 +149,53 @@ const persistedTrack = (track) => ({
   contentIdentity: normalizeContentIdentity(track.contentIdentity)
 });
 
+const restorePersistedTrack = (track) => {
+  const timingReview = normalizeTimingReview(track.timingReview);
+  const restored = {
+    id: track.id,
+    name: track.name,
+    file: track.file,
+    duration: track.duration ?? null,
+    bpm: track.bpm ?? null,
+    key: track.key ?? null,
+    scale: track.scale ?? null,
+    schemaVersion: TRACK_ANALYSIS_SCHEMA_VERSION,
+    analyzerVersion: track.analyzerVersion ?? null,
+    bpmCandidates: track.bpmCandidates ?? [],
+    beatsSeconds: track.beatsSeconds ?? [],
+    downbeatsSeconds: track.downbeatsSeconds ?? [],
+    meter: track.meter ?? null,
+    tempoConfidence: track.tempoConfidence ?? 0,
+    beatConfidence: track.beatConfidence ?? 0,
+    downbeatConfidence: track.downbeatConfidence ?? 0,
+    keyConfidence: track.keyConfidence ?? 0,
+    energyByBeat: track.energyByBeat ?? [],
+    bandEnergyByBeat: track.bandEnergyByBeat ?? [],
+    vocalProbabilityByBeat: track.vocalProbabilityByBeat ?? [],
+    structureBoundaries: track.structureBoundaries ?? [],
+    phraseCandidates: track.phraseCandidates ?? [],
+    automaticRhythmTrust: track.automaticRhythmTrust ?? null,
+    programLevel: normalizeProgramLevel(track.programLevel),
+    programLevelStatus: normalizeProgramLevel(track.programLevel) ? "ready" : "pending",
+    rhythmDetector: track.rhythmDetector ?? null,
+    rhythmAnalysisVersion: track.rhythmAnalysisVersion ?? null,
+    rhythmModelSha256: track.rhythmModelSha256 ?? null,
+    rhythmBackend: track.rhythmBackend ?? null,
+    sampleRate: track.sampleRate ?? null,
+    analysisOverrides: normalizeBeatGridOverrides(track.analysisOverrides),
+    timingReview: null,
+    analysisStatus: hasCurrentBasicAnalysis(track) ? "ready" : "pending",
+    contentIdentity: normalizeContentIdentity(track.contentIdentity),
+    loaded: false
+  };
+  return {
+    ...restored,
+    timingReview: timingReview && isTimingReviewCurrent(timingReview, restored)
+      ? timingReview
+      : null
+  };
+};
+
 export default function App() {
   const [fade, setFade] = useState(0.5);
   const [autoMixing, setAutoMixing] = useState(false);
@@ -154,6 +211,12 @@ export default function App() {
     partySessionClockSnapshot(createPartySessionClock(180 * 60), 0)
   );
   const [playedTrackIds, setPlayedTrackIds] = useState([]);
+  const [partyCheckpointRecovery, setPartyCheckpointRecovery] = useState(null);
+  const [partyCheckpointCardVisible, setPartyCheckpointCardVisible] = useState(true);
+  const [partyCheckpointBusy, setPartyCheckpointBusy] = useState(false);
+  const [partyCheckpointError, setPartyCheckpointError] = useState("");
+  const [partyCheckpointWriterLost, setPartyCheckpointWriterLost] = useState(false);
+  const [restoredPartyPlan, setRestoredPartyPlan] = useState(null);
   const [unavailableAutoPilotTrackIds, setUnavailableAutoPilotTrackIds] = useState([]);
   const [timedOutAutoPilotTrackIds, setTimedOutAutoPilotTrackIds] = useState([]);
   const [showPartyReadiness, setShowPartyReadiness] = useState(false);
@@ -219,8 +282,28 @@ export default function App() {
   const autoPilotEnabledRef = useRef(false);
   const queueRef = useRef([]);
   const libraryRef = useRef([]);
+  const libraryReconcilePendingRef = useRef(false);
+  const libraryReconcileNowRef = useRef(null);
   const playedTrackIdsRef = useRef([]);
   const partySessionClockRef = useRef(createPartySessionClock(180 * 60));
+  const libraryStateRef = useRef({ epoch: 0, revision: 0 });
+  const partyCheckpointRevisionRef = useRef(0);
+  const partyCheckpointSessionIdRef = useRef(null);
+  const partyCheckpointWriterTokenRef = useRef(null);
+  const partyCheckpointWriteGenerationRef = useRef(0);
+  const partyCheckpointWriteQueueRef = useRef(Promise.resolve());
+  const partyCheckpointLastFingerprintRef = useRef("");
+  const partyCheckpointTerminalRef = useRef(true);
+  const partyCheckpointPauseReasonRef = useRef("host-paused");
+  const partyCheckpointHydratedRef = useRef(false);
+  const partyCheckpointWriterLostRef = useRef(false);
+  const partyCheckpointRecoveryRef = useRef(null);
+  const partyCheckpointStoredRecordRef = useRef(null);
+  const partyCheckpointBusyRef = useRef(false);
+  const partyCheckpointCardRef = useRef(null);
+  const partyCheckpointShowButtonRef = useRef(null);
+  const partyCheckpointAlertRef = useRef(null);
+  const partyModeTitleRef = useRef(null);
   const partyReadinessRef = useRef(null);
   const partyStartButtonRef = useRef(null);
   const partyInterventionRef = useRef(null);
@@ -249,9 +332,15 @@ export default function App() {
   const outputDevicePendingRef = useRef(false);
   const playbackRecoveryLockedRef = useRef(false);
   const refreshPlaybackRecoveryLock = () => {
-    playbackRecoveryLockedRef.current = audioRecoveryPendingRef.current || outputDevicePendingRef.current;
+    playbackRecoveryLockedRef.current = audioRecoveryPendingRef.current ||
+      outputDevicePendingRef.current ||
+      partyCheckpointBusyRef.current ||
+      partyCheckpointWriterLostRef.current;
   };
   const partyWakeLockRef = useRef(null);
+  if (!partyCheckpointWriterTokenRef.current) {
+    partyCheckpointWriterTokenRef.current = crypto.randomUUID();
+  }
   const autoPilotExcludedTrackIds = [...new Set([
     ...unavailableAutoPilotTrackIds,
     ...timedOutAutoPilotTrackIds
@@ -289,7 +378,10 @@ export default function App() {
       cancelCurrentTransitionArm();
       transitionArmGenerationRef.current += 1;
       if (activeTransitionScheduleRef.current) rescueTransition();
-      if (autoPilotEnabledRef.current) pauseAutoPilotForHostControl("Party Autopilot paused · audio device changed");
+      if (autoPilotEnabledRef.current) pauseAutoPilotForHostControl(
+        "Party Autopilot paused · audio device changed",
+        "output-change"
+      );
     };
     mediaDevices.addEventListener("devicechange", onDeviceChange);
     return () => mediaDevices.removeEventListener("devicechange", onDeviceChange);
@@ -330,7 +422,10 @@ export default function App() {
         ? { state: "stopped", message: "Preview stopped because browser audio needs attention. Nothing was saved." }
         : current);
       cancelCurrentTransitionArm();
-      if (autoPilotEnabledRef.current) pauseAutoPilotForHostControl("Party Autopilot paused · browser audio stopped");
+      if (autoPilotEnabledRef.current) pauseAutoPilotForHostControl(
+        "Party Autopilot paused · browser audio stopped",
+        "audio-recovery"
+      );
     };
     engine.context.addEventListener("statechange", onStateChange);
     return () => engine.context.removeEventListener("statechange", onStateChange);
@@ -340,6 +435,13 @@ export default function App() {
     autoPilotPreloadGenerationRef.current += 1;
     cancelCurrentTransitionArm();
     transitionArmGenerationRef.current += 1;
+    rehearsalGenerationRef.current += 1;
+    rehearsalCancelRef.current?.();
+    rehearsalCancelRef.current = null;
+    setRehearsalActive(false);
+    setRehearsalStatus((current) => current
+      ? { state: "stopped", message: "Preview stopped because local playback authority changed in another Mazzy tab." }
+      : current);
     autoPilotTransitionKeyRef.current = null;
     if (activeTransitionScheduleRef.current) rescueTransition();
     transitionCompletionCancelRef.current?.();
@@ -367,44 +469,109 @@ export default function App() {
     playedTrackIdsRef.current = playedTrackIds;
   }, [autoPilotEnabled, queue, library, playedTrackIds]);
 
-  useEffect(() => subscribeToLibraryMutations((message) => {
-    if (message?.type === "track-deleted" && typeof message.trackId === "string") {
-      const trackId = message.trackId;
-      const loadedOnA = deckARef.current?.getTrackId?.() === trackId;
-      const loadedOnB = deckBRef.current?.getTrackId?.() === trackId;
-      if (loadedOnA || loadedOnB) stopRemoteLibraryPlayback();
-      removedTrackIdsRef.current.add(trackId);
-      queuedAnalysisIdsRef.current.delete(trackId);
-      pendingAnalysisQueueRef.current = pendingAnalysisQueueRef.current.filter((track) => track.id !== trackId);
-      setLibrary((current) => current.filter((track) => track.id !== trackId));
-      setQueue((current) => current.filter((id) => id !== trackId));
-      if (loadedOnA) {
-        deckARef.current.eject?.();
+  useEffect(() => {
+    let reconcileGeneration = 0;
+    const reconcileStoredState = async () => {
+      if (!partyCheckpointHydratedRef.current) {
+        libraryReconcilePendingRef.current = true;
+        return;
+      }
+      if (libraryMutationBusyRef.current) {
+        libraryReconcilePendingRef.current = true;
+        return;
+      }
+      libraryReconcilePendingRef.current = false;
+      const generation = ++reconcileGeneration;
+      const knownCheckpointRevision = partyCheckpointRevisionRef.current;
+      const bundle = await loadLibraryRecoveryBundle();
+      if (generation !== reconcileGeneration) return;
+      const restoredRows = bundle.tracks.map(restorePersistedTrack);
+      const storedIds = new Set(restoredRows.map((track) => track.id));
+      const removedIds = libraryRef.current
+        .map((track) => track.id)
+        .filter((trackId) => !storedIds.has(trackId));
+      playedTrackIdsRef.current = playedTrackIdsRef.current.filter((trackId) => storedIds.has(trackId));
+      setPlayedTrackIds((current) => current.filter((trackId) => storedIds.has(trackId)));
+      if (removedIds.length) {
+        stopRemoteLibraryPlayback();
+        for (const trackId of removedIds) {
+          removedTrackIdsRef.current.add(trackId);
+          queuedAnalysisIdsRef.current.delete(trackId);
+        }
+        pendingAnalysisQueueRef.current = pendingAnalysisQueueRef.current
+          .filter((track) => storedIds.has(track.id));
+      }
+      const loadedOnA = deckARef.current?.getTrackId?.();
+      const loadedOnB = deckBRef.current?.getTrackId?.();
+      if (loadedOnA && !storedIds.has(loadedOnA)) {
+        deckARef.current?.eject?.();
         setLoadedByDeck((current) => ({ ...current, a: null }));
       }
-      if (loadedOnB) {
-        deckBRef.current.eject?.();
+      if (loadedOnB && !storedIds.has(loadedOnB)) {
+        deckBRef.current?.eject?.();
         setLoadedByDeck((current) => ({ ...current, b: null }));
       }
-      return;
-    }
-    if (message?.type === "library-cleared") {
-      stopRemoteLibraryPlayback();
-      libraryImportGenerationRef.current += 1;
-      if (libraryMutationModeRef.current === "importing") setLibraryMutationLock(false);
-      analysisGenerationRef.current += 1;
-      libraryRef.current.forEach((track) => removedTrackIdsRef.current.add(track.id));
-      queuedAnalysisIdsRef.current.clear();
-      pendingAnalysisQueueRef.current = [];
-      disposeAnalysisClient();
-      disposeEnhancedRhythmClient();
-      deckARef.current?.eject?.();
-      deckBRef.current?.eject?.();
-      setLoadedByDeck({ a: null, b: null });
-      setQueue([]);
-      setLibrary([]);
-    }
-  }), []);
+      setLibrary((current) => {
+        const currentById = new Map(current.map((track) => [track.id, track]));
+        return restoredRows.map((track) => currentById.get(track.id) ?? track);
+      });
+      setQueue((current) => current.filter((trackId) => storedIds.has(trackId)));
+      libraryStateRef.current = bundle.libraryState;
+      partyCheckpointRevisionRef.current = bundle.checkpointRevision;
+      const normalized = normalizePartySessionCheckpointRecord(bundle.checkpointRecord);
+      partyCheckpointStoredRecordRef.current = normalized;
+      const localSessionId = partyCheckpointSessionIdRef.current;
+      const sameOwner = normalized?.sessionId === localSessionId &&
+        normalized?.writerToken === partyCheckpointWriterTokenRef.current &&
+        (normalized.recordStatus === "available" || normalized.recordStatus === "claimed");
+      if (localSessionId && bundle.checkpointRevision > knownCheckpointRevision && !sameOwner) {
+        pauseForCheckpointOwnershipLoss();
+      }
+      const recovery = reconcilePartySessionCheckpoint(
+        bundle.checkpointRecord,
+        bundle.libraryState.epoch,
+        bundle.libraryState.revision,
+        restoredRows.map((track) => track.id)
+      );
+      partyCheckpointRecoveryRef.current = localSessionId ? null : recovery;
+      setPartyCheckpointRecovery(localSessionId || recovery.status === "none" ? null : recovery);
+      if (!localSessionId && recovery.status !== "none") setPartyCheckpointCardVisible(true);
+    };
+    libraryReconcileNowRef.current = () => void reconcileStoredState().catch(() => undefined);
+
+    const unsubscribe = subscribeToLibraryMutations((message) => {
+      if (message.type === "track-deleted") {
+        stopRemoteLibraryPlayback();
+        autoPilotPreloadGenerationRef.current += 1;
+        removedTrackIdsRef.current.add(message.trackId);
+        playedTrackIdsRef.current = playedTrackIdsRef.current.filter((trackId) => trackId !== message.trackId);
+        setLibrary((current) => current.filter((track) => track.id !== message.trackId));
+        setQueue((current) => current.filter((trackId) => trackId !== message.trackId));
+        setPlayedTrackIds((current) => current.filter((trackId) => trackId !== message.trackId));
+      } else if (message.type === "library-cleared") {
+        stopRemoteLibraryPlayback();
+        libraryImportGenerationRef.current += 1;
+        analysisGenerationRef.current += 1;
+        disposeAnalysisClient();
+        disposeEnhancedRhythmClient();
+      }
+      void reconcileStoredState().catch(() => undefined);
+    });
+    const onReturn = () => {
+      if (document.visibilityState === "visible") void reconcileStoredState().catch(() => undefined);
+    };
+    window.addEventListener("focus", onReturn);
+    window.addEventListener("pageshow", onReturn);
+    document.addEventListener("visibilitychange", onReturn);
+    return () => {
+      reconcileGeneration += 1;
+      libraryReconcileNowRef.current = null;
+      unsubscribe();
+      window.removeEventListener("focus", onReturn);
+      window.removeEventListener("pageshow", onReturn);
+      document.removeEventListener("visibilitychange", onReturn);
+    };
+  }, []);
 
   useEffect(() => {
     if (!partyTraceRecorderRef.current || !partyTraceRunningRef.current) return;
@@ -449,6 +616,31 @@ export default function App() {
     const timer = window.setInterval(update, 1_000);
     return () => window.clearInterval(timer);
   }, [autoPilotEnabled, partyDurationMinutes]);
+
+  useEffect(() => {
+    if (!partyCheckpointHydratedRef.current || partyCheckpointTerminalRef.current) return;
+    queuePartyCheckpointSave();
+  }, [
+    autoPilotEnabled,
+    autoMixArming,
+    autoMixing,
+    masterDeck,
+    loadedByDeck,
+    queue,
+    playedTrackIds,
+    partyDurationMinutes,
+    partyEnergyProfile,
+    partyEnergyShift,
+    autoPilotUseLibrary,
+    rehearsalActive,
+    rehearsalPreparing
+  ]);
+
+  useEffect(() => {
+    if (!autoPilotEnabled || partyCheckpointTerminalRef.current) return undefined;
+    const timer = window.setInterval(() => queuePartyCheckpointSave("active-periodic"), 10_000);
+    return () => window.clearInterval(timer);
+  }, [autoPilotEnabled, masterDeck, partyEnergyProfile, partyEnergyShift, autoPilotUseLibrary]);
 
   const queueTracks = useMemo(
     () => queue.map((id) => library.find((t) => t.id === id)).filter(Boolean),
@@ -539,54 +731,23 @@ export default function App() {
     const restore = async () => {
       let restored = false;
       try {
-        const records = await loadLibraryFromDb();
+        const bundle = await loadLibraryRecoveryBundle();
         if (hydrationGeneration !== libraryHydrationGenerationRef.current) return;
-        const restoredLibrary = records.map((track) => {
-            const timingReview = normalizeTimingReview(track.timingReview);
-            const restored = {
-            id: track.id,
-            name: track.name,
-            file: track.file,
-            duration: track.duration ?? null,
-            bpm: track.bpm ?? null,
-            key: track.key ?? null,
-            scale: track.scale ?? null,
-            schemaVersion: TRACK_ANALYSIS_SCHEMA_VERSION,
-            analyzerVersion: track.analyzerVersion ?? null,
-            bpmCandidates: track.bpmCandidates ?? [],
-            beatsSeconds: track.beatsSeconds ?? [],
-            downbeatsSeconds: track.downbeatsSeconds ?? [],
-            meter: track.meter ?? null,
-            tempoConfidence: track.tempoConfidence ?? 0,
-            beatConfidence: track.beatConfidence ?? 0,
-            downbeatConfidence: track.downbeatConfidence ?? 0,
-            keyConfidence: track.keyConfidence ?? 0,
-            energyByBeat: track.energyByBeat ?? [],
-            bandEnergyByBeat: track.bandEnergyByBeat ?? [],
-            vocalProbabilityByBeat: track.vocalProbabilityByBeat ?? [],
-            structureBoundaries: track.structureBoundaries ?? [],
-            phraseCandidates: track.phraseCandidates ?? [],
-            automaticRhythmTrust: track.automaticRhythmTrust ?? null,
-            programLevel: normalizeProgramLevel(track.programLevel),
-            programLevelStatus: normalizeProgramLevel(track.programLevel) ? "ready" : "pending",
-            rhythmDetector: track.rhythmDetector ?? null,
-            rhythmAnalysisVersion: track.rhythmAnalysisVersion ?? null,
-            rhythmModelSha256: track.rhythmModelSha256 ?? null,
-            rhythmBackend: track.rhythmBackend ?? null,
-            sampleRate: track.sampleRate ?? null,
-            analysisOverrides: normalizeBeatGridOverrides(track.analysisOverrides),
-            timingReview: null,
-            analysisStatus: hasCurrentBasicAnalysis(track) ? "ready" : "pending",
-            contentIdentity: normalizeContentIdentity(track.contentIdentity),
-            loaded: false
-            };
-            return {
-              ...restored,
-              timingReview: timingReview && isTimingReviewCurrent(timingReview, restored)
-                ? timingReview
-                : null
-            };
-          });
+        const restoredLibrary = bundle.tracks.map(restorePersistedTrack);
+        libraryStateRef.current = bundle.libraryState;
+        const normalizedCheckpoint = normalizePartySessionCheckpointRecord(bundle.checkpointRecord);
+        partyCheckpointStoredRecordRef.current = normalizedCheckpoint;
+        partyCheckpointRevisionRef.current = bundle.checkpointRevision;
+        const checkpointRecovery = reconcilePartySessionCheckpoint(
+          bundle.checkpointRecord,
+          bundle.libraryState.epoch,
+          bundle.libraryState.revision,
+          restoredLibrary.map((track) => track.id)
+        );
+        partyCheckpointRecoveryRef.current = checkpointRecovery;
+        setPartyCheckpointRecovery(checkpointRecovery.status === "none" ? null : checkpointRecovery);
+        setPartyCheckpointCardVisible(true);
+        partyCheckpointHydratedRef.current = true;
         libraryRef.current = restoredLibrary;
         setLibrary(restoredLibrary);
         setLibraryStorageError("");
@@ -615,6 +776,9 @@ export default function App() {
     libraryMutationBusyRef.current = locked;
     libraryMutationModeRef.current = locked ? mode : "idle";
     setLibraryMutationBusy(locked);
+    if (!locked && libraryReconcilePendingRef.current) {
+      window.queueMicrotask(() => libraryReconcileNowRef.current?.());
+    }
   };
 
   const libraryWritesBlocked = () => !["idle", "importing"].includes(libraryMutationModeRef.current);
@@ -671,6 +835,7 @@ export default function App() {
   };
 
   const showAutoPilotArmIntervention = (reason) => {
+    partyCheckpointPauseReasonRef.current = "safety";
     setAutoPilotIntervention({
       reason,
       message: reason === "transition-arm-timeout"
@@ -683,6 +848,156 @@ export default function App() {
   const activePartySecond = () => Math.max(0, Math.floor(
     partySessionClockSnapshot(partySessionClockRef.current, getAudioEngine().clock.now()).elapsedActiveSeconds
   ));
+
+  const checkpointSaveIsStable = () =>
+    partyCheckpointHydratedRef.current &&
+    !partyCheckpointTerminalRef.current &&
+    !partyCheckpointWriterLostRef.current &&
+    !libraryMutationBusyRef.current &&
+    !playbackRecoveryLockedRef.current &&
+    !autoPilotPreloadLeaseRef.current &&
+    !transitionArmLeaseRef.current &&
+    !transitionArmRef.current &&
+    !activeTransitionScheduleRef.current &&
+    !rehearsalActive &&
+    !rehearsalPreparing &&
+    !rehearsalCancelRef.current;
+
+  const pauseForCheckpointOwnershipLoss = () => {
+    if (partyCheckpointWriterLostRef.current) return;
+    partyCheckpointWriterLostRef.current = true;
+    setPartyCheckpointWriterLost(true);
+    refreshPlaybackRecoveryLock();
+    partyCheckpointWriteGenerationRef.current += 1;
+    stopRemoteLibraryPlayback();
+    deckARef.current?.pause?.();
+    deckBRef.current?.pause?.();
+    setPartyCheckpointError("Party recovery moved to another Mazzy tab. Autopilot and audio were paused here. Check the other tab before continuing.");
+    window.requestAnimationFrame(() => partyCheckpointAlertRef.current?.focus?.());
+  };
+
+  const queuePartyCheckpointSave = (checkpointReason = null) => {
+    if (!checkpointSaveIsStable()) return;
+    const sessionId = partyCheckpointSessionIdRef.current;
+    const writerToken = partyCheckpointWriterTokenRef.current;
+    if (!sessionId || !writerToken) return;
+    const sourceRef = masterDeck === "a" ? deckARef : deckBRef;
+    const sourceTrackId = sourceRef.current?.getDeckSnapshot?.()?.trackId ?? loadedByDeck[masterDeck];
+    if (!sourceTrackId || !libraryRef.current.some((track) => track.id === sourceTrackId)) return;
+    const now = getAudioEngine().clock.now();
+    const clockSnapshot = partySessionClockSnapshot(partySessionClockRef.current, now);
+    if (clockSnapshot.status === "not-started") return;
+    const targetDeck = masterDeck === "a" ? "b" : "a";
+    const committedTarget = partyCommittedPreloadByDeckRef.current[targetDeck];
+    const reason = checkpointReason ?? (clockSnapshot.isRunning
+      ? "active-periodic"
+      : partyCheckpointPauseReasonRef.current);
+    let draft;
+    try {
+      draft = projectPausedPartySessionCheckpoint({
+        sessionId,
+        writerToken,
+        libraryEpoch: libraryStateRef.current.epoch,
+        libraryRevision: libraryStateRef.current.revision,
+        checkpointReason: reason,
+        plannedDurationSeconds: clockSnapshot.plannedDurationSeconds,
+        elapsedActiveSeconds: clockSnapshot.elapsedActiveSeconds,
+        energyProfile: partyEnergyProfile,
+        energyShift: partyEnergyShift,
+        includeRestOfLibrary: autoPilotUseLibrary,
+        playedTrackIds: playedTrackIdsRef.current,
+        queueTrackIds: queueRef.current,
+        committedTargetTrackId: committedTarget?.trackId ?? null,
+        lastStableSourceTrackId: sourceTrackId
+      });
+    } catch {
+      setPartyCheckpointError("Party recovery could not capture a safe paused plan. Music can continue, but refresh recovery is unavailable.");
+      return;
+    }
+    const candidateForFingerprint = createPartySessionCheckpoint(draft, 1);
+    const fingerprint = partySessionCheckpointFingerprint(candidateForFingerprint);
+    if (fingerprint === partyCheckpointLastFingerprintRef.current) return;
+    const generation = partyCheckpointWriteGenerationRef.current;
+    partyCheckpointWriteQueueRef.current = partyCheckpointWriteQueueRef.current
+      .catch(() => undefined)
+      .then(async () => {
+        if (generation !== partyCheckpointWriteGenerationRef.current || !checkpointSaveIsStable()) return;
+        const stored = partyCheckpointStoredRecordRef.current;
+        const result = await savePartySessionCheckpointToDb(draft, {
+          checkpointRevision: partyCheckpointRevisionRef.current,
+          libraryEpoch: libraryStateRef.current.epoch,
+          libraryRevision: libraryStateRef.current.revision,
+          sessionId: stored?.recordStatus === "available" || stored?.recordStatus === "claimed"
+            ? stored.sessionId
+            : null,
+          writerToken: stored?.recordStatus === "available" || stored?.recordStatus === "claimed"
+            ? stored.writerToken
+            : null
+        });
+        if (generation !== partyCheckpointWriteGenerationRef.current) return;
+        if (result.status !== "saved") {
+          if (result.status === "stale-checkpoint") pauseForCheckpointOwnershipLoss();
+          else setPartyCheckpointError("Party recovery could not be updated. Music can continue, but refreshing may lose recent party progress.");
+          return;
+        }
+        partyCheckpointRevisionRef.current = result.checkpoint.revision;
+        partyCheckpointStoredRecordRef.current = result.checkpoint;
+        partyCheckpointLastFingerprintRef.current = fingerprint;
+        libraryStateRef.current = result.libraryState;
+        setPartyCheckpointError("");
+      })
+      .catch(() => {
+        if (generation !== partyCheckpointWriteGenerationRef.current) return;
+        setPartyCheckpointError("Party recovery could not be updated. Music can continue, but refreshing may lose recent party progress.");
+      });
+  };
+
+  const clearOwnedPartyCheckpoint = async (
+    recordStatus = "cleared",
+    { terminalOnFailure = false } = {}
+  ) => {
+    partyCheckpointWriteGenerationRef.current += 1;
+    const previousTerminal = partyCheckpointTerminalRef.current;
+    partyCheckpointTerminalRef.current = true;
+    const stored = partyCheckpointStoredRecordRef.current;
+    let result;
+    try {
+      result = await clearPartySessionCheckpoint({
+        expectedRevision: partyCheckpointRevisionRef.current,
+        expectedSessionId: stored?.sessionId ?? null,
+        expectedWriterToken: stored?.writerToken ?? null,
+        recordStatus
+      });
+    } catch {
+      if (!terminalOnFailure) partyCheckpointTerminalRef.current = previousTerminal;
+      setPartyCheckpointError("The saved party plan could not be deleted from browser storage. Reload Mazzy and try again before relying on recovery.");
+      window.requestAnimationFrame(() => partyCheckpointAlertRef.current?.focus?.());
+      return false;
+    }
+    if (result.status !== "cleared") {
+      if (!terminalOnFailure) partyCheckpointTerminalRef.current = previousTerminal;
+      setPartyCheckpointError("The saved party plan changed in another tab and was not deleted here. Review the other Mazzy tab before continuing.");
+      window.requestAnimationFrame(() => partyCheckpointAlertRef.current?.focus?.());
+      return false;
+    }
+    partyCheckpointRevisionRef.current = result.revision;
+    partyCheckpointStoredRecordRef.current = {
+      recordStatus,
+      revision: result.revision,
+      sessionId: stored?.sessionId ?? null,
+      writerToken: stored?.writerToken ?? null
+    };
+    partyCheckpointLastFingerprintRef.current = "";
+    partyCheckpointSessionIdRef.current = null;
+    partyCheckpointWriterLostRef.current = false;
+    setPartyCheckpointWriterLost(false);
+    refreshPlaybackRecoveryLock();
+    partyCheckpointRecoveryRef.current = null;
+    setPartyCheckpointRecovery(null);
+    setRestoredPartyPlan(null);
+    setPartyCheckpointError("");
+    return true;
+  };
 
   const partyTrackOrdinal = (trackId) => {
     if (!trackId) return null;
@@ -797,7 +1112,10 @@ export default function App() {
     });
   };
 
-  const pauseAutoPilotForHostControl = (message = "Party Autopilot paused · you took control") => {
+  const pauseAutoPilotForHostControl = (
+    message = "Party Autopilot paused · you took control",
+    checkpointReason = "host-control"
+  ) => {
     if (!autoPilotEnabledRef.current) return;
     autoPilotPreloadGenerationRef.current += 1;
     cancelCurrentTransitionArm();
@@ -810,6 +1128,7 @@ export default function App() {
     finalTrackRef.current = null;
     setPartyEndingFinalTrack(false);
     setAutoPilotChoice(null);
+    partyCheckpointPauseReasonRef.current = checkpointReason;
     pausePartyDiagnostic("host-control");
     void partyWakeLockRef.current?.release?.();
     showToast(message);
@@ -989,7 +1308,7 @@ export default function App() {
     setLibrarySaveStatus("saving");
     setLibraryStorageError("");
     try {
-      const importEpoch = await loadLibraryEpoch();
+      const importLibraryState = { ...libraryStateRef.current };
       const existingIdentities = new Set();
       const legacyIdentityById = new Map();
       for (const track of libraryRef.current) {
@@ -1016,7 +1335,13 @@ export default function App() {
       }
       if (!uniqueFiles.length) {
         if (legacyIdentityById.size) {
-          await saveImportedTracksToDb([], [...legacyIdentityById].map(([id, contentIdentity]) => ({ id, contentIdentity })), importEpoch);
+          const identityCommit = await saveImportedTracksToDb(
+            [],
+            [...legacyIdentityById].map(([id, contentIdentity]) => ({ id, contentIdentity })),
+            importLibraryState
+          );
+          if (identityCommit.status !== "saved") throw new DOMException("The local library changed in another tab", "InvalidStateError");
+          libraryStateRef.current = identityCommit.libraryState;
           setLibrary((current) => {
             const next = current.map((track) => legacyIdentityById.has(track.id)
               ? { ...track, contentIdentity: legacyIdentityById.get(track.id) }
@@ -1086,8 +1411,12 @@ export default function App() {
       const importCommit = await saveImportedTracksToDb(
         tracks.map(persistedTrack),
         [...legacyIdentityById].map(([id, contentIdentity]) => ({ id, contentIdentity })),
-        importEpoch
+        importLibraryState
       );
+      if (importCommit.status !== "saved") {
+        throw new DOMException("The local library changed in another tab", "InvalidStateError");
+      }
+      libraryStateRef.current = importCommit.libraryState;
       if (importGeneration !== libraryImportGenerationRef.current) {
         await Promise.all(importCommit.savedTrackIds.map(deleteTrackFromDb));
         return;
@@ -1204,7 +1533,11 @@ export default function App() {
     recordPartyEvent({ type: "session-ended", reason: "final-track-ended" });
     partyTraceRunningRef.current = false;
     void partyWakeLockRef.current?.release?.();
-    showToast("Party finished · no unplayed tracks remain");
+    void clearOwnedPartyCheckpoint("cleared", { terminalOnFailure: true }).then((cleared) => {
+      showToast(cleared
+        ? "Party finished · no unplayed tracks remain"
+        : "Party finished · saved recovery still needs attention");
+    });
   };
 
   const onAnalysisDetected = (trackId, result) => {
@@ -1320,7 +1653,7 @@ export default function App() {
   };
 
   const removeLibraryTrack = async (trackId) => {
-    if (libraryMutationBusyRef.current) return;
+    if (libraryMutationBusyRef.current || partyCheckpointBusyRef.current) return;
     if (autoMixing || autoMixArming || rehearsalActive || rehearsalPreparing) {
       showToast("Stop the transition or preview before removing music");
       return;
@@ -1332,8 +1665,9 @@ export default function App() {
     pendingAnalysisQueueRef.current = pendingAnalysisQueueRef.current.filter((candidate) => candidate.id !== trackId);
     pauseAutoPilotForHostControl("Party Autopilot paused · library changed");
     setLibraryMutationLock(true);
+    let deletion;
     try {
-      await deleteTrackFromDb(trackId);
+      deletion = await deleteTrackFromDb(trackId);
     } catch {
       removedTrackIdsRef.current.delete(trackId);
       showToast("Removal failed · this track is still stored · try again");
@@ -1341,6 +1675,21 @@ export default function App() {
     } finally {
       setLibraryMutationLock(false);
     }
+    libraryStateRef.current = deletion.libraryState;
+    partyCheckpointRevisionRef.current = deletion.checkpointRevision;
+    partyCheckpointStoredRecordRef.current = {
+      recordStatus: "invalidated",
+      revision: deletion.checkpointRevision,
+      sessionId: partyCheckpointSessionIdRef.current,
+      writerToken: partyCheckpointWriterTokenRef.current
+    };
+    partyCheckpointWriteGenerationRef.current += 1;
+    partyCheckpointLastFingerprintRef.current = "";
+    partyCheckpointRecoveryRef.current = null;
+    setPartyCheckpointRecovery(null);
+    setRestoredPartyPlan(null);
+    playedTrackIdsRef.current = playedTrackIdsRef.current.filter((id) => id !== trackId);
+    setPlayedTrackIds((current) => current.filter((id) => id !== trackId));
     setLibrary((current) => current.filter((candidate) => candidate.id !== trackId));
     setQueue((current) => current.filter((id) => id !== trackId));
     if (deckARef.current?.getTrackId?.() === trackId) {
@@ -1351,16 +1700,16 @@ export default function App() {
       deckBRef.current?.eject?.();
       setLoadedByDeck((current) => ({ ...current, b: null }));
     }
-    showToast("Removed track and its saved local analysis");
+    showToast("Removed track and its saved analysis · saved party recovery cleared");
   };
 
   const clearLocalLibrary = async () => {
-    if (libraryMutationBusyRef.current) return;
+    if (libraryMutationBusyRef.current || partyCheckpointBusyRef.current) return;
     if (autoMixing || autoMixArming || autoPilotEnabled || rehearsalActive || rehearsalPreparing) {
       showToast("Stop Party Autopilot and any preview before clearing music");
       return;
     }
-    if (!window.confirm("Remove every imported song and saved analysis from this browser profile? Active enhanced timing may finish its current local step before memory is released.")) return;
+    if (!window.confirm("Remove every imported song, saved analysis, and saved party plan from this browser profile? Active enhanced timing may finish its current local step before memory is released.")) return;
     queuedAnalysisIdsRef.current.clear();
     pendingAnalysisQueueRef.current = [];
     for (const track of library) removedTrackIdsRef.current.add(track.id);
@@ -1371,8 +1720,9 @@ export default function App() {
     deckARef.current?.eject?.();
     deckBRef.current?.eject?.();
     setLoadedByDeck({ a: null, b: null });
+    let cleared;
     try {
-      await clearTracksFromDb();
+      cleared = await clearTracksFromDb();
     } catch {
       for (const track of library) removedTrackIdsRef.current.delete(track.id);
       showToast("Removal failed · your music is still stored · try again");
@@ -1380,17 +1730,31 @@ export default function App() {
     } finally {
       setLibraryMutationLock(false);
     }
+    libraryStateRef.current = cleared.libraryState;
+    partyCheckpointRevisionRef.current = cleared.checkpointRevision;
+    partyCheckpointStoredRecordRef.current = {
+      recordStatus: "invalidated",
+      revision: cleared.checkpointRevision,
+      sessionId: partyCheckpointSessionIdRef.current,
+      writerToken: partyCheckpointWriterTokenRef.current
+    };
+    partyCheckpointWriteGenerationRef.current += 1;
+    partyCheckpointTerminalRef.current = true;
+    partyCheckpointSessionIdRef.current = null;
+    partyCheckpointRecoveryRef.current = null;
+    setPartyCheckpointRecovery(null);
+    setRestoredPartyPlan(null);
     deckARef.current?.eject?.();
     deckBRef.current?.eject?.();
     setQueue([]);
     setPlayedTrackIds([]);
     setLibrary([]);
     setAutoPilotChoice(null);
-    showToast("All imported music and saved analysis were removed");
+    showToast("All imported music, saved analysis, and saved party recovery were removed");
   };
 
   const loadTrackToDeck = async (deck, track, { autoPilotOwned = false } = {}) => {
-    if (audioRecoveryState || outputDeviceChanged || libraryMutationBusyRef.current || autoMixing || autoMixArming || rehearsalActive || rehearsalPreparing) return DECK_LOAD_OUTCOME.cancelled;
+    if (partyCheckpointBusyRef.current || partyCheckpointWriterLostRef.current || audioRecoveryState || outputDeviceChanged || libraryMutationBusyRef.current || autoMixing || autoMixArming || rehearsalActive || rehearsalPreparing) return DECK_LOAD_OUTCOME.cancelled;
     if (!autoPilotOwned) pauseAutoPilotForHostControl();
     const manuallyRestoringPlayability = !autoPilotOwned && autoPilotExcludedTrackIds.includes(track.id);
     const ref = deck === "a" ? deckARef : deckBRef;
@@ -1428,6 +1792,7 @@ export default function App() {
   };
 
   const addToQueue = (trackId, playNext = false) => {
+    if (partyCheckpointBusyRef.current || partyCheckpointWriterLostRef.current) return;
     setQueue((prev) => {
       const filtered = prev.filter((id) => id !== trackId);
       return playNext ? [trackId, ...filtered] : [...filtered, trackId];
@@ -1435,6 +1800,7 @@ export default function App() {
   };
 
   const activateLibraryTrack = async (track) => {
+    if (partyCheckpointBusyRef.current) return;
     if (autoPilotExcludedTrackIds.includes(track.id)) {
       showToast("Skipped earlier · pause Autopilot, then use More to try again");
       return;
@@ -1513,7 +1879,9 @@ export default function App() {
 
   const rehearseCurrentPair = async () => {
     if (
-      playbackRecoveryLockedRef.current
+      partyCheckpointBusyRef.current
+      || partyCheckpointWriterLostRef.current
+      || playbackRecoveryLockedRef.current
       || autoMixing
       || autoMixArming
       || deckARef.current?.isPlaying?.()
@@ -1778,7 +2146,7 @@ export default function App() {
   };
 
   const startAutoMix = async (origin = "host") => {
-    if (audioRecoveryState || outputDeviceChanged || getAudioEngine().context.state !== "running") return;
+    if (partyCheckpointBusyRef.current || partyCheckpointWriterLostRef.current || audioRecoveryState || outputDeviceChanged || getAudioEngine().context.state !== "running") return;
     if (autoMixing || transitionArmRef.current || rehearsalActive) {
       return;
     }
@@ -2178,6 +2546,7 @@ export default function App() {
     activeTransitionScheduleRef.current = null;
     autoPilotTransitionKeyRef.current = null;
     autoPilotEnabledRef.current = false;
+    partyCheckpointPauseReasonRef.current = "rescue";
     setAutoPilotEnabled(false);
     void partyWakeLockRef.current?.release?.();
     pausePartyDiagnostic("rescue");
@@ -2251,6 +2620,7 @@ export default function App() {
       finalTrackRef.current = null;
       setPartyEndingFinalTrack(false);
       setAutoPilotChoice(null);
+      partyCheckpointPauseReasonRef.current = "safety";
       pausePartyDiagnostic(reason);
       void partyWakeLockRef.current?.release?.();
       showToast(message);
@@ -2377,6 +2747,7 @@ export default function App() {
         finalTrackRef.current = null;
         setPartyEndingFinalTrack(false);
         setAutoPilotChoice(null);
+        partyCheckpointPauseReasonRef.current = "source-stopped";
         pausePartyDiagnostic("source-stopped");
         showToast("Party paused · start a deck to continue");
         return;
@@ -2522,7 +2893,11 @@ export default function App() {
           if (shouldCommitAutoPilotPreload(settlement)) {
             partyCommittedPreloadByDeckRef.current = {
               ...partyCommittedPreloadByDeckRef.current,
-              [targetDeck]: { trackOrdinal: preloadTrackOrdinal, loadOrdinal: preloadLoadOrdinal }
+              [targetDeck]: {
+                trackId: nextTrack.id,
+                trackOrdinal: preloadTrackOrdinal,
+                loadOrdinal: preloadLoadOrdinal
+              }
             };
             recordPartyEvent({ type: "preload-settled", operation: preloadOperation, outcome: "committed" });
             setQueue((current) => current[0] === nextId ? current.slice(1) : current.filter((id) => id !== nextId));
@@ -2639,11 +3014,28 @@ export default function App() {
     finalTrackRef.current = null;
     setPartyEndingFinalTrack(false);
     setShowPartyReadiness(false);
+    partyCheckpointPauseReasonRef.current = "host-paused";
     pausePartyDiagnostic("host-request");
     void partyWakeLockRef.current?.release?.();
   };
-  const startPartyAutopilot = () => {
+  const startPartyAutopilot = async () => {
+    if (partyCheckpointBusyRef.current) return;
     if (audioRecoveryState || outputDeviceChanged || getAudioEngine().context.state !== "running") return;
+    if (partyCheckpointRecoveryRef.current?.status === "available" && !partyCheckpointSessionIdRef.current) {
+      setPartyCheckpointCardVisible(true);
+      window.requestAnimationFrame(() => partyCheckpointCardRef.current?.focus?.());
+      return;
+    }
+    if (partyCheckpointWriterLostRef.current) {
+      setPartyCheckpointError("This party's recovery copy moved to another tab. Reload this tab to review the current saved plan, or continue in the other Mazzy tab.");
+      return;
+    }
+    if (partyCheckpointTerminalRef.current || !partyCheckpointSessionIdRef.current) {
+      partyCheckpointSessionIdRef.current = crypto.randomUUID();
+      partyCheckpointTerminalRef.current = false;
+      partyCheckpointPauseReasonRef.current = "active-periodic";
+      partyCheckpointLastFingerprintRef.current = "";
+    }
     const now = getAudioEngine().clock.now();
     consecutiveAutoPilotPreloadTimeoutsRef.current = 0;
     consecutiveAutoPilotArmFailuresRef.current = 0;
@@ -2653,7 +3045,13 @@ export default function App() {
     setAutoPilotEnabled(true);
     setShowPartyReadiness(false);
   };
-  const resetPartyAutopilot = () => {
+  const resetPartyAutopilot = async () => {
+    if (partyCheckpointWriterLostRef.current) {
+      setPartyCheckpointError("Reload this tab to review the current saved party plan before starting a new party here.");
+      window.requestAnimationFrame(() => partyCheckpointAlertRef.current?.focus?.());
+      return;
+    }
+    if (!await clearOwnedPartyCheckpoint("cleared")) return;
     cancelCurrentTransitionArm();
     if (partyTraceRecorderRef.current && !partyDiagnosticEvaluation?.status?.startsWith("valid-terminal")) {
       partyTraceRecorderRef.current.markInterrupted();
@@ -2686,8 +3084,145 @@ export default function App() {
     setPartyEndingFinalTrack(false);
     setPartyEnergyShift(0);
   };
+
+  const restoreSavedPartyPlan = async () => {
+    const recovery = partyCheckpointRecoveryRef.current;
+    const checkpoint = recovery?.status === "available" ? recovery.checkpoint : null;
+    if (!checkpoint || partyCheckpointBusyRef.current) return;
+    if (deckARef.current?.isPlaying?.() || deckBRef.current?.isPlaying?.() || autoMixing || autoMixArming ||
+        transitionArmRef.current || activeTransitionScheduleRef.current || rehearsalActive ||
+        rehearsalPreparing || rehearsalCancelRef.current) {
+      setPartyCheckpointError("Stop current audio or the transition preview before restoring the saved party plan.");
+      return;
+    }
+    partyCheckpointBusyRef.current = true;
+    refreshPlaybackRecoveryLock();
+    setPartyCheckpointBusy(true);
+    setPartyCheckpointError("");
+    autoPilotPreloadGenerationRef.current += 1;
+    cancelCurrentTransitionArm();
+    transitionArmGenerationRef.current += 1;
+    const nextWriterToken = partyCheckpointWriterTokenRef.current;
+    try {
+      const result = await claimPartySessionCheckpoint(
+        checkpoint.sessionId,
+        checkpoint.revision,
+        checkpoint.writerToken,
+        nextWriterToken
+      );
+      if (result.status !== "claimed") {
+        throw new DOMException("Saved party plan changed in another tab", "InvalidStateError");
+      }
+      if (activeTransitionScheduleRef.current) rescueTransition();
+      stopRemoteLibraryPlayback();
+      deckARef.current?.eject?.();
+      deckBRef.current?.eject?.();
+      setLoadedByDeck({ a: null, b: null });
+      finalTrackRef.current = null;
+      autoPilotEnabledRef.current = false;
+      setAutoPilotEnabled(false);
+      setAutoMixing(false);
+      setAutoMixArming(false);
+      setPartyEndingFinalTrack(false);
+      setAutoPilotChoice(null);
+      setAutoPilotIntervention(null);
+      partyTraceRecorderRef.current = null;
+      partyTraceRunningRef.current = false;
+      setPartyDiagnosticEvaluation(null);
+      consecutiveAutoPilotPreloadTimeoutsRef.current = 0;
+      consecutiveAutoPilotArmFailuresRef.current = 0;
+      setUnavailableAutoPilotTrackIds([]);
+      setTimedOutAutoPilotTrackIds([]);
+      const minutes = checkpoint.plannedDurationSeconds / 60;
+      partySessionClockRef.current = restorePausedPartySessionClock(
+        checkpoint.plannedDurationSeconds,
+        checkpoint.accumulatedActiveSeconds
+      );
+      setPartyClockDisplay(partySessionClockSnapshot(partySessionClockRef.current, getAudioEngine().clock.now()));
+      setPartyDurationMinutes(minutes);
+      setPartyEnergyProfile(checkpoint.energyProfile);
+      setPartyEnergyShift(checkpoint.energyShiftSteps / 10);
+      setAutoPilotUseLibrary(checkpoint.includeRestOfLibrary);
+      queueRef.current = [...checkpoint.remainingTrackIds];
+      playedTrackIdsRef.current = [...checkpoint.playedTrackIds];
+      setQueue([...checkpoint.remainingTrackIds]);
+      setPlayedTrackIds([...checkpoint.playedTrackIds]);
+      partyCheckpointSessionIdRef.current = checkpoint.sessionId;
+      partyCheckpointRevisionRef.current = result.revision;
+      partyCheckpointStoredRecordRef.current = {
+        recordStatus: "claimed",
+        revision: result.revision,
+        sessionId: checkpoint.sessionId,
+        writerToken: nextWriterToken
+      };
+      libraryStateRef.current = result.libraryState;
+      partyCheckpointTerminalRef.current = false;
+      partyCheckpointWriterLostRef.current = false;
+      setPartyCheckpointWriterLost(false);
+      partyCheckpointPauseReasonRef.current = "host-paused";
+      partyCheckpointLastFingerprintRef.current = "";
+      partyCheckpointRecoveryRef.current = null;
+      setPartyCheckpointRecovery(null);
+      setRestoredPartyPlan({ lastStableSourceTrackId: checkpoint.lastStableSourceTrackId });
+      setPartyCheckpointCardVisible(true);
+      window.requestAnimationFrame(() => partyCheckpointCardRef.current?.focus?.());
+    } catch {
+      setPartyCheckpointError("The saved party plan changed or could not be claimed. Reload Mazzy to review the current local recovery copy.");
+      window.requestAnimationFrame(() => partyCheckpointAlertRef.current?.focus?.());
+    } finally {
+      partyCheckpointBusyRef.current = false;
+      refreshPlaybackRecoveryLock();
+      setPartyCheckpointBusy(false);
+    }
+  };
+
+  const discardSavedPartyPlan = async () => {
+    if (partyCheckpointBusyRef.current) return;
+    partyCheckpointBusyRef.current = true;
+    refreshPlaybackRecoveryLock();
+    setPartyCheckpointBusy(true);
+    setPartyCheckpointError("");
+    const recovery = partyCheckpointRecoveryRef.current;
+    const checkpoint = recovery?.status === "available" ? recovery.checkpoint : null;
+    try {
+      const result = await clearPartySessionCheckpoint(checkpoint ? {
+        expectedRevision: checkpoint.revision,
+        expectedSessionId: checkpoint.sessionId,
+        expectedWriterToken: checkpoint.writerToken,
+        recordStatus: "cleared"
+      } : {
+        expectedRevision: partyCheckpointRevisionRef.current,
+        recordStatus: "cleared"
+      });
+      if (result.status !== "cleared") throw new Error("stale checkpoint");
+      partyCheckpointWriteGenerationRef.current += 1;
+      partyCheckpointRevisionRef.current = result.revision;
+      partyCheckpointStoredRecordRef.current = {
+        recordStatus: "cleared",
+        revision: result.revision,
+        sessionId: checkpoint?.sessionId ?? null,
+        writerToken: checkpoint?.writerToken ?? null
+      };
+      partyCheckpointTerminalRef.current = true;
+      partyCheckpointSessionIdRef.current = null;
+      partyCheckpointWriterLostRef.current = false;
+      setPartyCheckpointWriterLost(false);
+      partyCheckpointRecoveryRef.current = null;
+      setPartyCheckpointRecovery(null);
+      setPartyCheckpointCardVisible(false);
+      setPartyCheckpointError("");
+      window.requestAnimationFrame(() => partyModeTitleRef.current?.focus?.());
+    } catch {
+      setPartyCheckpointError("The saved party plan was not deleted. Reload Mazzy and try again.");
+      window.requestAnimationFrame(() => partyCheckpointAlertRef.current?.focus?.());
+    } finally {
+      partyCheckpointBusyRef.current = false;
+      refreshPlaybackRecoveryLock();
+      setPartyCheckpointBusy(false);
+    }
+  };
   const startCurrentSong = async () => {
-    if (audioRecoveryState || outputDeviceChanged || getAudioEngine().context.state === "closed" || !sourcePartyReady || sourcePartyPlaying || autoPilotEnabled) return;
+    if (partyCheckpointBusyRef.current || partyCheckpointWriterLostRef.current || audioRecoveryState || outputDeviceChanged || getAudioEngine().context.state === "closed" || !sourcePartyReady || sourcePartyPlaying || autoPilotEnabled) return;
     const started = await sourcePartyRef.current?.play?.();
     if (started) audioOutputWatchArmedRef.current = true;
     if (playbackRecoveryLockedRef.current) {
@@ -2745,6 +3280,16 @@ export default function App() {
           : library.length
             ? "Choose a song from your library below to begin."
             : "Import a music folder to begin.";
+  const recoverablePartyCheckpoint = partyCheckpointRecovery?.status === "available"
+    ? partyCheckpointRecovery.checkpoint
+    : null;
+  const recoveredSourceTrackId = recoverablePartyCheckpoint?.lastStableSourceTrackId ??
+    restoredPartyPlan?.lastStableSourceTrackId ?? null;
+  const recoveredSourceName = recoveredSourceTrackId
+    ? library.find((track) => track.id === recoveredSourceTrackId)?.name ?? "the last saved song"
+    : null;
+  const checkpointNeedsAttention = partyCheckpointRecovery &&
+    partyCheckpointRecovery.status !== "available";
 
   return (
     <main className="app">
@@ -2752,7 +3297,7 @@ export default function App() {
         <div className="party-mode-heading">
           <div>
             <span>MAZZY PARTY MODE</span>
-            <h1 id="party-mode-title">Run the music without DJ skills</h1>
+            <h1 ref={partyModeTitleRef} tabIndex={-1} id="party-mode-title">Run the music without DJ skills</h1>
           </div>
           <button type="button" onClick={() => setShowAdvancedMixer((value) => !value)} aria-expanded={showAdvancedMixer} aria-controls="advanced-mixer">
             {showAdvancedMixer ? "HIDE ADVANCED MIXER" : "SHOW ADVANCED MIXER"}
@@ -2773,14 +3318,106 @@ export default function App() {
             <button type="button" onClick={() => void confirmOutputDeviceAndResume()}>I CHECKED · CONTINUE</button>
           </div>
         )}
+        {partyCheckpointError && (
+          <div ref={partyCheckpointAlertRef} tabIndex={-1} className="library-storage-error" role="alert">
+            <p>{partyCheckpointError}</p>
+            {partyCheckpointWriterLost && (
+              <button type="button" onClick={() => window.location.reload()}>RELOAD RECOVERY STATE</button>
+            )}
+          </div>
+        )}
+        {partyCheckpointCardVisible && (recoverablePartyCheckpoint || checkpointNeedsAttention) && (
+          <section
+            ref={partyCheckpointCardRef}
+            tabIndex={-1}
+            className={`party-mode-readiness party-checkpoint-recovery ${checkpointNeedsAttention ? "caution" : ""}`}
+            aria-labelledby="party-checkpoint-title"
+            aria-busy={partyCheckpointBusy}
+          >
+            <h2 id="party-checkpoint-title">
+              {recoverablePartyCheckpoint ? "PAUSED PARTY PLAN FOUND" : "SAVED PARTY PLAN NEEDS ATTENTION"}
+            </h2>
+            {recoverablePartyCheckpoint ? (
+              <>
+                <p>
+                  A paused party plan saved in this browser profile is available. Restoring rebuilds the remaining order and active-party progress.
+                </p>
+                <p>
+                  Audio stays stopped. Exact playback position is not recovered, and the saved progress may be several seconds behind.
+                </p>
+                <p>{`${Math.floor(recoverablePartyCheckpoint.accumulatedActiveSeconds / 60)} active minutes saved${recoveredSourceName ? ` after ${recoveredSourceName}` : ""}.`}</p>
+              </>
+            ) : (
+              <p>
+                The saved plan cannot be restored safely because its data is malformed or the music library changed. No partial plan was applied.
+              </p>
+            )}
+            <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+              {partyCheckpointBusy ? "Updating the saved party plan." : ""}
+            </p>
+            <div>
+              <button type="button" disabled={partyCheckpointBusy} onClick={() => {
+                setPartyCheckpointCardVisible(false);
+                window.requestAnimationFrame(() => partyCheckpointShowButtonRef.current?.focus?.());
+              }}>NOT NOW</button>
+              <button type="button" disabled={partyCheckpointBusy} onClick={() => void discardSavedPartyPlan()}>
+                DELETE SAVED PLAN
+              </button>
+              {recoverablePartyCheckpoint && (
+                <button type="button" disabled={partyCheckpointBusy} onClick={() => void restoreSavedPartyPlan()}>
+                  RESTORE PAUSED PLAN
+                </button>
+              )}
+            </div>
+          </section>
+        )}
+        {!partyCheckpointCardVisible && partyCheckpointRecovery && (
+          <button
+            ref={partyCheckpointShowButtonRef}
+            type="button"
+            className="party-checkpoint-show"
+            onClick={() => {
+              setPartyCheckpointCardVisible(true);
+              window.requestAnimationFrame(() => partyCheckpointCardRef.current?.focus?.());
+            }}
+          >
+            SHOW SAVED PARTY PLAN
+          </button>
+        )}
+        {restoredPartyPlan && (
+          <section
+            ref={partyCheckpointCardRef}
+            tabIndex={-1}
+            className="party-mode-readiness party-checkpoint-recovery restored"
+            aria-labelledby="party-checkpoint-restored-title"
+            aria-live="polite"
+            aria-atomic="true"
+          >
+            <h2 id="party-checkpoint-restored-title">PARTY PLAN RESTORED · PAUSED</h2>
+            <p>
+              Remaining order and active-party progress are back. Audio is stopped. Choose and play a song, then start Autopilot.
+            </p>
+            {recoveredSourceName && <p>{`The last saved song was ${recoveredSourceName}.`}</p>}
+            <div>
+              <button type="button" onClick={() => {
+                document.querySelector(".library-section")?.scrollIntoView?.({ behavior: "smooth", block: "start" });
+                window.requestAnimationFrame(() => document.querySelector(".library-row button:not([disabled])")?.focus?.());
+              }}>CHOOSE A SONG</button>
+              <button type="button" onClick={() => {
+                setRestoredPartyPlan(null);
+                window.requestAnimationFrame(() => partyModeTitleRef.current?.focus?.());
+              }}>DISMISS</button>
+            </div>
+          </section>
+        )}
         <div className="party-mode-flow" aria-label="Party setup steps">
-          <button type="button" disabled={libraryMutationBusy} onClick={() => importRef.current?.click()}>
+          <button type="button" disabled={partyCheckpointBusy || libraryMutationBusy} onClick={() => importRef.current?.click()}>
             <span>1</span><strong>IMPORT MUSIC</strong><small>Saved only in this browser</small>
           </button>
-          <button type="button" onClick={() => void startCurrentSong()} disabled={!!audioRecoveryState || outputDeviceChanged || !sourcePartyReady || sourcePartyPlaying || autoPilotEnabled}>
+          <button type="button" onClick={() => void startCurrentSong()} disabled={partyCheckpointBusy || partyCheckpointWriterLost || !!audioRecoveryState || outputDeviceChanged || !sourcePartyReady || sourcePartyPlaying || autoPilotEnabled}>
             <span>2</span><strong>{sourcePartyPlaying ? "FIRST SONG PLAYING" : "PLAY FIRST SONG"}</strong><small>{sourcePartyReady ? nowPlayingTrack?.name ?? "Loaded track" : "Choose a song below"}</small>
           </button>
-          <button ref={partyStartButtonRef} type="button" onClick={() => autoPilotEnabled ? pausePartyAutopilot() : setShowPartyReadiness(true)} disabled={!!audioRecoveryState || outputDeviceChanged || (!sourcePartyPlaying && !autoPilotEnabled)}>
+          <button ref={partyStartButtonRef} type="button" onClick={() => autoPilotEnabled ? pausePartyAutopilot() : setShowPartyReadiness(true)} disabled={partyCheckpointBusy || partyCheckpointWriterLost || !!audioRecoveryState || outputDeviceChanged || (!sourcePartyPlaying && !autoPilotEnabled)}>
             <span>3</span><strong>{autoPilotEnabled ? "PAUSE AUTOPILOT" : "START AUTOPILOT"}</strong><small>{autoPilotEnabled ? "Music keeps playing" : "Mazzy handles later songs"}</small>
           </button>
         </div>
@@ -2790,6 +3427,7 @@ export default function App() {
               Planned party length
               <select
                 id="party-mode-duration"
+                disabled={partyCheckpointBusy}
                 value={partyDurationMinutes}
                 onChange={(event) => {
                   const minutes = Number(event.target.value);
@@ -2806,14 +3444,14 @@ export default function App() {
               </select>
             </label>
             <label>
-              <input type="checkbox" checked={autoPilotUseLibrary} onChange={(event) => setAutoPilotUseLibrary(event.target.checked)} />
+              <input type="checkbox" disabled={partyCheckpointBusy} checked={autoPilotUseLibrary} onChange={(event) => setAutoPilotUseLibrary(event.target.checked)} />
               Continue with unqueued library songs when the queue ends
             </label>
             <label>
               <input
                 type="checkbox"
                 checked={partyDiagnosticEnabled}
-                disabled={partyTraceRecorderRef.current !== null}
+                disabled={partyCheckpointBusy || partyTraceRecorderRef.current !== null}
                 onChange={(event) => setPartyDiagnosticEnabled(event.target.checked)}
               />
               Keep a private Autopilot activity check in this tab
@@ -2830,8 +3468,8 @@ export default function App() {
                 setShowPartyReadiness(false);
                 window.requestAnimationFrame(() => partyStartButtonRef.current?.focus?.());
               }}>NOT YET</button>
-              <button type="button" disabled={!!audioRecoveryState || outputDeviceChanged || !partyReadiness.canStart} onClick={() => {
-                startPartyAutopilot();
+              <button type="button" disabled={partyCheckpointBusy || !!audioRecoveryState || outputDeviceChanged || !partyReadiness.canStart} onClick={() => {
+                void startPartyAutopilot();
                 window.requestAnimationFrame(() => partyStartButtonRef.current?.focus?.());
               }}>START PARTY AUTOPILOT</button>
             </div>
@@ -2856,7 +3494,7 @@ export default function App() {
               <button
                 type="button"
                 disabled={!!audioRecoveryState || outputDeviceChanged || !sourcePartyReady || !sourcePartyPlaying}
-                onClick={startPartyAutopilot}
+                onClick={() => void startPartyAutopilot()}
               >RETRY AUTOPILOT</button>
             </div>
           </section>
@@ -2878,7 +3516,7 @@ export default function App() {
           </div>
         )}
         <p className="party-tab-note">
-          Party progress lives in this tab and resets if the page is refreshed.
+          Mazzy keeps one local paused party-plan checkpoint in this browser profile while a party is in progress. Restoring never starts audio; browser storage may evict it, and recent seconds may repeat.
         </p>
         {autoPilotEnabled && (
           <p className="party-tab-note" role="status" aria-live="polite">
@@ -2923,7 +3561,7 @@ export default function App() {
             onDeckPlayStart={onDeckPlayStart}
             onDeckEnded={onDeckEnded}
             onAudioStartError={onAudioStartError}
-            playbackStartLocked={!!audioRecoveryState || outputDeviceChanged}
+            playbackStartLocked={partyCheckpointBusy || partyCheckpointWriterLost || !!audioRecoveryState || outputDeviceChanged}
             playbackStartLockRef={playbackRecoveryLockedRef}
             flash={deckFlash.a}
             transitionLocked={autoMixing || autoMixArming || autoPilotEnabled}
@@ -3116,7 +3754,7 @@ export default function App() {
                   <button
                     type="button"
                     onClick={() => {
-                      resetPartyAutopilot();
+                      void resetPartyAutopilot();
                     }}
                   >
                     NEW PARTY
@@ -3134,7 +3772,7 @@ export default function App() {
                     type="button"
                     disabled={!partyReadiness.canStart}
                     onClick={() => {
-                      startPartyAutopilot();
+                      void startPartyAutopilot();
                     }}
                   >
                     START AUTOPILOT
@@ -3227,7 +3865,7 @@ export default function App() {
             onDeckPlayStart={onDeckPlayStart}
             onDeckEnded={onDeckEnded}
             onAudioStartError={onAudioStartError}
-            playbackStartLocked={!!audioRecoveryState || outputDeviceChanged}
+            playbackStartLocked={partyCheckpointBusy || partyCheckpointWriterLost || !!audioRecoveryState || outputDeviceChanged}
             playbackStartLockRef={playbackRecoveryLockedRef}
             flash={deckFlash.b}
             transitionLocked={autoMixing || autoMixArming || autoPilotEnabled}
@@ -3241,11 +3879,11 @@ export default function App() {
           <div className="queue-header">
             <div className="queue-title">{`QUEUE (${queue.length} tracks)`}</div>
             <div className="library-top-spacer" />
-            <button className="library-top-btn" type="button" disabled={libraryMutationBusy} onClick={() => importRef.current?.click()}>
+            <button className="library-top-btn" type="button" disabled={partyCheckpointBusy || libraryMutationBusy} onClick={() => importRef.current?.click()}>
               IMPORT
             </button>
             <input ref={importRef} type="file" multiple accept=".mp3,.wav,.flac,.aiff,.m4a" onChange={handleImportFolder} hidden />
-            <button className="library-top-btn" type="button" onClick={() => setQueue([])}>
+            <button className="library-top-btn" type="button" disabled={partyCheckpointBusy} onClick={() => setQueue([])}>
               CLEAR
             </button>
           </div>
@@ -3292,11 +3930,14 @@ export default function App() {
                 <div
                   key={`${track.id}-${index}`}
                   className="queue-item"
-                  draggable
-                  onDragStart={() => setDragIndex(index)}
+                  draggable={!partyCheckpointBusy}
+                  onDragStart={() => {
+                    if (partyCheckpointBusyRef.current) return;
+                    setDragIndex(index);
+                  }}
                   onDragOver={(event) => event.preventDefault()}
                   onDrop={() => {
-                    if (dragIndex == null || dragIndex === index) return;
+                    if (partyCheckpointBusyRef.current || dragIndex == null || dragIndex === index) return;
                     setQueue((prev) => {
                       const next = [...prev];
                       const [moved] = next.splice(dragIndex, 1);
@@ -3318,7 +3959,7 @@ export default function App() {
                     type="button"
                     className="queue-order"
                     aria-label={`Move ${track.name} earlier in queue`}
-                    disabled={index === 0}
+                    disabled={partyCheckpointBusy || index === 0}
                     onClick={() => setQueue((current) => {
                       const next = [...current];
                       [next[index - 1], next[index]] = [next[index], next[index - 1]];
@@ -3329,7 +3970,7 @@ export default function App() {
                     type="button"
                     className="queue-order"
                     aria-label={`Move ${track.name} later in queue`}
-                    disabled={index === queueTracks.length - 1}
+                    disabled={partyCheckpointBusy || index === queueTracks.length - 1}
                     onClick={() => setQueue((current) => {
                       const next = [...current];
                       [next[index], next[index + 1]] = [next[index + 1], next[index]];
@@ -3340,6 +3981,7 @@ export default function App() {
                     type="button"
                     className="queue-remove"
                     aria-label={`Remove ${track.name} from queue`}
+                    disabled={partyCheckpointBusy}
                     onClick={() => setQueue((prev) => prev.filter((_, idx) => idx !== index))}
                   >
                     Remove
@@ -3356,7 +3998,7 @@ export default function App() {
           {library.length > 0 && (
             <div className="library-data-controls">
               <span>Music and analysis are stored only in this browser profile.</span>
-              <button type="button" disabled={libraryMutationBusy} onClick={() => void clearLocalLibrary()}>{libraryMutationBusy ? "UPDATING LOCAL MUSIC…" : "REMOVE ALL LOCAL MUSIC"}</button>
+              <button type="button" disabled={partyCheckpointBusy || libraryMutationBusy} onClick={() => void clearLocalLibrary()}>{libraryMutationBusy ? "UPDATING LOCAL MUSIC…" : "REMOVE ALL LOCAL MUSIC"}</button>
             </div>
           )}
 
@@ -3434,6 +4076,7 @@ export default function App() {
                   } ${keyCompatible ? "key-compatible" : ""}`}
                   onContextMenu={(event) => {
                     event.preventDefault();
+                    if (partyCheckpointBusyRef.current) return;
                     contextMenuTriggerRef.current = null;
                     setContextMenu({ x: event.clientX, y: event.clientY, trackId: track.id });
                   }}
@@ -3455,7 +4098,7 @@ export default function App() {
                     <button
                       className="library-track-action"
                       type="button"
-                      disabled={libraryMutationBusy || loadedA || loadedB || autoMixing || autoMixArming || rehearsalActive || rehearsalPreparing || autoPilotExcludedTrackIds.includes(track.id)}
+                      disabled={partyCheckpointBusy || libraryMutationBusy || loadedA || loadedB || autoMixing || autoMixArming || rehearsalActive || rehearsalPreparing || autoPilotExcludedTrackIds.includes(track.id)}
                       aria-label={`${loadedA || loadedB ? "Ready" : unavailableAutoPilotTrackIds.includes(track.id) ? autoPilotEnabled ? "Couldn't open; pause Autopilot, then use More actions to retry" : "Couldn't open; use More actions to retry" : timedOutAutoPilotTrackIds.includes(track.id) ? autoPilotEnabled ? "Took too long to prepare; pause Autopilot, then use More actions to retry" : "Took too long to prepare; use More actions to retry" : !sourcePartyReady ? "Choose first song" : autoPilotEnabled || queuePositionMap.has(track.id) ? "Request next" : "Add to queue"}: ${track.name}`}
                       onClick={() => void activateLibraryTrack(track)}
                     >
@@ -3474,7 +4117,7 @@ export default function App() {
                     <button
                       className="library-track-more"
                       type="button"
-                      disabled={libraryMutationBusy}
+                      disabled={partyCheckpointBusy || libraryMutationBusy}
                       aria-label={`More actions for ${track.name}`}
                       aria-haspopup="menu"
                       aria-expanded={contextMenu?.trackId === track.id}
@@ -3543,7 +4186,7 @@ export default function App() {
           <button
             type="button"
             role="menuitem"
-            disabled={autoMixing || autoMixArming || autoPilotEnabled || rehearsalActive || rehearsalPreparing || deckAPlaying}
+            disabled={partyCheckpointBusy || autoMixing || autoMixArming || autoPilotEnabled || rehearsalActive || rehearsalPreparing || deckAPlaying}
             onClick={() => {
               const track = library.find((t) => t.id === contextMenu.trackId);
               if (track && !libraryMutationBusy) {
@@ -3557,7 +4200,7 @@ export default function App() {
           <button
             type="button"
             role="menuitem"
-            disabled={autoMixing || autoMixArming || autoPilotEnabled || rehearsalActive || rehearsalPreparing || deckBPlaying}
+            disabled={partyCheckpointBusy || autoMixing || autoMixArming || autoPilotEnabled || rehearsalActive || rehearsalPreparing || deckBPlaying}
             onClick={() => {
               const track = library.find((t) => t.id === contextMenu.trackId);
               if (track && !libraryMutationBusy) {
@@ -3571,7 +4214,7 @@ export default function App() {
           <button
             type="button"
             role="menuitem"
-            disabled={autoMixing || autoMixArming || autoPilotEnabled || rehearsalActive || rehearsalPreparing}
+            disabled={partyCheckpointBusy || autoMixing || autoMixArming || autoPilotEnabled || rehearsalActive || rehearsalPreparing}
             onClick={() => {
               if (!libraryMutationBusy) addToQueue(contextMenu.trackId);
               dismissContextMenu();
@@ -3582,6 +4225,7 @@ export default function App() {
           <button
             type="button"
             role="menuitem"
+            disabled={partyCheckpointBusy}
             onClick={() => {
               if (!libraryMutationBusy) addToQueue(contextMenu.trackId, true);
               dismissContextMenu();
@@ -3592,6 +4236,7 @@ export default function App() {
           <button
             type="button"
             role="menuitem"
+            disabled={partyCheckpointBusy}
             onClick={() => {
               const trackId = contextMenu.trackId;
               setContextMenu(null);

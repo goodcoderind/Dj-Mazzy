@@ -91,6 +91,23 @@ export const resetPartySessionClock = (
   plannedDurationSeconds = clock.plannedDurationSeconds
 ): PartySessionClock => createPartySessionClock(plannedDurationSeconds);
 
+export const restorePausedPartySessionClock = (
+  plannedDurationSeconds: number,
+  accumulatedActiveSeconds: number
+): PartySessionClock => {
+  requirePositiveDuration(plannedDurationSeconds);
+  if (!Number.isFinite(accumulatedActiveSeconds) || accumulatedActiveSeconds < 0) {
+    throw new RangeError("Restored party elapsed time must be a non-negative finite number.");
+  }
+  return freezeClock({
+    schemaVersion: PARTY_SESSION_CLOCK_SCHEMA_VERSION,
+    plannedDurationSeconds,
+    accumulatedActiveSeconds,
+    runningSinceSeconds: null,
+    hasStarted: true
+  });
+};
+
 export const partySessionClockSnapshot = (
   clock: PartySessionClock,
   nowSeconds: number

@@ -2212,6 +2212,45 @@ These are the active backlog, not reasons to discard the prototype.
   timeout, and short-runway scenarios. These are deterministic state/ownership
   checks; they do not prove browser callback timing, audio continuity, or speaker
   output.
+- **D-060 — Recover only a paused party plan, never live audio authority:**
+  `party-session-checkpoint/v1` stores one strict, local IndexedDB recovery record
+  only after the party has a stable source and no preload, arm, transition,
+  rehearsal, library mutation, or audio/output recovery operation owns state. A
+  coarse ten-second interval and settled semantic changes project the current
+  session into a paused plan: unique played and remaining local track IDs, the
+  last stable source ID, integer active seconds, planned duration, energy profile
+  and bounded preference shift, and the explicit library-continuation choice. A
+  committed idle-deck target is prepended exactly once if it has already left the
+  visible queue. The record stores no File/Blob/audio, name/path/content identity,
+  analysis, BPM/key/cue, exact position, wall-clock or Web Audio timestamp,
+  device data, diagnostic trace, preload/arm/transition lease, wake-lock state,
+  or Autopilot authority.
+
+  IndexedDB v8 adds a `library-state/v1` epoch/revision and a versioned
+  `partySessions` store. Checkpoint save, claim, clear, track deletion, and
+  Remove All use atomic transactions and monotonic revisions; transaction-level
+  compare-and-swap, rather than BroadcastChannel or Web Locks, owns correctness.
+  Any track deletion conservatively invalidates the whole checkpoint, full clear
+  increments the library epoch and writes an invalidation tombstone, and stale
+  writers cannot recreate a consumed or cleared plan. Broadcast messages are
+  versioned advisory notifications only. Database connections close on
+  `versionchange`, and a blocked upgrade fails visibly instead of silently
+  enabling mutation against a torn view.
+
+  Hydration reads music, library state, and the checkpoint from one readonly
+  transaction, then validates exact schema, counters, enums, array density,
+  uniqueness/disjointness, library epoch/revision, and every referenced track.
+  Invalid, stale, or missing-track records never partially restore. The ordinary
+  Party Mode card offers **Restore paused plan**, **Delete saved plan**, and
+  **Not now** without stealing initial focus. Restore first claims the exact
+  record, always creates a paused clock with no prior AudioContext anchor, leaves
+  decks and audio stopped, keeps Autopilot and wake lock off, starts no diagnostic,
+  and requires a later host gesture to choose/play music. New Party, valid
+  terminal completion, Remove All, and Discard clear the owned record; storage or
+  cross-tab ownership failure is a persistent visible alert. This supersedes the
+  tab-memory-only recovery limitation in D-048, but it is not gapless crash
+  recovery: the last few seconds may repeat, browser storage may be evicted, and
+  a crash before a stable write remains unrecoverable.
 
 ### Open questions
 

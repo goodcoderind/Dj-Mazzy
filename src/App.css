@@ -195,6 +195,27 @@ body {
 .party-mode-readiness > div { display: flex; gap: 8px; margin-top: 12px; }
 .party-mode-readiness button { min-width: 160px; padding: 8px 12px; font-size: 12px; }
 
+.party-checkpoint-recovery {
+  border-color: rgba(200, 169, 110, 0.65);
+  background: #15120d;
+}
+
+.party-checkpoint-recovery.caution { border-color: #8b5a43; }
+.party-checkpoint-recovery.restored { border-color: #47775d; background: #0d1711; }
+.party-checkpoint-recovery p { max-width: 78ch; font-size: 14px; line-height: 1.45; }
+
+.party-checkpoint-show {
+  min-height: 44px;
+  margin-top: 12px;
+  padding: 8px 12px;
+  border: 1px solid rgba(200, 169, 110, 0.55);
+  background: #15120d;
+  color: #d7bd87;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
 .party-tab-note {
   margin: 10px 0 0;
   color: #777;
