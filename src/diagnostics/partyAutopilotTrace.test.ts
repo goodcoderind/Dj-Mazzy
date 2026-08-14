@@ -32,7 +32,7 @@ const happyTerminalEvents: readonly PartyAutopilotEventInput[] = [
   { type: "transition-scheduled", activeSecond: 410, transition: 2, sourceTrackOrdinal: 2, sourceLoadOrdinal: 2, targetTrackOrdinal: 3, targetLoadOrdinal: 3, ownership: "autopilot", template: "downbeat-cut" },
   { type: "transition-completed", activeSecond: 411, transition: 2, targetTrackOrdinal: 3, targetLoadOrdinal: 3, settledBy: "primary", completionOutcome: "on-time", pauseRequired: false },
   { type: "final-declared", activeSecond: 412, deck: "a", trackOrdinal: 3, loadOrdinal: 3 },
-  { type: "deck-ended", activeSecond: 620, deck: "a", trackOrdinal: 3, loadOrdinal: 3, settledBy: "source-onended", outcome: "on-time" },
+  { type: "deck-ended", activeSecond: 620, deck: "a", trackOrdinal: 3, loadOrdinal: 3, nativeOwnerOrdinal: 1, settledBy: "source-onended", outcome: "on-time" },
   { type: "session-ended", activeSecond: 620, reason: "final-track-ended" }
 ];
 
@@ -114,7 +114,7 @@ describe("Party Autopilot trace", () => {
       { type: "track-played", activeSecond: 0, trackOrdinal: 1, loadOrdinal: 1, cause: "host" },
       { type: "arm-started", activeSecond: 2, operation: 1, origin: "autopilot" },
       { type: "final-declared", activeSecond: 3, deck: "a", trackOrdinal: 1, loadOrdinal: 1 },
-      { type: "deck-ended", activeSecond: 4, deck: "a", trackOrdinal: 1, loadOrdinal: 1, settledBy: "source-onended", outcome: "on-time" },
+      { type: "deck-ended", activeSecond: 4, deck: "a", trackOrdinal: 1, loadOrdinal: 1, nativeOwnerOrdinal: 1, settledBy: "source-onended", outcome: "on-time" },
       { type: "session-ended", activeSecond: 4, reason: "final-track-ended" }
     ]);
     expect(evaluatePartyAutopilotTrace(openArm).failureCodes).toContain("session-ended-with-open-operation");
@@ -264,7 +264,7 @@ describe("Party Autopilot trace", () => {
       { type: "track-played", activeSecond: 0, trackOrdinal: 1, loadOrdinal: 1, cause: "host" },
       { type: "final-declared", activeSecond: 30, deck: "a", trackOrdinal: 1, loadOrdinal: 1 },
       { type: "final-revoked", activeSecond: 31 },
-      { type: "deck-ended", activeSecond: 32, deck: "a", trackOrdinal: 1, loadOrdinal: 1, settledBy: "source-onended", outcome: "on-time" },
+      { type: "deck-ended", activeSecond: 32, deck: "a", trackOrdinal: 1, loadOrdinal: 1, nativeOwnerOrdinal: 1, settledBy: "source-onended", outcome: "on-time" },
       { type: "session-ended", activeSecond: 32, reason: "final-track-ended" }
     ]);
     expect(evaluatePartyAutopilotTrace(trace).failureCodes).toContain("session-ended-without-final");
@@ -310,7 +310,7 @@ describe("Party Autopilot trace", () => {
     const afterTerminal = record([
       { type: "session-started", activeSecond: 0 },
       { type: "final-declared", activeSecond: 1, deck: "a", trackOrdinal: 1, loadOrdinal: 1 },
-      { type: "deck-ended", activeSecond: 2, deck: "a", trackOrdinal: 1, loadOrdinal: 1, settledBy: "source-onended", outcome: "on-time" },
+      { type: "deck-ended", activeSecond: 2, deck: "a", trackOrdinal: 1, loadOrdinal: 1, nativeOwnerOrdinal: 1, settledBy: "source-onended", outcome: "on-time" },
       { type: "session-ended", activeSecond: 2, reason: "final-track-ended" },
       { type: "final-revoked", activeSecond: 2 }
     ]);
@@ -581,6 +581,7 @@ describe("Party Autopilot trace", () => {
       deck: "a",
       trackOrdinal: 3,
       loadOrdinal: 3,
+      nativeOwnerOrdinal: 1,
       settledBy: "audio-clock",
       outcome: "recovered"
     });
@@ -613,7 +614,7 @@ describe("Party Autopilot trace", () => {
     const prefix: PartyAutopilotEventInput[] = [
       { type: "session-started", activeSecond: 0 },
       { type: "track-played", activeSecond: 0, trackOrdinal: 1, loadOrdinal: 1, cause: "host" },
-      { type: "deck-completion-failed", activeSecond: 2, deck: "a", trackOrdinal: 1, loadOrdinal: 1, settledBy: "source-onended", reason: "premature", pauseRequired: true }
+      { type: "deck-completion-failed", activeSecond: 2, deck: "a", trackOrdinal: 1, loadOrdinal: 1, nativeOwnerOrdinal: 1, settledBy: "source-onended", reason: "premature", pauseRequired: true }
     ];
     const valid = evaluatePartyAutopilotTrace(record([
       ...prefix,
@@ -625,6 +626,63 @@ describe("Party Autopilot trace", () => {
       .toContain("deck-completion-not-paused");
   });
 
+  it("consumes failed native and Party completion owners before a resumed callback", () => {
+    const prefix: PartyAutopilotEventInput[] = [
+      { type: "session-started", activeSecond: 0 },
+      { type: "track-played", activeSecond: 0, trackOrdinal: 1, loadOrdinal: 1, cause: "host" },
+      { type: "deck-completion-failed", activeSecond: 2, deck: "a", trackOrdinal: 1, loadOrdinal: 1, nativeOwnerOrdinal: 7, settledBy: "source-onended", reason: "premature", pauseRequired: true },
+      { type: "session-paused", activeSecond: 2, reason: "deck-completion" },
+      { type: "session-resumed", activeSecond: 2 }
+    ];
+    const samePartyOwner = evaluatePartyAutopilotTrace(record([
+      ...prefix,
+      { type: "deck-ended", activeSecond: 3, deck: "a", trackOrdinal: 1, loadOrdinal: 1, nativeOwnerOrdinal: 8, settledBy: "source-onended", outcome: "on-time" },
+      { type: "session-paused", activeSecond: 3, reason: "source-stopped" }
+    ]));
+    expect(samePartyOwner.failureCodes).toContain("duplicate-deck-completion");
+
+    const sameNativeOwner = evaluatePartyAutopilotTrace(record([
+      ...prefix,
+      { type: "track-played", activeSecond: 2, trackOrdinal: 2, loadOrdinal: 2, cause: "host" },
+      { type: "deck-ended", activeSecond: 3, deck: "a", trackOrdinal: 2, loadOrdinal: 2, nativeOwnerOrdinal: 7, settledBy: "source-onended", outcome: "on-time" },
+      { type: "session-paused", activeSecond: 3, reason: "source-stopped" }
+    ]));
+    expect(sameNativeOwner.failureCodes).toContain("duplicate-deck-completion");
+  });
+
+  it("requires an immediate source-stopped pause after a non-final natural ending", () => {
+    const prefix: PartyAutopilotEventInput[] = [
+      { type: "session-started", activeSecond: 0 },
+      { type: "track-played", activeSecond: 0, trackOrdinal: 1, loadOrdinal: 1, cause: "host" },
+      { type: "deck-ended", activeSecond: 20, deck: "a", trackOrdinal: 1, loadOrdinal: 1, nativeOwnerOrdinal: 1, settledBy: "source-onended", outcome: "on-time" }
+    ];
+    expect(evaluatePartyAutopilotTrace(record([
+      ...prefix,
+      { type: "session-paused", activeSecond: 20, reason: "source-stopped" }
+    ])).failureCodes).toEqual([]);
+    expect(evaluatePartyAutopilotTrace(record(prefix)).failureCodes)
+      .toContain("deck-completion-not-paused");
+    expect(evaluatePartyAutopilotTrace(record([
+      ...prefix,
+      { type: "queue-committed", activeSecond: 20, revision: 1, trackOrdinals: [] },
+      { type: "session-paused", activeSecond: 20, reason: "source-stopped" }
+    ])).failureCodes).toContain("deck-completion-not-paused");
+  });
+
+  it("rejects duplicate native completion ownership even if Party load evidence changes", () => {
+    const evaluation = evaluatePartyAutopilotTrace(record([
+      { type: "session-started", activeSecond: 0 },
+      { type: "track-played", activeSecond: 0, trackOrdinal: 1, loadOrdinal: 1, cause: "host" },
+      { type: "deck-ended", activeSecond: 20, deck: "a", trackOrdinal: 1, loadOrdinal: 1, nativeOwnerOrdinal: 1, settledBy: "source-onended", outcome: "on-time" },
+      { type: "session-paused", activeSecond: 20, reason: "source-stopped" },
+      { type: "session-resumed", activeSecond: 20 },
+      { type: "track-played", activeSecond: 20, trackOrdinal: 2, loadOrdinal: 2, cause: "host" },
+      { type: "deck-ended", activeSecond: 40, deck: "a", trackOrdinal: 2, loadOrdinal: 2, nativeOwnerOrdinal: 1, settledBy: "source-onended", outcome: "on-time" },
+      { type: "session-paused", activeSecond: 40, reason: "source-stopped" }
+    ]));
+    expect(evaluation.failureCodes).toContain("duplicate-deck-completion");
+  });
+
   it("keeps a transition unresolved until paused deck-completion recovery finishes", () => {
     const prefix: PartyAutopilotEventInput[] = [
       { type: "session-started", activeSecond: 0 },
@@ -632,7 +690,7 @@ describe("Party Autopilot trace", () => {
       { type: "arm-started", activeSecond: 1, operation: 1, origin: "host" },
       { type: "arm-settled", activeSecond: 1, operation: 1, outcome: "scheduled", pauseRequired: false },
       { type: "transition-scheduled", activeSecond: 1, transition: 1, sourceTrackOrdinal: 1, sourceLoadOrdinal: 1, targetTrackOrdinal: 2, targetLoadOrdinal: 2, ownership: "host", template: "safe-fade" },
-      { type: "deck-completion-failed", activeSecond: 2, deck: "a", trackOrdinal: 1, loadOrdinal: 1, settledBy: "source-onended", reason: "premature", pauseRequired: true },
+      { type: "deck-completion-failed", activeSecond: 2, deck: "a", trackOrdinal: 1, loadOrdinal: 1, nativeOwnerOrdinal: 1, settledBy: "source-onended", reason: "premature", pauseRequired: true },
       { type: "session-paused", activeSecond: 2, reason: "deck-completion" }
     ];
     expect(evaluatePartyAutopilotTrace(record(prefix)).failureCodes)
@@ -664,8 +722,8 @@ describe("Party Autopilot trace", () => {
     expect(hostile.append({ type: "final-declared", activeSecond: 0, deck: "private filename.mp3", trackOrdinal: 1, loadOrdinal: 1 } as never)).toBe(false);
     expect(hostile.append({ type: "queue-committed", activeSecond: 0, revision: "private filename.mp3", trackOrdinals: [1] } as never)).toBe(false);
     expect(hostile.append({ type: "coordinator-failed", activeSecond: 0, operation: 1, phase: "private filename.mp3", pauseRequired: true } as never)).toBe(false);
-    expect(hostile.append({ type: "deck-ended", activeSecond: 0, deck: "a", trackOrdinal: 1, loadOrdinal: 1, settledBy: "timer", outcome: "recovered" } as never)).toBe(false);
-    expect(hostile.append({ type: "deck-ended", activeSecond: 0, deck: "a", trackOrdinal: 1, loadOrdinal: 1, settledBy: "source-onended", outcome: "recovered" } as never)).toBe(false);
+    expect(hostile.append({ type: "deck-ended", activeSecond: 0, deck: "a", trackOrdinal: 1, loadOrdinal: 1, nativeOwnerOrdinal: 1, settledBy: "timer", outcome: "recovered" } as never)).toBe(false);
+    expect(hostile.append({ type: "deck-ended", activeSecond: 0, deck: "a", trackOrdinal: 1, loadOrdinal: 1, nativeOwnerOrdinal: 1, settledBy: "source-onended", outcome: "recovered" } as never)).toBe(false);
     const hostileJson = JSON.stringify(hostile.snapshot());
     expect(hostileJson).not.toContain("private filename.mp3");
     expect(hostile.snapshot().interrupted).toBe(true);

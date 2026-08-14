@@ -28,8 +28,9 @@ import {
   decideAutoPilotPreloadPause,
   ownsAutoPilotPreloadLease
 } from "../planning/autoPilotPreloadOwnership";
+import { decidePartyDeckCompletion } from "../planning/partyDeckCompletionIngestion";
 
-export const PARTY_AUTOPILOT_SOAK_SCHEMA_VERSION = "party-autopilot-coordinator-soak/v10" as const;
+export const PARTY_AUTOPILOT_SOAK_SCHEMA_VERSION = "party-autopilot-coordinator-soak/v11" as const;
 
 export type SimulatedPartyTrack = Readonly<{
   id: string;
@@ -81,6 +82,8 @@ export type PartyAutopilotSoakOptions = Readonly<{
   coordinatorFailureIteration?: number;
   /** Exact final-deck completion signal; non-primary values model a lost source callback. */
   finalDeckCompletionSignal?: "source-onended" | "audio-clock" | "reconcile";
+  /** Synthetic exact non-final native EOF delivered through the shared session-ingestion contract. */
+  unexpectedSourceEndIteration?: number;
 }>;
 
 export type SimulatedPartyRescueEvent = Readonly<{
@@ -92,7 +95,7 @@ export type SimulatedPartyRescueEvent = Readonly<{
 export type PartyAutopilotSoakResult = Readonly<{
   schemaVersion: typeof PARTY_AUTOPILOT_SOAK_SCHEMA_VERSION;
   completed: boolean;
-  stopReason: "observation-horizon" | "crate-exhausted" | "rescue-paused" | "preload-timeout-paused" | "preload-runway-paused" | "transition-arm-paused" | "transition-completion-paused" | "coordinator-failure-paused" | "invalid";
+  stopReason: "observation-horizon" | "crate-exhausted" | "rescue-paused" | "preload-timeout-paused" | "preload-runway-paused" | "transition-arm-paused" | "transition-completion-paused" | "coordinator-failure-paused" | "unexpected-source-ended-paused" | "invalid";
   evidenceScope: "shared Autopilot coordinator and state invariants only; not audio continuity, musical quality, decode, or speaker output";
   observationHorizonSeconds: number;
   elapsedActiveSeconds: number;
@@ -128,6 +131,10 @@ const validate = (options: PartyAutopilotSoakOptions) => {
   if (options.coordinatorFailureIteration != null &&
     (!Number.isSafeInteger(options.coordinatorFailureIteration) || options.coordinatorFailureIteration < 1)) {
     throw new RangeError("coordinatorFailureIteration must be a positive safe integer");
+  }
+  if (options.unexpectedSourceEndIteration != null &&
+    (!Number.isSafeInteger(options.unexpectedSourceEndIteration) || options.unexpectedSourceEndIteration < 1)) {
+    throw new RangeError("unexpectedSourceEndIteration must be a positive safe integer");
   }
   if (options.pauseDuringPreloadAttempt != null &&
     (!Number.isSafeInteger(options.pauseDuringPreloadAttempt) || options.pauseDuringPreloadAttempt < 1)) {
@@ -297,6 +304,64 @@ export const simulatePartyAutopilotSoak = (options: PartyAutopilotSoakOptions): 
     const source = byId.get(sourceId)!;
     const target = targetId ? byId.get(targetId)! : null;
     const targetDeck: AutoPilotDeck = sourceDeck === "a" ? "b" : "a";
+    if (iteration + 1 === options.unexpectedSourceEndIteration) {
+      const nativeOperation = iteration + 1;
+      const completionDecision = decidePartyDeckCompletion({
+        callbackDeck: sourceDeck,
+        event: {
+          channel: sourceDeck,
+          trackId: sourceId,
+          operation: nativeOperation,
+          loadRevision: sourceLoad,
+          settledBy: "source-onended",
+          outcome: "on-time"
+        },
+        snapshot: {
+          channel: sourceDeck,
+          status: "ended",
+          trackId: sourceId,
+          completionIntent: "natural",
+          completionOperation: nativeOperation,
+          completionLoadRevision: sourceLoad
+        },
+        partyLoad: {
+          trackId: sourceId,
+          trackOrdinal: ordinals.get(sourceId)!,
+          loadOrdinal: sourceLoad
+        },
+        masterDeck: sourceDeck,
+        autoPilotOwned: true,
+        traceRunning: true,
+        finalOwner: null,
+        activeTransition: null,
+        armOwned: false,
+        preloadOwned: preloadLease != null
+      });
+      if (completionDecision.kind !== "pause-unexpected-source") {
+        errors.push(`unexpected source ending was not paused: ${completionDecision.kind}`);
+        break;
+      }
+      if (preloadLease) {
+        append({ type: "preload-settled", activeSecond: 0, operation: preloadLease.operation, outcome: "superseded" });
+        preloadLease = null;
+        targetId = null;
+        targetLoad = null;
+      }
+      append({
+        type: "deck-ended",
+        activeSecond: 0,
+        deck: sourceDeck,
+        trackOrdinal: ordinals.get(sourceId)!,
+        loadOrdinal: sourceLoad,
+        nativeOwnerOrdinal: nativeOperation,
+        settledBy: "source-onended",
+        outcome: "on-time"
+      });
+      append({ type: "session-paused", activeSecond: 0, reason: "source-stopped" });
+      clock = pausePartySessionClock(clock, now);
+      stopReason = "unexpected-source-ended-paused";
+      break;
+    }
     const decision = decideAutoPilotSessionTick({
       nowSeconds: now,
       source: {
@@ -703,12 +768,49 @@ export const simulatePartyAutopilotSoak = (options: PartyAutopilotSoakOptions): 
         errors.push(`final deck completion did not settle: ${completionState}`);
         break;
       }
+      const nativeOwnerOrdinal = completionLease.operation;
+      const finalIngestion = decidePartyDeckCompletion({
+        callbackDeck: sourceDeck,
+        event: {
+          channel: sourceDeck,
+          trackId: sourceId,
+          operation: completionLease.operation,
+          loadRevision: completionLease.loadRevision,
+          settledBy: completionSignal,
+          outcome: completionSignal === "source-onended" ? "on-time" : "recovered"
+        },
+        snapshot: {
+          channel: sourceDeck,
+          status: "ended",
+          trackId: sourceId,
+          completionIntent: "natural",
+          completionOperation: completionLease.operation,
+          completionLoadRevision: completionLease.loadRevision
+        },
+        partyLoad: {
+          trackId: sourceId,
+          trackOrdinal: ordinals.get(sourceId)!,
+          loadOrdinal: sourceLoad
+        },
+        masterDeck: sourceDeck,
+        autoPilotOwned: true,
+        traceRunning: true,
+        finalOwner: { deck: sourceDeck, trackId: sourceId, loadOrdinal: sourceLoad },
+        activeTransition: null,
+        armOwned: false,
+        preloadOwned: false
+      });
+      if (finalIngestion.kind !== "finish-final") {
+        errors.push(`final deck completion was not accepted by session ingestion: ${finalIngestion.kind}`);
+        break;
+      }
       append({
         type: "deck-ended",
         activeSecond: 0,
         deck: sourceDeck,
         trackOrdinal: ordinals.get(sourceId)!,
         loadOrdinal: sourceLoad,
+        nativeOwnerOrdinal,
         settledBy: completionSignal,
         outcome: completionSignal === "source-onended" ? "on-time" : "recovered"
       });

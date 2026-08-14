@@ -1,5 +1,5 @@
-export const PARTY_AUTOPILOT_TRACE_SCHEMA_VERSION = "party-autopilot-trace/v10" as const;
-export const PARTY_AUTOPILOT_EVALUATION_SCHEMA_VERSION = "party-autopilot-evaluation/v10" as const;
+export const PARTY_AUTOPILOT_TRACE_SCHEMA_VERSION = "party-autopilot-trace/v11" as const;
+export const PARTY_AUTOPILOT_EVALUATION_SCHEMA_VERSION = "party-autopilot-evaluation/v11" as const;
 
 export type PartyDeck = "a" | "b";
 export type PartyTrackOrdinal = number;
@@ -28,8 +28,8 @@ export type PartyAutopilotEvent = EventBase & (
   | Readonly<{ type: "coordinator-failed"; operation: number; phase: "decision" | "preload" | "arm" | "transition-watchdog"; pauseRequired: true }>
   | Readonly<{ type: "final-declared"; deck: PartyDeck; trackOrdinal: PartyTrackOrdinal; loadOrdinal: PartyLoadOrdinal }>
   | Readonly<{ type: "final-revoked" }>
-  | Readonly<{ type: "deck-ended"; deck: PartyDeck; trackOrdinal: PartyTrackOrdinal; loadOrdinal: PartyLoadOrdinal; settledBy: "source-onended" | "audio-clock" | "reconcile"; outcome: "on-time" | "recovered" | "late" }>
-  | Readonly<{ type: "deck-completion-failed"; deck: PartyDeck; trackOrdinal: PartyTrackOrdinal; loadOrdinal: PartyLoadOrdinal; settledBy: "source-onended"; reason: "premature"; pauseRequired: true }>
+  | Readonly<{ type: "deck-ended"; deck: PartyDeck; trackOrdinal: PartyTrackOrdinal; loadOrdinal: PartyLoadOrdinal; nativeOwnerOrdinal: number; settledBy: "source-onended" | "audio-clock" | "reconcile"; outcome: "on-time" | "recovered" | "late" }>
+  | Readonly<{ type: "deck-completion-failed"; deck: PartyDeck; trackOrdinal: PartyTrackOrdinal; loadOrdinal: PartyLoadOrdinal; nativeOwnerOrdinal: number; settledBy: "source-onended"; reason: "premature"; pauseRequired: true }>
   | Readonly<{ type: "session-ended"; reason: "final-track-ended" | "host-ended" }>
 );
 
@@ -187,15 +187,17 @@ const projectEvent = (event: PartyAutopilotEventInput, sequence: number): PartyA
       return Object.freeze({ ...base, type: event.type, deck: event.deck, trackOrdinal: event.trackOrdinal, loadOrdinal: event.loadOrdinal });
     case "deck-ended":
       if (!["a", "b"].includes(event.deck) || !isPositiveInteger(event.trackOrdinal) ||
-        !isPositiveInteger(event.loadOrdinal) || !["source-onended", "audio-clock", "reconcile"].includes(event.settledBy) ||
+        !isPositiveInteger(event.loadOrdinal) || !isPositiveInteger(event.nativeOwnerOrdinal) ||
+        !["source-onended", "audio-clock", "reconcile"].includes(event.settledBy) ||
         !["on-time", "recovered", "late"].includes(event.outcome) ||
         (event.settledBy === "source-onended") !== (["on-time", "late"].includes(event.outcome))) return null;
-      return Object.freeze({ ...base, type: event.type, deck: event.deck, trackOrdinal: event.trackOrdinal, loadOrdinal: event.loadOrdinal, settledBy: event.settledBy, outcome: event.outcome });
+      return Object.freeze({ ...base, type: event.type, deck: event.deck, trackOrdinal: event.trackOrdinal, loadOrdinal: event.loadOrdinal, nativeOwnerOrdinal: event.nativeOwnerOrdinal, settledBy: event.settledBy, outcome: event.outcome });
     case "deck-completion-failed":
       if (!["a", "b"].includes(event.deck) || !isPositiveInteger(event.trackOrdinal) ||
-        !isPositiveInteger(event.loadOrdinal) || event.settledBy !== "source-onended" ||
+        !isPositiveInteger(event.loadOrdinal) || !isPositiveInteger(event.nativeOwnerOrdinal) ||
+        event.settledBy !== "source-onended" ||
         event.reason !== "premature" || event.pauseRequired !== true) return null;
-      return Object.freeze({ ...base, type: event.type, deck: event.deck, trackOrdinal: event.trackOrdinal, loadOrdinal: event.loadOrdinal, settledBy: "source-onended", reason: "premature", pauseRequired: true });
+      return Object.freeze({ ...base, type: event.type, deck: event.deck, trackOrdinal: event.trackOrdinal, loadOrdinal: event.loadOrdinal, nativeOwnerOrdinal: event.nativeOwnerOrdinal, settledBy: "source-onended", reason: "premature", pauseRequired: true });
     case "session-ended":
       if (!["final-track-ended", "host-ended"].includes(event.reason)) return null;
       return Object.freeze({ ...base, type: event.type, reason: event.reason });
@@ -274,9 +276,11 @@ export const evaluatePartyAutopilotTrace = (trace: PartyAutopilotTrace): PartyAu
   let transitionCompletionRecoveryRequired = false;
   let coordinatorFailurePauseRequired = false;
   let deckCompletionPauseRequired = false;
+  let unexpectedDeckEndPauseRequired = false;
   let finalSessionEndRequired = false;
   const playedLoads = new Set<string>();
   const completedDeckLoads = new Set<string>();
+  const completedNativeDeckOwners = new Set<string>();
   const playedTracks = new Set<number>();
   const unplayableTracks = new Set<number>();
   const timedOutTracks = new Set<number>();
@@ -344,6 +348,11 @@ export const evaluatePartyAutopilotTrace = (trace: PartyAutopilotTrace): PartyAu
       failures.add("deck-completion-not-paused");
       deckCompletionPauseRequired = false;
     }
+    if (unexpectedDeckEndPauseRequired &&
+      !(event?.type === "session-paused" && event.reason === "source-stopped")) {
+      failures.add("deck-completion-not-paused");
+      unexpectedDeckEndPauseRequired = false;
+    }
     if (finalSessionEndRequired &&
       !(event?.type === "session-ended" && event.reason === "final-track-ended")) {
       failures.add("session-ended-without-final");
@@ -399,6 +408,9 @@ export const evaluatePartyAutopilotTrace = (trace: PartyAutopilotTrace): PartyAu
         if (event.reason === "deck-completion") {
           if (!deckCompletionPauseRequired) failures.add("deck-completion-not-paused");
           deckCompletionPauseRequired = false;
+        }
+        if (event.reason === "source-stopped" && unexpectedDeckEndPauseRequired) {
+          unexpectedDeckEndPauseRequired = false;
         }
         running = false;
         pauses += 1;
@@ -643,9 +655,15 @@ export const evaluatePartyAutopilotTrace = (trace: PartyAutopilotTrace): PartyAu
       case "deck-ended":
         if (!started || !running || ended) failures.add("invalid-session-lifecycle");
         if (!["a", "b"].includes(event.deck) || !isPositiveInteger(event.trackOrdinal) ||
-          !isPositiveInteger(event.loadOrdinal) || !["source-onended", "audio-clock", "reconcile"].includes(event.settledBy) ||
+          !isPositiveInteger(event.loadOrdinal) || !isPositiveInteger(event.nativeOwnerOrdinal) ||
+          !["source-onended", "audio-clock", "reconcile"].includes(event.settledBy) ||
           !["on-time", "recovered", "late"].includes(event.outcome) ||
           (event.settledBy === "source-onended") !== (["on-time", "late"].includes(event.outcome))) failures.add("malformed-event");
+        {
+          const nativeOwner = `${event.deck}:${event.nativeOwnerOrdinal}`;
+          if (completedNativeDeckOwners.has(nativeOwner)) failures.add("duplicate-deck-completion");
+          else completedNativeDeckOwners.add(nativeOwner);
+        }
         if (completedDeckLoads.has(loadKey(event.trackOrdinal, event.loadOrdinal))) {
           failures.add("duplicate-deck-completion");
         } else {
@@ -662,13 +680,23 @@ export const evaluatePartyAutopilotTrace = (trace: PartyAutopilotTrace): PartyAu
         else if (finalOwner) {
           matchingFinalEndObserved = true;
           finalSessionEndRequired = true;
-        }
+        } else unexpectedDeckEndPauseRequired = true;
         break;
       case "deck-completion-failed":
         if (!started || !running || ended || !["a", "b"].includes(event.deck) ||
           !isPositiveInteger(event.trackOrdinal) || !isPositiveInteger(event.loadOrdinal) ||
+          !isPositiveInteger(event.nativeOwnerOrdinal) ||
           event.settledBy !== "source-onended" || event.reason !== "premature" ||
           event.pauseRequired !== true) failures.add("malformed-event");
+        {
+          const partyOwner = loadKey(event.trackOrdinal, event.loadOrdinal);
+          const nativeOwner = `${event.deck}:${event.nativeOwnerOrdinal}`;
+          if (completedDeckLoads.has(partyOwner) || completedNativeDeckOwners.has(nativeOwner)) {
+            failures.add("duplicate-deck-completion");
+          }
+          completedDeckLoads.add(partyOwner);
+          completedNativeDeckOwners.add(nativeOwner);
+        }
         if ((!currentPlayedOwner || currentPlayedOwner.trackOrdinal !== event.trackOrdinal ||
           currentPlayedOwner.loadOrdinal !== event.loadOrdinal) &&
           (!activeTransition || ![
@@ -707,6 +735,7 @@ export const evaluatePartyAutopilotTrace = (trace: PartyAutopilotTrace): PartyAu
   if (transitionCompletionRecoveryRequired) failures.add("transition-completion-unresolved");
   if (coordinatorFailurePauseRequired) failures.add("coordinator-failure-not-paused");
   if (deckCompletionPauseRequired) failures.add("deck-completion-not-paused");
+  if (unexpectedDeckEndPauseRequired) failures.add("deck-completion-not-paused");
   if (finalSessionEndRequired) failures.add("session-ended-without-final");
   if (preloadTimeoutPauseRequired) failures.add("preload-timeout-not-paused");
   if (armFailurePauseRequired) failures.add("arm-failure-not-paused");

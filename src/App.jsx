@@ -26,6 +26,7 @@ import { mergeGeneratedAnalysis } from "./analysis/mergeAnalysis";
 import { planAutomaticTransition } from "./planning/TransitionPlanner";
 import { assessPartyReadiness } from "./planning/partyReadiness";
 import { decideRescueTransition } from "./planning/rescueTransition";
+import { decidePartyDeckCompletion } from "./planning/partyDeckCompletionIngestion";
 import { isTimingReviewCurrent, normalizeTimingReview } from "./domain/timingReview";
 import {
   analyzeEnhancedRhythm,
@@ -338,6 +339,8 @@ export default function App() {
   const partyCommittedPreloadByDeckRef = useRef({ a: null, b: null });
   const partyTrackOrdinalCounterRef = useRef(0);
   const partyLoadOrdinalCounterRef = useRef(0);
+  const partyNativeCompletionOrdinalsRef = useRef(new Map());
+  const partyNativeCompletionOrdinalCounterRef = useRef(0);
   const partyPreloadOperationRef = useRef(0);
   const partyAutopilotTickBoundaryRef = useRef(createPartyAutopilotTickBoundary());
   const partyAutopilotLastObservedNowRef = useRef(0);
@@ -933,8 +936,14 @@ export default function App() {
               ? "Mazzy could not confirm the automatic song change after an unexpected local error. New playback is locked. Use Stop All Sound before continuing; use system/device mute if sound remains."
             : reason === "deck-completion-transition"
               ? "A deck stopped before Mazzy could verify the automatic song change. New playback is locked. Use Stop All Sound before continuing; use system/device mute if sound remains."
+            : reason === "deck-completion-owner-unobservable"
+              ? "Mazzy could not verify which deck playback ended. Autopilot is paused and new playback is locked. Use Stop All Sound; use system/device mute if sound remains."
             : reason === "deck-completion-failure"
               ? "The current song stopped before Mazzy could verify its audio-clock ending. Autopilot is paused. Choose and play a song before starting Autopilot again."
+            : reason === "unexpected-source-ended"
+              ? "The current song ended before Mazzy started the next one. Autopilot is paused, and no new song was started."
+            : reason === "deck-completion-conflict"
+              ? "A song ended while Mazzy still had another automatic operation open. Autopilot is paused so the host can check the decks before continuing."
             : reason === "preload-cleanup-uncertain"
               ? "Mazzy paused automatic planning but could not confirm that the next-song load stopped. New playback is locked. Use Stop All Sound before continuing; use system/device mute if sound remains."
             : reason === "coordinator-failure"
@@ -1148,6 +1157,15 @@ export default function App() {
     return identity;
   };
 
+  const partyNativeCompletionOrdinal = (deck, operation, loadRevision) => {
+    const key = `${deck}:${operation}:${loadRevision}`;
+    const existing = partyNativeCompletionOrdinalsRef.current.get(key);
+    if (existing) return existing;
+    const next = ++partyNativeCompletionOrdinalCounterRef.current;
+    partyNativeCompletionOrdinalsRef.current.set(key, next);
+    return next;
+  };
+
   const updatePartyDiagnosticEvaluation = () => {
     const recorder = partyTraceRecorderRef.current;
     if (!recorder) return;
@@ -1170,6 +1188,8 @@ export default function App() {
     if (!partyDiagnosticEnabled) return;
     if (!partyTraceRecorderRef.current) {
       partyTraceRecorderRef.current = createPartyAutopilotTraceRecorder();
+      partyNativeCompletionOrdinalsRef.current = new Map();
+      partyNativeCompletionOrdinalCounterRef.current = 0;
       partyTraceRunningRef.current = true;
       recordPartyEvent({ type: "session-started" });
       const sourceSnapshot = (sourceDeck === "a" ? deckARef : deckBRef).current?.getDeckSnapshot?.();
@@ -1703,17 +1723,34 @@ export default function App() {
       !Number.isSafeInteger(event?.loadRevision) || event.loadRevision < 1 ||
       !["source-onended", "audio-clock", "reconcile"].includes(event?.settledBy) ||
       !["on-time", "recovered", "late", "premature"].includes(event?.outcome)) return;
-    if ((event.outcome === "premature" && event.settledBy !== "source-onended") ||
+    if (event?.channel !== deck ||
+      (event.outcome === "premature" && event.settledBy !== "source-onended") ||
       (event.outcome === "on-time" && event.settledBy !== "source-onended") ||
       (event.outcome === "late" && event.settledBy !== "source-onended") ||
       (event.outcome === "recovered" && event.settledBy === "source-onended")) return;
     const endedIdentity = partyLoadByDeckRef.current[deck];
-    if (endedIdentity?.trackId !== trackId) return;
+    const deckRef = deck === "a" ? deckARef : deckBRef;
+    let completionSnapshot = null;
+    try { completionSnapshot = deckRef.current?.getDeckSnapshot?.() ?? null; } catch { /* Fail closed below when session authority exists. */ }
+    const activeTransition = activeTransitionScheduleRef.current;
+    const decision = decidePartyDeckCompletion({
+      callbackDeck: deck,
+      event,
+      snapshot: completionSnapshot,
+      partyLoad: endedIdentity,
+      masterDeck,
+      autoPilotOwned: autoPilotEnabledRef.current,
+      traceRunning: partyTraceRunningRef.current,
+      finalOwner: finalTrackRef.current,
+      activeTransition: activeTransition
+        ? { source: activeTransition.source, target: activeTransition.target }
+        : null,
+      armOwned: transitionArmLeaseRef.current != null,
+      preloadOwned: autoPilotPreloadLeaseRef.current != null
+    });
+    if (decision.kind === "ignore-stale") return;
 
-    if (event.outcome === "premature") {
-      const activeTransition = activeTransitionScheduleRef.current;
-      if (!autoPilotEnabledRef.current && !partyTraceRunningRef.current &&
-        !finalTrackRef.current && !activeTransition) return;
+    if (decision.kind === "pause-premature") {
       const traceWasRunning = partyTraceRunningRef.current;
       advancePartyAutopilotCoordinatorEpoch();
       autoPilotEnabledRef.current = false;
@@ -1739,6 +1776,7 @@ export default function App() {
           deck,
           trackOrdinal: endedIdentity.trackOrdinal,
           loadOrdinal: endedIdentity.loadOrdinal,
+          nativeOwnerOrdinal: partyNativeCompletionOrdinal(deck, event.operation, event.loadRevision),
           settledBy: "source-onended",
           reason: "premature",
           pauseRequired: true
@@ -1770,33 +1808,92 @@ export default function App() {
       return;
     }
 
-    if (partyTraceRunningRef.current && ["recovered", "on-time", "late"].includes(event.outcome)) {
+    if (decision.kind === "finish-final") {
+      if (partyTraceRunningRef.current) {
+        recordPartyEvent({
+          type: "deck-ended",
+          deck,
+          trackOrdinal: endedIdentity.trackOrdinal,
+          loadOrdinal: endedIdentity.loadOrdinal,
+          nativeOwnerOrdinal: partyNativeCompletionOrdinal(deck, event.operation, event.loadRevision),
+          settledBy: event.settledBy,
+          outcome: event.outcome
+        });
+      }
+      advancePartyAutopilotCoordinatorEpoch();
+      autoPilotEnabledRef.current = false;
+      finalTrackRef.current = null;
+      pausePartyClockFailClosed();
+      setAutoPilotEnabled(false);
+      setPartyEndingFinalTrack(false);
+      setAutoPilotChoice(null);
+      recordPartyEvent({ type: "session-ended", reason: "final-track-ended" });
+      partyTraceRunningRef.current = false;
+      try { void partyWakeLockRef.current?.release?.(); } catch { /* Terminal authority is already revoked. */ }
+      void clearOwnedPartyCheckpoint("cleared", { terminalOnFailure: true }).then((cleared) => {
+        showToast(cleared
+          ? "Party finished · no unplayed tracks remain"
+          : "Party finished · saved recovery still needs attention");
+      });
+      return;
+    }
+
+    const traceWasRunning = partyTraceRunningRef.current;
+    advancePartyAutopilotCoordinatorEpoch();
+    autoPilotEnabledRef.current = false;
+    const preloadCleanup = settleAutoPilotPreloadForPause("superseded");
+    let cleanupConfirmed = preloadCleanup.cleanupConfirmed;
+    try {
+      if (transitionArmLeaseRef.current && !cancelCurrentTransitionArm()) cleanupConfirmed = false;
+    } catch { cleanupConfirmed = false; }
+    if (activeTransition) {
+      const cancelCompletion = transitionCompletionCancelRef.current;
+      transitionCompletionCancelRef.current = null;
+      try { cancelCompletion?.(); } catch { cleanupConfirmed = false; }
+      transitionCompletionUncertainRef.current = true;
+      setTransitionCompletionUncertain(true);
+    }
+    if (finalTrackRef.current) {
+      finalTrackRef.current = null;
+      if (traceWasRunning) recordPartyEvent({ type: "final-revoked" });
+    }
+    if (decision.kind === "pause-unexpected-source" && traceWasRunning) {
       recordPartyEvent({
         type: "deck-ended",
         deck,
         trackOrdinal: endedIdentity.trackOrdinal,
         loadOrdinal: endedIdentity.loadOrdinal,
+        nativeOwnerOrdinal: partyNativeCompletionOrdinal(deck, event.operation, event.loadRevision),
         settledBy: event.settledBy,
         outcome: event.outcome
       });
+    } else if (partyTraceRecorderRef.current) {
+      partyTraceRecorderRef.current.markInterrupted();
+      updatePartyDiagnosticEvaluation();
     }
-    if (finalTrackRef.current?.deck !== deck || finalTrackRef.current?.trackId !== trackId ||
-      finalTrackRef.current?.loadOrdinal !== endedIdentity?.loadOrdinal) return;
-    advancePartyAutopilotCoordinatorEpoch();
-    autoPilotEnabledRef.current = false;
-    finalTrackRef.current = null;
-    pausePartyClockFailClosed();
     setAutoPilotEnabled(false);
     setPartyEndingFinalTrack(false);
     setAutoPilotChoice(null);
-    recordPartyEvent({ type: "session-ended", reason: "final-track-ended" });
-    partyTraceRunningRef.current = false;
-    try { void partyWakeLockRef.current?.release?.(); } catch { /* Terminal authority is already revoked. */ }
-    void clearOwnedPartyCheckpoint("cleared", { terminalOnFailure: true }).then((cleared) => {
-      showToast(cleared
-        ? "Party finished · no unplayed tracks remain"
-        : "Party finished · saved recovery still needs attention");
-    });
+    partyCheckpointPauseReasonRef.current = "safety";
+    const completionOwnerUnobservable = decision.reason === "owner-unobservable";
+    if (!cleanupConfirmed || activeTransition || completionOwnerUnobservable) {
+      transitionCompletionUncertainRef.current = true;
+      setTransitionCompletionUncertain(true);
+      refreshPlaybackRecoveryLock();
+    }
+    pausePartyClockFailClosed();
+    if (decision.kind === "pause-unexpected-source") pausePartyDiagnostic("source-stopped");
+    else if (partyTraceRunningRef.current) pausePartyDiagnostic("deck-completion");
+    try { void partyWakeLockRef.current?.release?.(); } catch { /* Session authority is already revoked. */ }
+    showAutoPilotArmIntervention(!cleanupConfirmed
+      ? "preload-cleanup-uncertain"
+      : completionOwnerUnobservable
+        ? "deck-completion-owner-unobservable"
+      : activeTransition || decision.kind === "lock-transition"
+        ? "deck-completion-transition"
+        : decision.kind === "pause-unexpected-source"
+          ? "unexpected-source-ended"
+          : "deck-completion-conflict");
   };
 
   const onAnalysisDetected = (trackId, result) => {
@@ -3838,6 +3935,8 @@ export default function App() {
     partyCommittedPreloadByDeckRef.current = { a: null, b: null };
     partyTrackOrdinalCounterRef.current = 0;
     partyLoadOrdinalCounterRef.current = 0;
+    partyNativeCompletionOrdinalsRef.current = new Map();
+    partyNativeCompletionOrdinalCounterRef.current = 0;
     partyPreloadOperationRef.current = 0;
     partyQueueRevisionRef.current = 0;
     partyPlayedLoadsRef.current = new Set();
@@ -4278,12 +4377,14 @@ export default function App() {
             <p>{autoPilotIntervention.message}</p>
             <p>{transitionCompletionUncertain
               ? "Use Stop All Sound before continuing. New playback stays locked until Mazzy confirms every sound owner is inactive."
+              : autoPilotIntervention.reason === "unexpected-source-ended"
+                ? "Choose and play a song below, then start Autopilot again."
               : "Retry Autopilot, or choose another song below and use More → Load on the idle deck."}</p>
             <div>
               <button type="button" disabled={transitionCompletionUncertain} onClick={() => {
                 document.querySelector(".library-section")?.scrollIntoView?.({ behavior: "smooth", block: "start" });
                 window.requestAnimationFrame(() => document.querySelector(".library-row button:not([disabled])")?.focus?.());
-              }}>CHOOSE ANOTHER SONG</button>
+              }}>{autoPilotIntervention.reason === "unexpected-source-ended" ? "CHOOSE A SONG" : "CHOOSE ANOTHER SONG"}</button>
               <button
                 type="button"
                 disabled={partySoundStopLocked || transitionCompletionUncertain || !!audioRecoveryState || outputDeviceChanged || !sourcePartyReady || !sourcePartyPlaying}

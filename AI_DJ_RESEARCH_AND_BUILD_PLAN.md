@@ -2412,6 +2412,33 @@ These are the active backlog, not reasons to discard the prototype.
   evidence only: it adds no persisted schema, filename, track metadata, audio,
   wall-clock value, network path, or browser-cancellation claim.
 
+- **D-066 — Bind native deck completion to exact Party-session ownership:**
+  `party-deck-completion-ingestion/v1` accepts a Deck completion only when the
+  callback deck/channel, current native operation and load revision, natural
+  intent, settled Deck status, current track, and Party load identity all
+  agree. A duplicate or stale same-track callback from a prior replay/reload is
+  inert. Exact final ownership remains the only automatic terminal path.
+
+  An exact non-final master ending is now a synchronous Party pause boundary,
+  not a fact left for the next 500 ms coordinator poll. The handler first
+  revokes the coordinator and Autopilot authority, settles any exact preload,
+  cancels exact arm ownership, then pauses the Party clock/diagnostic, releases
+  the wake request, and focuses a persistent recovery card that truthfully says
+  no new song was started. A completion from either deck while a transition is
+  active revokes completion callbacks and enters the existing Rescue/Stop
+  recovery lock; it is never recorded as an ordinary current-song ending.
+
+  `party-autopilot-trace/v11` adds only a positive recorder-local ordinal for
+  each exact native owner to deck completion events; raw DeckEngine counters
+  never enter the trace. It rejects duplicate
+  native owners and requires each non-final natural ending to be followed
+  immediately by `session-paused: source-stopped`. The v11 coordinator soak
+  injects an exact non-final source completion through the shared ingestion
+  helper and proves the paused trace remains valid. This is deterministic
+  ownership/state evidence only. It adds no persisted schema, filename, track
+  metadata, raw audio time, error text, network path, or promise of gapless
+  automatic fallback playback.
+
 ### Open questions
 
 - **Q-001:** Remain browser/PWA-first through launch, or package a desktop app
