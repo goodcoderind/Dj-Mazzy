@@ -10,8 +10,14 @@ import { createPartySessionClock, partySessionClockSnapshot, pausePartySessionCl
 import type { TransitionTrack } from "../planning/TransitionPlanner";
 import type { KeyLockCapability } from "../domain/keyLockCapability";
 import { createPartyAutopilotTraceRecorder, evaluatePartyAutopilotTrace, type PartyAutopilotEvaluation } from "./partyAutopilotTrace";
+import {
+  createAutoPilotArmLease,
+  decideAutoPilotArmFailure,
+  deriveAutoPilotArmDeadline,
+  inspectAutoPilotArmLease
+} from "../planning/autoPilotArmOwnership";
 
-export const PARTY_AUTOPILOT_SOAK_SCHEMA_VERSION = "party-autopilot-coordinator-soak/v5" as const;
+export const PARTY_AUTOPILOT_SOAK_SCHEMA_VERSION = "party-autopilot-coordinator-soak/v6" as const;
 
 export type SimulatedPartyTrack = Readonly<{
   id: string;
@@ -45,6 +51,12 @@ export type PartyAutopilotSoakOptions = Readonly<{
   unplayableTrackIds?: readonly string[];
   /** Synthetic preloads that never settle until the production lease expires. */
   neverSettlingPreloadTrackIds?: readonly string[];
+  /** Ordered synthetic arm outcomes. Unspecified attempts schedule successfully. */
+  armOutcomes?: readonly ("failed" | "timed-out" | "scheduled")[];
+  /** Synthetic audio-clock settlement delays for the matching arm attempt. */
+  armSettlementDelaysSeconds?: readonly number[];
+  /** Synthetic pair replacements before settlement, consumed by attempt ordinal. */
+  supersededArmAttempts?: readonly number[];
 }>;
 
 export type SimulatedPartyRescueEvent = Readonly<{
@@ -56,7 +68,7 @@ export type SimulatedPartyRescueEvent = Readonly<{
 export type PartyAutopilotSoakResult = Readonly<{
   schemaVersion: typeof PARTY_AUTOPILOT_SOAK_SCHEMA_VERSION;
   completed: boolean;
-  stopReason: "observation-horizon" | "crate-exhausted" | "rescue-paused" | "preload-timeout-paused" | "preload-runway-paused" | "invalid";
+  stopReason: "observation-horizon" | "crate-exhausted" | "rescue-paused" | "preload-timeout-paused" | "preload-runway-paused" | "transition-arm-paused" | "invalid";
   evidenceScope: "shared Autopilot coordinator and state invariants only; not audio continuity, musical quality, decode, or speaker output";
   observationHorizonSeconds: number;
   elapsedActiveSeconds: number;
@@ -96,6 +108,23 @@ const validate = (options: PartyAutopilotSoakOptions) => {
     if (!Number.isFinite(rescue.progress) || rescue.progress < 0 || rescue.progress > 1) {
       throw new RangeError("rescue progress must be from 0 to 1");
     }
+  }
+  for (const outcome of options.armOutcomes ?? []) {
+    if (!["failed", "timed-out", "scheduled"].includes(outcome)) {
+      throw new RangeError("armOutcomes must contain only allowlisted outcomes");
+    }
+  }
+  for (const delay of options.armSettlementDelaysSeconds ?? []) {
+    if (!Number.isFinite(delay) || delay < 0) {
+      throw new RangeError("armSettlementDelaysSeconds must be finite and non-negative");
+    }
+  }
+  const supersededAttempts = new Set<number>();
+  for (const attempt of options.supersededArmAttempts ?? []) {
+    if (!Number.isSafeInteger(attempt) || attempt < 1 || supersededAttempts.has(attempt)) {
+      throw new RangeError("supersededArmAttempts must contain unique positive integers");
+    }
+    supersededAttempts.add(attempt);
   }
   return { start, initial };
 };
@@ -158,11 +187,14 @@ export const simulatePartyAutopilotSoak = (options: PartyAutopilotSoakOptions): 
   let nextLoad = 1;
   let nextOperation = 0;
   let nextTransition = 0;
+  let armAttempts = 0;
+  let consecutiveArmFailures = 0;
   let activeTransitionKey: string | null = null;
   let preloadLease: AutoPilotPreloadLease | null = null;
   const unavailableTrackIds = new Set<string>();
   const syntheticUnplayableIds = new Set(options.unplayableTrackIds ?? []);
   const syntheticNeverSettlingIds = new Set(options.neverSettlingPreloadTrackIds ?? []);
+  const syntheticSupersededArmAttempts = new Set(options.supersededArmAttempts ?? []);
   let consecutivePreloadTimeouts = 0;
   let stopReason: PartyAutopilotSoakResult["stopReason"] = "invalid";
 
@@ -309,9 +341,68 @@ export const simulatePartyAutopilotSoak = (options: PartyAutopilotSoakOptions): 
         break;
       }
       const operation = ++nextOperation;
-      const transition = ++nextTransition;
+      armAttempts += 1;
       append({ type: "arm-started", activeSecond: 0, operation, origin: "autopilot" });
-      append({ type: "arm-settled", activeSecond: 0, operation, outcome: "scheduled" });
+      const minimumArmLeadSeconds = decision.plan.template === "downbeat-cut" ? 0.12 : 0.08;
+      const deadline = deriveAutoPilotArmDeadline({
+        nowSeconds: now,
+        scheduledStartSeconds: decision.plan.schedule.startTime,
+        minimumArmLeadSeconds
+      });
+      const sourceLoadKey = `${ordinals.get(sourceId)}:${sourceLoad}`;
+      const targetLoadKey = `${ordinals.get(targetId)}:${targetLoad}`;
+      const armLease = deadline == null ? null : createAutoPilotArmLease({
+        operation,
+        generation: operation,
+        transitionKey: `${sourceLoadKey}->${targetLoadKey}`,
+        sourceDeck,
+        targetDeck,
+        sourceTrackId: sourceId,
+        targetTrackId: targetId,
+        sourceLoadKey,
+        targetLoadKey,
+        startedAtSeconds: now,
+        deadlineSeconds: deadline
+      });
+      const requestedArmOutcome = options.armOutcomes?.[armAttempts - 1] ?? "scheduled";
+      const settlementDelay = requestedArmOutcome === "timed-out" && deadline != null
+        ? Math.max(0, deadline - now)
+        : Math.max(0, options.armSettlementDelaysSeconds?.[armAttempts - 1] ?? 0);
+      if (settlementDelay) advance(settlementDelay);
+      const leaseState = armLease ? inspectAutoPilotArmLease({
+        current: armLease,
+        expected: armLease,
+        nowSeconds: now,
+        pair: {
+          sourceDeck,
+          targetDeck,
+          sourceTrackId: sourceId,
+          targetTrackId: targetId,
+          sourceLoadKey,
+          targetLoadKey: syntheticSupersededArmAttempts.delete(armAttempts) ? `${targetLoadKey}:replacement` : targetLoadKey
+        }
+      }) : "expired";
+      if (leaseState === "superseded") {
+        append({ type: "arm-settled", activeSecond: 0, operation, outcome: "cancelled", pauseRequired: false });
+        continue;
+      }
+      const armOutcome = leaseState === "expired" ? "timed-out" : requestedArmOutcome;
+      if (armOutcome !== "scheduled") {
+        consecutiveArmFailures += 1;
+        const sourceRemainingSeconds = Math.max(0, (source.durationSeconds - sourcePosition) / sourcePlaybackRate);
+        const pauseRequired = decideAutoPilotArmFailure({ consecutiveFailures: consecutiveArmFailures, sourceRemainingSeconds }) === "pause";
+        append({ type: "arm-settled", activeSecond: 0, operation, outcome: armOutcome, pauseRequired });
+        if (pauseRequired) {
+          append({ type: "session-paused", activeSecond: 0, reason: "transition-arm" });
+          clock = pausePartySessionClock(clock, now);
+          stopReason = "transition-arm-paused";
+          break;
+        }
+        continue;
+      }
+      consecutiveArmFailures = 0;
+      const transition = ++nextTransition;
+      append({ type: "arm-settled", activeSecond: 0, operation, outcome: "scheduled", pauseRequired: false });
       append({ type: "transition-scheduled", activeSecond: 0, transition, sourceTrackOrdinal: ordinals.get(sourceId)!, sourceLoadOrdinal: sourceLoad, targetTrackOrdinal: ordinals.get(targetId)!, targetLoadOrdinal: targetLoad, ownership: "autopilot", template: decision.plan.template as keyof typeof transitionTemplates });
       transitionTemplates[decision.plan.template as keyof typeof transitionTemplates] += 1;
       activeTransitionKey = decision.transitionKey;
@@ -388,7 +479,7 @@ export const simulatePartyAutopilotSoak = (options: PartyAutopilotSoakOptions): 
     elapsedActiveSeconds: clockSnapshot().elapsedActiveSeconds,
     playedTrackIds: Object.freeze(playedTrackIds),
     repeatTrackIds: Object.freeze(repeatTrackIds),
-    transitionAttempts: nextTransition,
+    transitionAttempts: armAttempts,
     successfulHandoffs: evaluation.counters.transitionsCompleted,
     rescueEvents: Object.freeze(rescueEvents),
     transitionTemplates: Object.freeze(transitionTemplates),

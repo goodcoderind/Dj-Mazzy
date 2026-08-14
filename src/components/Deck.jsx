@@ -233,7 +233,7 @@ const Deck = forwardRef(function Deck(
 
   const getCurrentTime = () => deckEngine.getPosition();
 
-  const play = async (offset = null, when = null, notifyMaster = true) => {
+  const play = async (offset = null, when = null, notifyMaster = true, startAuthority = null) => {
     if (playbackStartLocked || playbackStartLockRef?.current) return false;
     try {
       await ensureGraphReady();
@@ -241,13 +241,14 @@ const Deck = forwardRef(function Deck(
       onAudioStartError?.(getAudioEngine().context.state);
       return false;
     }
-    if (playbackStartLockRef?.current) return false;
+    if (playbackStartLockRef?.current || (startAuthority && !startAuthority())) return false;
     if (!deckEngine.isReady()) {
       return false;
     }
 
     const statusBeforePlay = deckEngine.getSnapshot().status;
     const startAt = when == null ? getAudioEngine().clock.now() : when;
+    if (startAuthority && !startAuthority()) return false;
     deckEngine.play(offset ?? undefined, startAt);
     if (when == null) {
       if (notifyMaster) {
@@ -924,7 +925,7 @@ const Deck = forwardRef(function Deck(
       getTransportAnchorTime: () => deckEngine.getTransportAnchorTime(),
       getCurrentBpm: () => (originalBpm ? Math.round(originalBpm * tempo * 10) / 10 : null),
       play: async () => play(),
-      playAt: async (startTime, offset = 0) => play(offset, startTime, false),
+      playAt: async (startTime, offset = 0, startAuthority = null) => play(offset, startTime, false, startAuthority),
       loadTrack: async (file, trackId = null, knownAnalysis = null, options = undefined) =>
         loadFileToDeck(file, trackId, knownAnalysis, options),
       getTrackId: () => deckEngine.getSnapshot().trackId,
@@ -935,6 +936,13 @@ const Deck = forwardRef(function Deck(
         trimDb: deckEngine.getTrackTrimDb(),
         eqDb: deckEngine.getEqSnapshot(),
         filterCutoffHz: deckEngine.getFilterCutoff()
+      }),
+      getOwnedArmAudioHandle: () => Object.freeze({
+        getTrackId: () => deckEngine.getSnapshot().trackId,
+        setGain: (value) => getAudioEngine().setDeckGain(channel, value),
+        setEqBandGain: (band, db) => deckEngine.setEqBandGain(band, db),
+        setFilterCutoff: (hz) => deckEngine.setFilterCutoff(hz),
+        pause: () => deckEngine.pause()
       }),
       getDecodedBufferForRehearsal: () => deckEngine.getDecodedBufferForRehearsal(),
       pause: () => pause(),

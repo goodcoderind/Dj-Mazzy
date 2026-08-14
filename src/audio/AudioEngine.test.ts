@@ -337,6 +337,38 @@ describe("AudioEngine", () => {
     completionSource.onended?.();
     expect(completed).toBe(false);
   });
+
+  it("does not mutate gain automation when crossfade authority has expired", () => {
+    const { engine } = createEngine();
+    const beforeA = engine.getDeckInput("a") as unknown as FakeGainNode;
+    const beforeB = engine.getDeckInput("b") as unknown as FakeGainNode;
+    const eventsA = beforeA.gain.events.length;
+    const eventsB = beforeB.gain.events.length;
+    expect(() => engine.scheduleCrossfade("a", "b", 11, 2, undefined, () => false))
+      .toThrow("authority expired");
+    expect(beforeA.gain.events).toHaveLength(eventsA);
+    expect(beforeB.gain.events).toHaveLength(eventsB);
+    expect(engine.getActiveCrossfade()).toBeNull();
+  });
+
+  it("owns a cancellable audio-clock deadline without connecting audible output", () => {
+    const { context, engine } = createEngine();
+    let deadlines = 0;
+    const cancel = engine.onAudioClockDeadline(12, () => { deadlines += 1; });
+    const sentinel = context.oscillators.at(-1)!;
+    expect(sentinel.startCalls).toEqual([12]);
+    expect(sentinel.connections).toEqual([]);
+    sentinel.onended?.();
+    sentinel.onended?.();
+    expect(deadlines).toBe(1);
+    cancel();
+
+    const cancelSecond = engine.onAudioClockDeadline(13, () => { deadlines += 1; });
+    const second = context.oscillators.at(-1)!;
+    cancelSecond();
+    second.onended?.();
+    expect(deadlines).toBe(1);
+  });
 });
 
 describe("DeckEngine", () => {

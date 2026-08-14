@@ -21,14 +21,14 @@ const happyTerminalEvents: readonly PartyAutopilotEventInput[] = [
   { type: "preload-settled", activeSecond: 4, operation: 1, outcome: "committed" },
   { type: "queue-committed", activeSecond: 4, revision: 2, trackOrdinals: [3] },
   { type: "arm-started", activeSecond: 199, operation: 1, origin: "autopilot" },
-  { type: "arm-settled", activeSecond: 200, operation: 1, outcome: "scheduled" },
+  { type: "arm-settled", activeSecond: 200, operation: 1, outcome: "scheduled", pauseRequired: false },
   { type: "transition-scheduled", activeSecond: 200, transition: 1, sourceTrackOrdinal: 1, sourceLoadOrdinal: 1, targetTrackOrdinal: 2, targetLoadOrdinal: 2, ownership: "autopilot", template: "safe-fade" },
   { type: "transition-completed", activeSecond: 204, transition: 1, targetTrackOrdinal: 2, targetLoadOrdinal: 2 },
   { type: "preload-started", activeSecond: 206, operation: 2, generation: 2, deck: "a", trackOrdinal: 3, loadOrdinal: 3, selectionSource: "queue" },
   { type: "preload-settled", activeSecond: 208, operation: 2, outcome: "committed" },
   { type: "queue-committed", activeSecond: 208, revision: 3, trackOrdinals: [] },
   { type: "arm-started", activeSecond: 409, operation: 2, origin: "autopilot" },
-  { type: "arm-settled", activeSecond: 410, operation: 2, outcome: "scheduled" },
+  { type: "arm-settled", activeSecond: 410, operation: 2, outcome: "scheduled", pauseRequired: false },
   { type: "transition-scheduled", activeSecond: 410, transition: 2, sourceTrackOrdinal: 2, sourceLoadOrdinal: 2, targetTrackOrdinal: 3, targetLoadOrdinal: 3, ownership: "autopilot", template: "downbeat-cut" },
   { type: "transition-completed", activeSecond: 411, transition: 2, targetTrackOrdinal: 3, targetLoadOrdinal: 3 },
   { type: "final-declared", activeSecond: 412, deck: "a", trackOrdinal: 3, loadOrdinal: 3 },
@@ -45,6 +45,8 @@ describe("Party Autopilot trace", () => {
       playedTracks: 3,
       preloadsCommitted: 2,
       preloadsTimedOut: 0,
+      armFailures: 0,
+      armTimeouts: 0,
       transitionsCompleted: 2,
       transitionsRescued: 0,
       pauses: 0
@@ -79,7 +81,7 @@ describe("Party Autopilot trace", () => {
       { type: "session-started", activeSecond: 0 },
       { type: "track-played", activeSecond: 0, trackOrdinal: 1, loadOrdinal: 1, cause: "host" },
       { type: "arm-started", activeSecond: 2, operation: 1, origin: "autopilot" },
-      { type: "arm-settled", activeSecond: 2, operation: 2, outcome: "cancelled" }
+      { type: "arm-settled", activeSecond: 2, operation: 2, outcome: "cancelled", pauseRequired: false }
     ]);
     expect(evaluatePartyAutopilotTrace(wrongArm).failureCodes).toContain("arm-owner-mismatch");
 
@@ -91,13 +93,45 @@ describe("Party Autopilot trace", () => {
     expect(evaluatePartyAutopilotTrace(transitionWithoutArm).failureCodes).toContain("arm-owner-mismatch");
   });
 
+  it("allows one Autopilot arm retry and requires an owned pause after the second failure", () => {
+    const valid = evaluatePartyAutopilotTrace(record([
+      { type: "session-started", activeSecond: 0 },
+      { type: "track-played", activeSecond: 0, trackOrdinal: 1, loadOrdinal: 1, cause: "host" },
+      { type: "arm-started", activeSecond: 1, operation: 1, origin: "autopilot" },
+      { type: "arm-settled", activeSecond: 1, operation: 1, outcome: "failed", pauseRequired: false },
+      { type: "arm-started", activeSecond: 2, operation: 2, origin: "autopilot" },
+      { type: "arm-settled", activeSecond: 2, operation: 2, outcome: "timed-out", pauseRequired: true },
+      { type: "session-paused", activeSecond: 2, reason: "transition-arm" }
+    ]));
+    expect(valid.status).toBe("valid-in-progress");
+    expect(valid.counters).toMatchObject({ armFailures: 2, armTimeouts: 1, pauses: 1 });
+
+    const missingPause = evaluatePartyAutopilotTrace(record([
+      { type: "session-started", activeSecond: 0 },
+      { type: "track-played", activeSecond: 0, trackOrdinal: 1, loadOrdinal: 1, cause: "host" },
+      { type: "arm-started", activeSecond: 1, operation: 1, origin: "autopilot" },
+      { type: "arm-settled", activeSecond: 1, operation: 1, outcome: "failed", pauseRequired: false },
+      { type: "arm-started", activeSecond: 2, operation: 2, origin: "autopilot" },
+      { type: "arm-settled", activeSecond: 2, operation: 2, outcome: "failed", pauseRequired: false }
+    ]));
+    expect(missingPause.failureCodes).toContain("arm-failure-not-paused");
+
+    const hostCannotOwnPolicyPause = evaluatePartyAutopilotTrace(record([
+      { type: "session-started", activeSecond: 0 },
+      { type: "track-played", activeSecond: 0, trackOrdinal: 1, loadOrdinal: 1, cause: "host" },
+      { type: "arm-started", activeSecond: 1, operation: 1, origin: "host" },
+      { type: "arm-settled", activeSecond: 1, operation: 1, outcome: "failed", pauseRequired: true }
+    ]));
+    expect(hostCannotOwnPolicyPause.failureCodes).toContain("unexpected-arm-failure-pause");
+  });
+
   it("rejects repeated tracks and mismatched transition completion", () => {
     const trace = record([
       { type: "session-started", activeSecond: 0 },
       { type: "track-played", activeSecond: 0, trackOrdinal: 1, loadOrdinal: 1, cause: "host" },
       { type: "track-played", activeSecond: 1, trackOrdinal: 1, loadOrdinal: 2, cause: "host" },
       { type: "arm-started", activeSecond: 1, operation: 1, origin: "host" },
-      { type: "arm-settled", activeSecond: 2, operation: 1, outcome: "scheduled" },
+      { type: "arm-settled", activeSecond: 2, operation: 1, outcome: "scheduled", pauseRequired: false },
       { type: "transition-scheduled", activeSecond: 2, transition: 1, sourceTrackOrdinal: 1, sourceLoadOrdinal: 1, targetTrackOrdinal: 2, targetLoadOrdinal: 3, ownership: "host", template: "safe-fade" },
       { type: "transition-completed", activeSecond: 3, transition: 1, targetTrackOrdinal: 3, targetLoadOrdinal: 4 }
     ]);
@@ -112,7 +146,7 @@ describe("Party Autopilot trace", () => {
       { type: "session-started", activeSecond: 0 },
       { type: "track-played", activeSecond: 0, trackOrdinal: 1, loadOrdinal: 1, cause: "host" },
       { type: "arm-started", activeSecond: 9, operation: 1, origin: "host" },
-      { type: "arm-settled", activeSecond: 10, operation: 1, outcome: "scheduled" },
+      { type: "arm-settled", activeSecond: 10, operation: 1, outcome: "scheduled", pauseRequired: false },
       { type: "transition-scheduled", activeSecond: 10, transition: 1, sourceTrackOrdinal: 1, sourceLoadOrdinal: 1, targetTrackOrdinal: 2, targetLoadOrdinal: 2, ownership: "host", template: "safe-fade" },
       { type: "transition-rescued", activeSecond: 11, transition: 1, kept: "source" },
       { type: "session-paused", activeSecond: 11, reason: "rescue" }
@@ -121,7 +155,7 @@ describe("Party Autopilot trace", () => {
       { type: "session-started", activeSecond: 0 },
       { type: "track-played", activeSecond: 0, trackOrdinal: 1, loadOrdinal: 1, cause: "host" },
       { type: "arm-started", activeSecond: 9, operation: 1, origin: "host" },
-      { type: "arm-settled", activeSecond: 10, operation: 1, outcome: "scheduled" },
+      { type: "arm-settled", activeSecond: 10, operation: 1, outcome: "scheduled", pauseRequired: false },
       { type: "transition-scheduled", activeSecond: 10, transition: 1, sourceTrackOrdinal: 1, sourceLoadOrdinal: 1, targetTrackOrdinal: 2, targetLoadOrdinal: 2, ownership: "host", template: "safe-fade" },
       { type: "transition-rescued", activeSecond: 11, transition: 1, kept: "target" },
       { type: "session-paused", activeSecond: 11, reason: "rescue" }
@@ -168,6 +202,11 @@ describe("Party Autopilot trace", () => {
     interruptedRecorder.append({ type: "session-started", activeSecond: 0 });
     interruptedRecorder.markInterrupted();
     expect(evaluatePartyAutopilotTrace(interruptedRecorder.snapshot()).failureCodes).toContain("trace-interrupted");
+
+    const malformedArm = createPartyAutopilotTraceRecorder();
+    expect(malformedArm.append({ type: "arm-settled", activeSecond: 0, operation: 1, outcome: "scheduled" } as PartyAutopilotEventInput))
+      .toBe(false);
+    expect(evaluatePartyAutopilotTrace(malformedArm.snapshot()).failureCodes).toContain("trace-interrupted");
   });
 
   it("rejects operations outside the running session and events after terminal", () => {

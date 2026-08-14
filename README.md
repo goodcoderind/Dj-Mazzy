@@ -224,7 +224,7 @@ A deterministic three-hour Party Autopilot coordinator soak now drives the same
 `party-autopilot-decision/v4` function used by the live app. It therefore exercises the real
 queue-first two-song lookahead, library continuation, transition-plan arm
 windows, target cue offsets, no-repeat history, exact final-track ownership, and
-`party-autopilot-trace/v4` evaluator. A Rescue correctly ends the unattended observation
+`party-autopilot-trace/v5` evaluator. A Rescue correctly ends the unattended observation
 in a paused state. This is state/coordinator evidence only: it does not exercise
 browser decoding, Web Audio rendering, analysis workers, musical quality, or
 speaker output, and it does not replace the visible two-hour device check.
@@ -244,6 +244,19 @@ manually or choose **New Party**. Synthetic soak coverage includes one-time
 failover, the two-timeout pause, and no retry of an excluded song. Separate
 exact-ownership tests reject late settlement at and after the deadline; the soak
 does not claim that browser decoding or late browser callbacks were exercised.
+
+Automatic transition preparation is bounded too. Each arm owns the exact source
+and target loads and expires no later than eight seconds—or earlier when its cue
+can no longer be scheduled with safe lead time. A timeout or preparation failure
+restores the exact pre-arm deck gains, mutes/stops only the owned target when that
+was its pre-arm state, and leaves
+the queue/history unchanged. Mazzy retries once only when enough source-song
+runway remains; a second consecutive failure, or one without retry runway, pauses
+Autopilot while the current song keeps playing. Host control, recovery, or load
+replacement cancels the exact arm without consuming that budget, and late async
+settlement cannot schedule or clear a successor. The v6 synthetic coordinator
+soak covers fail-once/succeed, two-failure pause, timeout, and short-runway pause;
+it remains state evidence rather than browser timing or audible-output evidence.
 
 Tempo-changing phrase blends also remain fail-closed until pitch-preserving
 playback is ready on the exact loaded decks. A developer-only Signalsmith

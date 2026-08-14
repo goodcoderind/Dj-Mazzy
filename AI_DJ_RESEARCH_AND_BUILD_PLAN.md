@@ -2182,6 +2182,36 @@ These are the active backlog, not reasons to discard the prototype.
   prove one-song failover and the two-timeout safe pause. This is deterministic
   coordinator/ownership evidence, not browser decode, main-thread scheduling,
   audio continuity, or speaker-output evidence.
+- **D-059 — Bound transition arming with exact load ownership and one retry:**
+  `auto-pilot-arm-ownership/v1` gives every automatic arm an immutable operation,
+  generation, transition key, source/target deck, track and load identity, plus a
+  Web Audio clock deadline. The deadline is the earlier of eight seconds or the
+  planned cue minus the template's minimum scheduling lead; a lease shorter than
+  50 ms is rejected before async work starts. A silent Web Audio clock sentinel
+  owns the deadline and a window timer is retained only as a backup wake-up;
+  expiry, every async settlement, and every cancellation re-read the authoritative
+  audio clock and exact load pair. Target start also rechecks that authority after
+  its internal resume await and immediately before transport mutation. A late
+  promise therefore cannot pause, schedule, restore DSP on, or clear a successor
+  load.
+
+  Failure cleanup keeps the owned source playing, restores the exact pre-arm deck
+  gains and both owned filter/EQ snapshots, pauses only the owned target, clears arm
+  ownership, and does not alter queue or played history. An Autopilot failure or
+  timeout may retry once only with at least 4.25 seconds of source runway. A second
+  consecutive failure, or the first without that runway, pauses Autopilot and its
+  party clock and releases the wake lock; explicit restart, New Party, or a
+  successfully scheduled transition resets the budget. Host/recovery cancellation
+  and load replacement do not consume or reset it.
+
+  `party-autopilot-trace/v5` records timeout and whether the owned settlement
+  requires the immediately following `transition-arm` pause, rejects a missing or
+  premature pause, and exposes only aggregate failure/timeout counts. It retains
+  session-local ordinals and no metadata. `party-autopilot-coordinator-soak/v6`
+  uses the same runway/deadline policy for fail-once/succeed, fail-twice/pause,
+  timeout, and short-runway scenarios. These are deterministic state/ownership
+  checks; they do not prove browser callback timing, audio continuity, or speaker
+  output.
 
 ### Open questions
 

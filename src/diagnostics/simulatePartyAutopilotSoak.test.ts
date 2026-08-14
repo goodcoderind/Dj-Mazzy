@@ -172,6 +172,83 @@ describe("shared Party Autopilot coordinator soak", () => {
     expect(result.errors).toEqual([]);
   });
 
+  it("retries one failed arm with runway, then resets the failure budget on success", () => {
+    const result = simulatePartyAutopilotSoak({
+      tracks: [timedTrack("track-0", 120, false), timedTrack("track-1", 122, false)],
+      queuedTrackIds: ["track-1"],
+      includeRestOfLibrary: false,
+      sessionDurationSeconds: 600,
+      armOutcomes: ["failed", "scheduled"]
+    });
+    expect(result.stopReason).toBe("crate-exhausted");
+    expect(result.transitionAttempts).toBe(2);
+    expect(result.successfulHandoffs).toBe(1);
+    expect(result.evaluation.counters.armFailures).toBe(1);
+    expect(result.errors).toEqual([]);
+  });
+
+  it("converts a nominal success at or beyond its audio-clock lease into a timeout", () => {
+    const result = simulatePartyAutopilotSoak({
+      tracks: [timedTrack("track-0", 120, false), timedTrack("track-1", 122, false)],
+      queuedTrackIds: ["track-1"],
+      includeRestOfLibrary: false,
+      sessionDurationSeconds: 600,
+      armOutcomes: ["scheduled", "scheduled"],
+      armSettlementDelaysSeconds: [8, 0]
+    });
+    expect(result.stopReason).toBe("crate-exhausted");
+    expect(result.transitionAttempts).toBe(2);
+    expect(result.evaluation.counters).toMatchObject({ armFailures: 1, armTimeouts: 1 });
+    expect(result.successfulHandoffs).toBe(1);
+    expect(result.errors).toEqual([]);
+  });
+
+  it("cancels a superseded arm without consuming the failure budget or scheduling it", () => {
+    const result = simulatePartyAutopilotSoak({
+      tracks: [timedTrack("track-0", 120, false), timedTrack("track-1", 122, false)],
+      queuedTrackIds: ["track-1"],
+      includeRestOfLibrary: false,
+      sessionDurationSeconds: 600,
+      supersededArmAttempts: [1]
+    });
+    expect(result.stopReason).toBe("crate-exhausted");
+    expect(result.transitionAttempts).toBe(2);
+    expect(result.evaluation.counters.armFailures).toBe(0);
+    expect(result.successfulHandoffs).toBe(1);
+    expect(result.errors).toEqual([]);
+  });
+
+  it("rejects malformed synthetic arm delays instead of treating them as instant success", () => {
+    const base = { tracks: library(2), sessionDurationSeconds: 600 };
+    expect(() => simulatePartyAutopilotSoak({ ...base, armSettlementDelaysSeconds: [Number.NaN] })).toThrow(RangeError);
+    expect(() => simulatePartyAutopilotSoak({ ...base, armSettlementDelaysSeconds: [Number.POSITIVE_INFINITY] })).toThrow(RangeError);
+    expect(() => simulatePartyAutopilotSoak({ ...base, armSettlementDelaysSeconds: [-0.1] })).toThrow(RangeError);
+  });
+
+  it("pauses after two arm failures or one failure without retry runway", () => {
+    const twice = simulatePartyAutopilotSoak({
+      tracks: [timedTrack("track-0", 120, false), timedTrack("track-1", 122, false)],
+      queuedTrackIds: ["track-1"],
+      includeRestOfLibrary: false,
+      sessionDurationSeconds: 600,
+      armOutcomes: ["failed", "timed-out"]
+    });
+    expect(twice.stopReason).toBe("transition-arm-paused");
+    expect(twice.evaluation.counters).toMatchObject({ armFailures: 2, armTimeouts: 1, pauses: 1 });
+    expect(twice.errors).toEqual([]);
+
+    const short = simulatePartyAutopilotSoak({
+      tracks: library(2, 30),
+      queuedTrackIds: ["track-1"],
+      includeRestOfLibrary: false,
+      sessionDurationSeconds: 120,
+      armOutcomes: ["failed"]
+    });
+    expect(short.stopReason).toBe("transition-arm-paused");
+    expect(short.transitionAttempts).toBe(1);
+    expect(short.errors).toEqual([]);
+  });
+
   it("accounts for target cue time instead of granting every target a fresh full duration", () => {
     const result = simulatePartyAutopilotSoak({
       tracks: library(3, 180),

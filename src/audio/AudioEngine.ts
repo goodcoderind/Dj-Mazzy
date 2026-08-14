@@ -315,7 +315,8 @@ export class AudioEngine {
     target: DeckChannel,
     startTime: number,
     durationSeconds: number,
-    curves = createEqualPowerCurves()
+    curves = createEqualPowerCurves(),
+    authority?: () => boolean
   ): CrossfadeSchedule {
     if (source === target) {
       throw new RangeError("crossfade source and target must be different decks");
@@ -323,6 +324,10 @@ export class AudioEngine {
     requirePositiveFinite(durationSeconds, "durationSeconds");
 
     const now = this.clock.now();
+    const scheduledStart = this.clock.resolveScheduleTime(startTime);
+    if (authority && !authority()) {
+      throw new Error("crossfade scheduling authority expired");
+    }
     if (this.activeCrossfade && this.activeCrossfade.endTime > now) {
       throw new Error("another crossfade is already active");
     }
@@ -330,7 +335,6 @@ export class AudioEngine {
       this.activeCrossfade = null;
     }
 
-    const scheduledStart = this.clock.resolveScheduleTime(startTime);
     this.scheduleDeckGainCurve(source, curves.source, scheduledStart, durationSeconds);
     this.scheduleDeckGainCurve(target, curves.target, scheduledStart, durationSeconds);
 
@@ -416,6 +420,29 @@ export class AudioEngine {
       try { source.stop(); } catch { /* Already ended. */ }
       source.disconnect();
       this.crossfadeCompletions.delete(scheduleId);
+    };
+  }
+
+  onAudioClockDeadline(deadlineSeconds: number, callback: () => void) {
+    if (!Number.isFinite(deadlineSeconds) || deadlineSeconds < this.clock.now()) {
+      throw new RangeError("audio-clock deadline must be finite and not in the past");
+    }
+    const source = this.context.createOscillator();
+    let settled = false;
+    source.onended = () => {
+      if (settled) return;
+      settled = true;
+      source.disconnect();
+      callback();
+    };
+    source.start(deadlineSeconds);
+    source.stop(deadlineSeconds + 0.001);
+    return () => {
+      if (settled) return;
+      settled = true;
+      source.onended = null;
+      try { source.stop(); } catch { /* Already ended. */ }
+      source.disconnect();
     };
   }
 
