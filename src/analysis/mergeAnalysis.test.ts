@@ -59,7 +59,7 @@ describe("generated analysis merge", () => {
           usable16BeatWindows: []
         },
         programLevel: {
-          schemaVersion: "program-level/v2",
+          schemaVersion: "program-level/v3",
           measurement: {
             algorithmVersion: "bs1770-k-weighted-gated/v1",
             status: "measured",
@@ -67,13 +67,16 @@ describe("generated analysis merge", () => {
             channelCount: 2,
             integratedLufs: -14,
             samplePeakDbfs: -3,
+            decodedPeakAlgorithmVersion: "itu-r-bs1770-5-annex2-4x-fir-estimate/v1",
+            decodedPeakOversampleFactor: 4,
+            estimatedTruePeakDbtp: -3,
             absoluteGatedBlockCount: 2,
             relativeGatedBlockCount: 2
           },
           normalization: {
-            policyVersion: "party-level-trim/v2",
+            policyVersion: "party-level-trim/v3",
             targetLufs: -14,
-            samplePeakCeilingDbfs: -2,
+            decodedPeakCeilingDbtp: -2,
             trimDb: 0
           }
         }

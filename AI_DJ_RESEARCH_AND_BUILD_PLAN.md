@@ -1216,8 +1216,10 @@ before musical or operational reliability are:
   safety-bounded cue ranking and Filtered Fade, but they are not calibrated as
   semantic vocal or musical-quality truth on annotated real music;
 - stereo K-weighted integrated-loudness trim now replaces the earlier raw-RMS
-  estimate, but its party target still needs listening calibration and decoded
-  true-peak plus post-master true-peak evaluation remain incomplete;
+  estimate and includes a conservative four-times decoded intersample-peak
+  estimate, but its party target still needs listening calibration, the peak
+  estimator is not meter-certified, and post-master true-peak evaluation
+  remains incomplete;
 - the shared Autopilot coordinator now provides queue-first three-track
   lookahead, played-track exclusion, energy-storyline intent, Rescue, and
   deterministic final-track ownership, but live real-party validation and
@@ -1448,19 +1450,21 @@ These are the active backlog, not reasons to discard the prototype.
   chosen track and primary reason are visible, and low-confidence key estimates
   are treated as unknown rather than musical fact.
 - **Conservative level matching:** Each decoded mono/stereo track receives a
-  local `program-level/v2` measurement and a separate per-deck trim stage. The
+  local `program-level/v3` measurement and a separate per-deck trim stage. The
   worker preserves channel 1 for the existing rhythm path while measuring both
   level channels independently with sample-rate-adjusted K-weighting, 400 ms
   blocks at 75% overlap, a −70 LUFS absolute gate, and a −10 LU relative gate.
   A separately versioned provisional party policy caps trim from −6 to +3 dB
-  toward −14 LUFS and limits boost against a conservative −2 dBFS decoded
-  sample-peak ceiling. Phase-opposed stereo is not mistaken for silence;
+  toward −14 LUFS and limits boost against a conservative −2 dBTP per-file
+  ceiling using a four-times decoded intersample-peak estimate based on the
+  order-48, four-phase FIR coefficients published in ITU-R BS.1770-5 Annex 2.
+  Phase-opposed stereo is not mistaken for silence;
   unsupported layouts, malformed input, and stale v1 records receive neutral
   trim. Synthetic stereo calibration, EBU gate cases, and fixed independent
   FFmpeg `ebur128` reference readings are within 0.1 LU at 44.1, 48, and 96
   kHz. This is a
-  BS.1770-derived consistency aid, not certified EBU Mode metering or decoded
-  dBTP. The target still needs listening calibration, and EQ, resampling,
+  BS.1770-derived consistency aid, not certified EBU Mode or true-peak
+  metering. The target still needs listening calibration, and EQ, resampling,
   overlap, and master processing require separate post-DSP true-peak evidence.
 - **Local data deletion:** Library context actions now remove the selected
   IndexedDB record through an awaited delete transaction, remove it from the
@@ -1867,8 +1871,8 @@ These are the active backlog, not reasons to discard the prototype.
   share the same selection-safety rank, so presentation variety cannot bypass
   queue order, no-repeat rules, or prefer a weaker pair. Live scheduling and the
   offline rehearsal consume the same immutable sweep; completion, failure, and
-  Rescue restore both decks' prior cutoff. The diagnostics-only
-  `transition-rehearsal-browser-check/v3` compares a 3 kHz filtered render with
+  Rescue restore both decks' prior cutoff. The diagnostics-only v3
+  transition-rehearsal check compares a 3 kHz filtered render with
   an otherwise identical unfiltered render in both early and late windows, so
   the ordinary gain fade cannot masquerade as filter evidence. Cue, stereo,
   continuity, trim, and determinism passed in the same fresh 48 kHz browser
@@ -1998,6 +2002,34 @@ These are the active backlog, not reasons to discard the prototype.
   beat-grid/timing review. This is not an EBU compliance claim, a decoded dBTP
   measurement, a calibrated party target, or proof of post-EQ/overlap/master
   true-peak safety. Those remain separate acceptance milestones.
+- **D-051 — Treat decoded intersample peak as a conservative estimate, not an
+  output guarantee:** `program-level/v3` adds a four-times, per-channel decoded
+  peak estimate using the order-48, four-phase FIR coefficient set published
+  in ITU-R BS.1770-5 Annex 2. `party-level-trim/v3` uses the larger decoded
+  estimate rather than sample peak when limiting boost to −2 dBTP. The original
+  sample peak remains stored for audit, every persisted derived value is
+  runtime-validated, and v2 records migrate through the existing bounded worker
+  queue. A phase-offset quarter-rate regression proves that an intersample peak
+  hidden by the stored samples tightens trim. The field is deliberately named
+  `estimatedTruePeakDbtp`: current automated evidence is not a compliant meter
+  test, and this per-file value cannot prove peaks after EQ, resampling,
+  time-stretch, equal-power overlap, master limiting, conversion, or physical
+  output. A post-master conformance/release gate remains a separate milestone.
+- **D-052 — Add synthetic post-master peak evidence without promoting the
+  master contract:** `transition-rehearsal-browser-check/v4` renders a
+  deliberately hot, correlated stereo handoff with +3 dB trims through an
+  `OfflineAudioContext` master graph configured by the same shared helper and
+  immutable `mazzy-master/v1` settings as the live `AudioEngine`. The
+  diagnostics-only `post-master-peak-check/v1` evaluates the post-limiter
+  channels with the v3 four-times decoded peak estimator and fails on silence,
+  non-finite input, or an estimated peak above 0 dBTP. In a fresh 48 kHz browser
+  run, all seven v4 checks passed; the stress path measured −2.5 dBFS sample
+  peak and −2.5 dBTP estimated peak. The report retains only synthetic numeric
+  evidence in the DOM and is excluded from normal builds. It checks a bounded
+  offline browser graph/configuration, not real song content, live scheduling,
+  main-thread load, output-device or speaker behavior, certified meter
+  conformance, or a product true-peak ceiling. `mazzy-master/v1` therefore does
+  not change, and a real post-master conformance/release gate remains open.
 
 ### Open questions
 

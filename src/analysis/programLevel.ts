@@ -1,6 +1,12 @@
-export const PROGRAM_LEVEL_SCHEMA_VERSION = "program-level/v2" as const;
+import {
+  DECODED_TRUE_PEAK_ALGORITHM_VERSION,
+  DECODED_TRUE_PEAK_OVERSAMPLE_FACTOR,
+  estimateDecodedTruePeakLinear
+} from "./decodedTruePeak";
+
+export const PROGRAM_LEVEL_SCHEMA_VERSION = "program-level/v3" as const;
 export const PROGRAM_LEVEL_ALGORITHM_VERSION = "bs1770-k-weighted-gated/v1" as const;
-export const PARTY_LEVEL_TRIM_POLICY_VERSION = "party-level-trim/v2" as const;
+export const PARTY_LEVEL_TRIM_POLICY_VERSION = "party-level-trim/v3" as const;
 
 export type ProgramLevelMeasurementStatus =
   | "measured"
@@ -15,6 +21,9 @@ export type ProgramLevelMeasurement = {
   channelCount: number;
   integratedLufs: number | null;
   samplePeakDbfs: number | null;
+  decodedPeakAlgorithmVersion: typeof DECODED_TRUE_PEAK_ALGORITHM_VERSION;
+  decodedPeakOversampleFactor: typeof DECODED_TRUE_PEAK_OVERSAMPLE_FACTOR;
+  estimatedTruePeakDbtp: number | null;
   absoluteGatedBlockCount: number;
   relativeGatedBlockCount: number;
 };
@@ -25,15 +34,16 @@ export type ProgramLevelAnalysis = {
   normalization: {
     policyVersion: typeof PARTY_LEVEL_TRIM_POLICY_VERSION;
     targetLufs: number;
-    samplePeakCeilingDbfs: number;
+    decodedPeakCeilingDbtp: number;
     trimDb: number;
   };
 };
 
 export const PARTY_LEVEL_TARGET_LUFS = -14;
-// This is intentionally a sample-peak ceiling with one extra decibel of
-// headroom. It is not a decoded true-peak or post-master safety claim.
-export const PARTY_SAMPLE_PEAK_CEILING_DBFS = -2;
+// This per-file ceiling cannot prove post-EQ, overlap, stretch, limiter, DAC,
+// or speaker output safety. The estimator is intentionally not presented as a
+// certified meter.
+export const PARTY_DECODED_PEAK_CEILING_DBTP = -2;
 
 const ABSOLUTE_GATE_LUFS = -70;
 const RELATIVE_GATE_LU = -10;
@@ -126,6 +136,9 @@ const emptyMeasurement = (
   channelCount,
   integratedLufs: null,
   samplePeakDbfs: null,
+  decodedPeakAlgorithmVersion: DECODED_TRUE_PEAK_ALGORITHM_VERSION,
+  decodedPeakOversampleFactor: DECODED_TRUE_PEAK_OVERSAMPLE_FACTOR,
+  estimatedTruePeakDbtp: null,
   absoluteGatedBlockCount: 0,
   relativeGatedBlockCount: 0
 });
@@ -135,16 +148,16 @@ export const deriveProgramTrim = (measurement: ProgramLevelMeasurement) => {
   if (
     measurement.status === "measured" &&
     measurement.integratedLufs != null &&
-    measurement.samplePeakDbfs != null
+    measurement.estimatedTruePeakDbtp != null
   ) {
     const desiredTrim = PARTY_LEVEL_TARGET_LUFS - measurement.integratedLufs;
-    const peakLimitedTrim = PARTY_SAMPLE_PEAK_CEILING_DBFS - measurement.samplePeakDbfs;
+    const peakLimitedTrim = PARTY_DECODED_PEAK_CEILING_DBTP - measurement.estimatedTruePeakDbtp;
     trimDb = clamp(Math.min(desiredTrim, peakLimitedTrim), MINIMUM_TRIM_DB, MAXIMUM_TRIM_DB);
   }
   return {
     policyVersion: PARTY_LEVEL_TRIM_POLICY_VERSION,
     targetLufs: PARTY_LEVEL_TARGET_LUFS,
-    samplePeakCeilingDbfs: PARTY_SAMPLE_PEAK_CEILING_DBFS,
+    decodedPeakCeilingDbtp: PARTY_DECODED_PEAK_CEILING_DBTP,
     trimDb: roundTrimDownTenth(trimDb)
   } as const;
 };
@@ -183,12 +196,16 @@ export const analyzeProgramLevel = (
       samplePeak = Math.max(samplePeak, Math.abs(sample));
     }
   }
+  const estimatedTruePeak = estimateDecodedTruePeakLinear(channels);
 
   const blockFrames = Math.max(1, Math.round(sampleRate * 0.4));
   const hopFrames = Math.max(1, Math.round(blockFrames * 0.25));
   if (length < blockFrames) {
     const measurement = emptyMeasurement("silence", sampleRate, sourceChannelCount);
     measurement.samplePeakDbfs = samplePeak > 0 ? roundPeakUpTenth(db(samplePeak)) : null;
+    measurement.estimatedTruePeakDbtp = estimatedTruePeak > 0
+      ? roundPeakUpTenth(db(estimatedTruePeak))
+      : null;
     return buildAnalysis(measurement);
   }
 
@@ -225,6 +242,9 @@ export const analyzeProgramLevel = (
   if (!absoluteGated.length) {
     const measurement = emptyMeasurement("silence", sampleRate, sourceChannelCount);
     measurement.samplePeakDbfs = samplePeak > 0 ? roundPeakUpTenth(db(samplePeak)) : null;
+    measurement.estimatedTruePeakDbtp = estimatedTruePeak > 0
+      ? roundPeakUpTenth(db(estimatedTruePeak))
+      : null;
     return buildAnalysis(measurement);
   }
   const absoluteMeanPower = absoluteGated.reduce((sum, power) => sum + power, 0) / absoluteGated.length;
@@ -241,6 +261,9 @@ export const analyzeProgramLevel = (
     channelCount: sourceChannelCount,
     integratedLufs: roundTenth(loudnessFromPower(integratedPower)),
     samplePeakDbfs: roundPeakUpTenth(db(samplePeak)),
+    decodedPeakAlgorithmVersion: DECODED_TRUE_PEAK_ALGORITHM_VERSION,
+    decodedPeakOversampleFactor: DECODED_TRUE_PEAK_OVERSAMPLE_FACTOR,
+    estimatedTruePeakDbtp: roundPeakUpTenth(db(estimatedTruePeak)),
     absoluteGatedBlockCount: absoluteGated.length,
     relativeGatedBlockCount: relativeGated.length
   };
@@ -263,6 +286,7 @@ export const normalizeProgramLevel = (value: unknown): ProgramLevelAnalysis | nu
   const channelCount = rawMeasurement.channelCount;
   const integratedLufs = rawMeasurement.integratedLufs;
   const samplePeakDbfs = rawMeasurement.samplePeakDbfs;
+  const estimatedTruePeakDbtp = rawMeasurement.estimatedTruePeakDbtp;
   const absoluteGatedBlockCount = rawMeasurement.absoluteGatedBlockCount;
   const relativeGatedBlockCount = rawMeasurement.relativeGatedBlockCount;
   if (
@@ -271,7 +295,11 @@ export const normalizeProgramLevel = (value: unknown): ProgramLevelAnalysis | nu
     typeof sampleRate !== "number" || !Number.isFinite(sampleRate) || sampleRate < 8_000 || sampleRate > 384_000 ||
     typeof channelCount !== "number" || !Number.isInteger(channelCount) || channelCount < 1 || channelCount > 32 ||
     !isNullableFinite(integratedLufs) || !isNullableFinite(samplePeakDbfs) ||
+    rawMeasurement.decodedPeakAlgorithmVersion !== DECODED_TRUE_PEAK_ALGORITHM_VERSION ||
+    rawMeasurement.decodedPeakOversampleFactor !== DECODED_TRUE_PEAK_OVERSAMPLE_FACTOR ||
+    !isNullableFinite(estimatedTruePeakDbtp) ||
     (samplePeakDbfs != null && (samplePeakDbfs < -1_000 || samplePeakDbfs > 1_000)) ||
+    (estimatedTruePeakDbtp != null && (estimatedTruePeakDbtp < -1_000 || estimatedTruePeakDbtp > 1_000)) ||
     typeof absoluteGatedBlockCount !== "number" || !Number.isInteger(absoluteGatedBlockCount) || absoluteGatedBlockCount < 0 ||
     typeof relativeGatedBlockCount !== "number" || !Number.isInteger(relativeGatedBlockCount) || relativeGatedBlockCount < 0 ||
     relativeGatedBlockCount > absoluteGatedBlockCount
@@ -279,9 +307,14 @@ export const normalizeProgramLevel = (value: unknown): ProgramLevelAnalysis | nu
   if (
     status === "measured" &&
     (channelCount > 2 || integratedLufs == null || integratedLufs < -70 || integratedLufs > 1_000 ||
-      samplePeakDbfs == null ||
+      samplePeakDbfs == null || estimatedTruePeakDbtp == null ||
       absoluteGatedBlockCount === 0 || relativeGatedBlockCount === 0)
   ) return null;
+  if (
+    samplePeakDbfs != null && estimatedTruePeakDbtp != null &&
+    estimatedTruePeakDbtp + ROUNDING_TOLERANCE < samplePeakDbfs
+  ) return null;
+  if ((samplePeakDbfs == null) !== (estimatedTruePeakDbtp == null)) return null;
   if (status !== "measured" && integratedLufs !== null) return null;
   if ((status === "measured" || status === "silence") && channelCount > 2) return null;
   if (status === "unsupported-channels" && channelCount <= 2) return null;
@@ -293,6 +326,9 @@ export const normalizeProgramLevel = (value: unknown): ProgramLevelAnalysis | nu
     channelCount,
     integratedLufs,
     samplePeakDbfs,
+    decodedPeakAlgorithmVersion: DECODED_TRUE_PEAK_ALGORITHM_VERSION,
+    decodedPeakOversampleFactor: DECODED_TRUE_PEAK_OVERSAMPLE_FACTOR,
+    estimatedTruePeakDbtp,
     absoluteGatedBlockCount,
     relativeGatedBlockCount
   };
@@ -300,7 +336,7 @@ export const normalizeProgramLevel = (value: unknown): ProgramLevelAnalysis | nu
   if (
     rawNormalization.policyVersion !== PARTY_LEVEL_TRIM_POLICY_VERSION ||
     rawNormalization.targetLufs !== PARTY_LEVEL_TARGET_LUFS ||
-    rawNormalization.samplePeakCeilingDbfs !== PARTY_SAMPLE_PEAK_CEILING_DBFS ||
+    rawNormalization.decodedPeakCeilingDbtp !== PARTY_DECODED_PEAK_CEILING_DBTP ||
     typeof rawNormalization.trimDb !== "number" || !Number.isFinite(rawNormalization.trimDb) ||
     !closeTo(rawNormalization.trimDb, normalization.trimDb)
   ) return null;

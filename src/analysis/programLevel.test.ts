@@ -3,8 +3,8 @@ import {
   analyzeProgramLevel,
   deriveProgramTrim,
   normalizeProgramLevel,
+  PARTY_DECODED_PEAK_CEILING_DBTP,
   PARTY_LEVEL_TARGET_LUFS,
-  PARTY_SAMPLE_PEAK_CEILING_DBFS
 } from "./programLevel";
 
 const sine = (
@@ -36,7 +36,7 @@ const toneSequence = (
   return channel;
 };
 
-describe("perceptual program level v2", () => {
+describe("perceptual program level v3", () => {
   it.each([44_100, 48_000, 96_000])("matches the EBU stereo calibration tone at %i Hz", (sampleRate) => {
     const channel = sine(-18, 5, sampleRate);
     const result = analyzeProgramLevel([channel, channel], sampleRate);
@@ -44,7 +44,8 @@ describe("perceptual program level v2", () => {
       status: "measured",
       channelCount: 2,
       integratedLufs: -18,
-      samplePeakDbfs: -18
+      samplePeakDbfs: -18,
+      estimatedTruePeakDbtp: -17.9
     });
     expect(analyzeProgramLevel([channel], sampleRate).measurement.integratedLufs).toBe(-21);
   });
@@ -122,6 +123,7 @@ describe("perceptual program level v2", () => {
       status: "silence",
       integratedLufs: null,
       samplePeakDbfs: -6,
+      estimatedTruePeakDbtp: -5.9,
       absoluteGatedBlockCount: 0
     });
     expect(result.normalization.trimDb).toBe(0);
@@ -136,28 +138,41 @@ describe("perceptual program level v2", () => {
     expect(analyzeProgramLevel([good, good], 48_000, 6).measurement.status).toBe("unsupported-channels");
   });
 
-  it("keeps trim policy separate, bounded, and sample-peak limited", () => {
+  it("keeps trim policy separate, bounded, and decoded-peak limited", () => {
     const measured = analyzeProgramLevel([sine(-30)], 48_000).measurement;
     const trim = deriveProgramTrim(measured);
     expect(trim).toMatchObject({
       targetLufs: PARTY_LEVEL_TARGET_LUFS,
-      samplePeakCeilingDbfs: PARTY_SAMPLE_PEAK_CEILING_DBFS
+      decodedPeakCeilingDbtp: PARTY_DECODED_PEAK_CEILING_DBTP
     });
     expect(trim.trimDb).toBeGreaterThanOrEqual(-6);
     expect(trim.trimDb).toBeLessThanOrEqual(3);
-    expect((measured.samplePeakDbfs ?? 0) + trim.trimDb).toBeLessThanOrEqual(PARTY_SAMPLE_PEAK_CEILING_DBFS);
+    expect((measured.estimatedTruePeakDbtp ?? 0) + trim.trimDb).toBeLessThanOrEqual(PARTY_DECODED_PEAK_CEILING_DBTP);
     const boundaryTrim = deriveProgramTrim({
       ...measured,
       integratedLufs: -20,
-      samplePeakDbfs: -2.05
+      samplePeakDbfs: -2.05,
+      estimatedTruePeakDbtp: -2.05
     });
     expect(boundaryTrim.trimDb).toBe(0);
-    expect(-2.05 + boundaryTrim.trimDb).toBeLessThanOrEqual(PARTY_SAMPLE_PEAK_CEILING_DBFS);
+    expect(-2.05 + boundaryTrim.trimDb).toBeLessThanOrEqual(PARTY_DECODED_PEAK_CEILING_DBTP);
+  });
+
+  it("uses intersample rather than sample peak to constrain boost", () => {
+    const sampleRate = 48_000;
+    const channel = sine(-3, 1, sampleRate, 12_000, Math.PI / 4);
+    const analysis = analyzeProgramLevel([channel], sampleRate);
+    expect(analysis.measurement.samplePeakDbfs).toBeCloseTo(-6, 1);
+    expect(analysis.measurement.estimatedTruePeakDbtp).toBeCloseTo(-2.9, 1);
+    expect(analysis.normalization.trimDb).toBeLessThanOrEqual(0.9);
+    expect(
+      (analysis.measurement.estimatedTruePeakDbtp ?? 0) + analysis.normalization.trimDb
+    ).toBeLessThanOrEqual(PARTY_DECODED_PEAK_CEILING_DBTP);
   });
 
   it("rejects stale or hostile persisted records instead of trusting their trim", () => {
     expect(normalizeProgramLevel({
-      schemaVersion: "program-level/v1",
+      schemaVersion: "program-level/v2",
       activeRmsDbfs: -14,
       trimDb: 3
     })).toBeNull();
@@ -166,6 +181,24 @@ describe("perceptual program level v2", () => {
     expect(normalizeProgramLevel({
       ...valid,
       normalization: { ...valid.normalization, trimDb: Number.NaN }
+    })).toBeNull();
+    expect(normalizeProgramLevel({
+      ...valid,
+      measurement: {
+        ...valid.measurement,
+        decodedPeakAlgorithmVersion: "caller-claimed-peak/v1"
+      }
+    })).toBeNull();
+    expect(normalizeProgramLevel({
+      ...valid,
+      measurement: {
+        ...valid.measurement,
+        estimatedTruePeakDbtp: (valid.measurement.samplePeakDbfs ?? 0) - 1
+      }
+    })).toBeNull();
+    expect(normalizeProgramLevel({
+      ...valid,
+      normalization: { ...valid.normalization, decodedPeakCeilingDbtp: 0 }
     })).toBeNull();
   });
 

@@ -1,7 +1,7 @@
 import { createEqualPowerCurves } from "../planning/transitionMath";
 import { DeckEngine } from "./DeckEngine";
 import { TransportClock } from "./TransportClock";
-import { MASTER_DSP_V1 } from "./masterDsp";
+import { configureMasterDspNodes, MASTER_DSP_V1 } from "./masterDsp";
 import type { PreMasterStereoPreview } from "../diagnostics/transitionRehearsal";
 
 export type DeckChannel = "a" | "b";
@@ -107,14 +107,8 @@ export class AudioEngine {
     this.clock = new TransportClock(context);
 
     this.masterGain = context.createGain();
-    this.masterGain.gain.value = dbToGain(DEFAULT_MASTER_HEADROOM_DB);
-
     this.limiter = context.createDynamicsCompressor();
-    this.limiter.threshold.value = DEFAULT_LIMITER_THRESHOLD_DB;
-    this.limiter.knee.value = MASTER_DSP_V1.limiter.kneeDb;
-    this.limiter.ratio.value = MASTER_DSP_V1.limiter.ratio;
-    this.limiter.attack.value = MASTER_DSP_V1.limiter.attackSeconds;
-    this.limiter.release.value = MASTER_DSP_V1.limiter.releaseSeconds;
+    configureMasterDspNodes(this.masterGain, this.limiter);
 
     this.masterMeter = context.createAnalyser();
     this.masterMeter.fftSize = 2048;

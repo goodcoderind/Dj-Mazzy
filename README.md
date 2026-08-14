@@ -80,20 +80,23 @@ the decks' actual trim and EQ state. Live scheduling consumes that description;
 the DSP compiler cannot change transition eligibility or silently substitute a
 different template.
 
-Decoded mono and stereo tracks now receive a local `program-level/v2`
+Decoded mono and stereo tracks now receive a local `program-level/v3`
 measurement in the existing analysis worker. It keeps the rhythm detector on
 channel 1, but measures level from both channels independently using
 sample-rate-adjusted K-weighting, 400 ms blocks with 75% overlap, the −70 LUFS
 absolute gate, and the −10 LU relative gate. A separately versioned provisional
 party policy applies at most −6 to +3 dB of deck trim toward −14 LUFS, while a
-conservative −2 dBFS decoded sample-peak ceiling can reduce that boost. Old or
+four-times decoded intersample-peak estimate based on the FIR coefficients in
+ITU-R BS.1770-5 Annex 2 can reduce that boost against a conservative −2 dBTP
+per-file ceiling. Old or
 malformed level records are ignored and regenerated; a new deck load starts at
 0 dB trim instead of inheriting the previous song's value. Synthetic stereo
 calibration and EBU gate vectors cover 44.1, 48, and 96 kHz; fixed 50 Hz and
 10 kHz results are within 0.1 LU of FFmpeg 8.1.1's independent `ebur128`
-meter. This is a BS.1770-derived local
-consistency aid, not certified EBU Mode metering: it does not yet measure
-decoded true peak, certify a −14 LUFS product target, or prove the post-EQ,
+meter. A phase-offset quarter-rate vector proves that the decoded peak estimate
+can detect a peak between stored samples. This is a BS.1770-derived local
+consistency aid, not certified EBU Mode or true-peak metering: it does not
+certify a −14 LUFS product target or prove the post-EQ,
 overlapped master output is true-peak safe. Files with more than two channels
 receive neutral trim until a verified layout-aware measurement exists.
 
@@ -147,6 +150,15 @@ non-finite audio, sample-peak excess, silence gaps, and large sample
 discontinuities; they do not certify musical quality, true-peak compliance,
 device stability, or human preference. No rehearsal audio or feedback is
 persisted.
+
+The diagnostics-only `transition-rehearsal-browser-check/v4` also routes a
+synthetic, deliberately hot correlated-stereo handoff through an offline graph
+configured by the same `mazzy-master/v1` settings as production, then applies
+the decoded intersample-peak estimator after the limiter. A fresh 48 kHz browser
+run measured −2.5 dBFS sample peak and −2.5 dBTP estimated peak against a
+0 dBTP overload ceiling. This catches a master-graph/configuration regression;
+it is not live scheduling, decoded-music, output-device, speaker, or certified
+true-peak evidence.
 
 A deterministic three-hour Party Autopilot coordinator soak now drives the same
 `party-autopilot-decision/v3` function used by the live app. It therefore exercises the real

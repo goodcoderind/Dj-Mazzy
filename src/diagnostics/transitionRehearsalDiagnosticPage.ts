@@ -1,7 +1,10 @@
 import { MASTER_DSP_V1 } from "../audio/masterDsp";
 import { TRANSITION_DSP_VERSION, type TransitionDspV2 } from "../audio/transitionDsp";
 import { TRANSITION_PLAN_SCHEMA_VERSION } from "../domain/versions";
-import { renderTransitionRehearsal } from "./transitionRehearsal";
+import {
+  renderProtectedMasterRehearsalCheck,
+  renderTransitionRehearsal
+} from "./transitionRehearsal";
 
 type Check = Readonly<{ name: string; passed: boolean; evidence: string }>;
 
@@ -65,6 +68,15 @@ const unfilteredComparisonDsp = (): TransitionDspV2 => Object.freeze({
   template: "safe-fade",
   source: Object.freeze({ ...filteredDsp().source, filterSweep: null })
 });
+
+const peakStressDsp = (): TransitionDspV2 => {
+  const base = dsp(3);
+  return Object.freeze({
+    ...base,
+    source: Object.freeze({ ...base.source, playbackRate: 1 }),
+    target: Object.freeze({ ...base.target, trimDb: 3 })
+  });
+};
 
 const rms = (samples: Float32Array, startSeconds: number, endSeconds: number) => {
   const start = Math.floor(startSeconds * sampleRate);
@@ -149,6 +161,21 @@ const run = async () => {
   const trimRatio = rms(trimmed.preview.channels[0], 0.2, 0.7) / leftEnergy;
   checks.push({ name: "−6 dB source trim", passed: Math.abs(trimRatio - 10 ** (-6 / 20)) <= 0.015, evidence: `measured amplitude ratio ${trimRatio.toFixed(4)}` });
 
+  const hotTone = createBuffer(tone(1_000), tone(1_000));
+  for (let channel = 0; channel < hotTone.numberOfChannels; channel += 1) {
+    const samples = hotTone.getChannelData(channel);
+    for (let frame = 0; frame < samples.length; frame += 1) samples[frame] *= 4.95;
+  }
+  const stressed = await renderTransitionRehearsal(hotTone, hotTone, peakStressDsp(), options);
+  const postMasterPeak = await renderProtectedMasterRehearsalCheck(stressed.preview);
+  checks.push({
+    name: "Protected-master intersample peak",
+    passed: postMasterPeak.peak.passed,
+    evidence: postMasterPeak.peak.passed
+      ? `sample ${postMasterPeak.peak.samplePeakDbfs?.toFixed(1)} dBFS · estimated ${postMasterPeak.peak.estimatedTruePeakDbtp?.toFixed(1)} dBTP · ceiling ${postMasterPeak.peak.ceilingDbtp.toFixed(1)} dBTP`
+      : postMasterPeak.peak.failureCodes.join(", ")
+  });
+
   const filterSource = createBuffer(tone(3_000), () => 0);
   const unfiltered = await renderTransitionRehearsal(filterSource, targetTone, unfilteredComparisonDsp(), options);
   const filtered = await renderTransitionRehearsal(filterSource, targetTone, filteredDsp(), options);
@@ -177,10 +204,12 @@ const run = async () => {
     return row;
   }));
   const report = Object.freeze({
-    schemaVersion: "transition-rehearsal-browser-check/v3",
+    schemaVersion: "transition-rehearsal-browser-check/v4",
     sampleRate,
     passed: checks.every((check) => check.passed),
-    checks
+    checks,
+    postMasterPeak: postMasterPeak.peak,
+    evidenceScope: "Synthetic OfflineAudioContext transition DSP and protected-master render path; not live scheduling, decoded music, output-device, speaker, or certified true-peak evidence."
   });
   status.textContent = report.passed ? "All local Web Audio checks passed." : "One or more local Web Audio checks failed.";
   summary.textContent = JSON.stringify(report, null, 2);

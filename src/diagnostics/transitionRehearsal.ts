@@ -1,8 +1,9 @@
 import { createDeckDspChain } from "../audio/deckDspChain";
-import { MASTER_DSP_V1 } from "../audio/masterDsp";
+import { configureMasterDspNodes, MASTER_DSP_V1 } from "../audio/masterDsp";
 import type { TransitionDspV2 } from "../audio/transitionDsp";
 import { validateTransitionDsp } from "../audio/transitionDsp";
 import { assessTransitionRenderQuality, type TransitionQualityGate } from "./renderTransition";
+import { assessPostMasterPeak, type PostMasterPeakCheck } from "./postMasterPeak";
 
 export type PreMasterStereoPreview = Readonly<{
   kind: "pre-master-stereo/v1";
@@ -16,6 +17,11 @@ export type TransitionRehearsalRender = Readonly<{
   transitionStartSeconds: number;
   transitionEndSeconds: number;
   quality: TransitionQualityGate;
+}>;
+
+export type ProtectedMasterRehearsalCheck = Readonly<{
+  kind: "protected-master-rehearsal-check/v1";
+  peak: PostMasterPeakCheck;
 }>;
 
 export type TransitionRehearsalWindow = Readonly<{
@@ -174,5 +180,38 @@ export const renderTransitionRehearsal = async (
     transitionStartSeconds: timing.transitionStartSeconds,
     transitionEndSeconds: timing.transitionEndSeconds,
     quality
+  });
+};
+
+export const renderProtectedMasterRehearsalCheck = async (
+  preview: PreMasterStereoPreview
+): Promise<ProtectedMasterRehearsalCheck> => {
+  if (
+    preview.kind !== "pre-master-stereo/v1" ||
+    preview.requiredMasterVersion !== MASTER_DSP_V1.version ||
+    !Number.isFinite(preview.sampleRate) || preview.sampleRate < 8_000 || preview.sampleRate > 384_000 ||
+    !preview.channels[0].length || preview.channels[0].length !== preview.channels[1].length
+  ) {
+    throw new RangeError("Protected-master rehearsal input is malformed or incompatible");
+  }
+  const context = new OfflineAudioContext(2, preview.channels[0].length, preview.sampleRate);
+  const buffer = context.createBuffer(2, preview.channels[0].length, preview.sampleRate);
+  buffer.copyToChannel(new Float32Array(preview.channels[0]), 0);
+  buffer.copyToChannel(new Float32Array(preview.channels[1]), 1);
+  const source = context.createBufferSource();
+  source.buffer = buffer;
+  const masterGain = context.createGain();
+  const limiter = context.createDynamicsCompressor();
+  configureMasterDspNodes(masterGain, limiter);
+  source.connect(masterGain);
+  masterGain.connect(limiter);
+  limiter.connect(context.destination);
+  source.start(0);
+  const rendered = await context.startRendering();
+  const left = rendered.getChannelData(0);
+  const right = rendered.getChannelData(Math.min(1, rendered.numberOfChannels - 1));
+  return Object.freeze({
+    kind: "protected-master-rehearsal-check/v1",
+    peak: assessPostMasterPeak([left, right], rendered.sampleRate)
   });
 };
