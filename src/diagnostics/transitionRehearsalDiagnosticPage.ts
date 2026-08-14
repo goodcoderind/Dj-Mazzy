@@ -6,7 +6,7 @@ import {
   renderTransitionRehearsal,
   type PreMasterStereoPreview
 } from "./transitionRehearsal";
-import { renderMasterPeakGuardCandidateCheck } from "./masterPeakGuardCandidate";
+import { renderMasterPeakGuardListeningComparison } from "./masterPeakGuardCandidate";
 
 type Check = Readonly<{ name: string; passed: boolean; evidence: string }>;
 
@@ -83,22 +83,25 @@ const peakStressDsp = (): TransitionDspV2 => {
 const protectedMasterStressPreview = (outputSampleRate: number): PreMasterStereoPreview => {
   const frameCount = outputSampleRate * 2;
   const fadeFrames = Math.round(outputSampleRate * 0.05);
-  const channel = Float32Array.from({ length: frameCount }, (_, frame) => {
+  const overlapGain = 2 * Math.SQRT1_2 * 10 ** (3 / 20);
+  const channel = (side: "left" | "right") => Float32Array.from({ length: frameCount }, (_, frame) => {
     const fadeIn = Math.min(1, frame / fadeFrames);
     const fadeOut = Math.min(1, (frameCount - 1 - frame) / fadeFrames);
     const time = frame / outputSampleRate;
-    return Math.min(fadeIn, fadeOut) * (
-      1.8 * Math.sin(2 * Math.PI * 997 * time) +
-      0.45 * Math.sin(2 * Math.PI * (outputSampleRate / 4) * time + Math.PI / 4)
-    );
+    const program = side === "left"
+      ? 0.78 * Math.sin(2 * Math.PI * 997 * time) +
+        0.21 * Math.sin(2 * Math.PI * (outputSampleRate / 4) * time + Math.PI / 4)
+      : 0.72 * Math.sin(2 * Math.PI * 1_301 * time + Math.PI / 7) +
+        0.2 * Math.sin(2 * Math.PI * (outputSampleRate / 5) * time + Math.PI / 3);
+    return Math.min(fadeIn, fadeOut) * program * overlapGain;
   });
   return Object.freeze({
     kind: "pre-master-stereo/v1",
     requiredMasterVersion: MASTER_DSP_V1.version,
     sampleRate: outputSampleRate,
     channels: Object.freeze([
-      channel,
-      new Float32Array(channel)
+      channel("left"),
+      channel("right")
     ]) as readonly [Float32Array, Float32Array]
   });
 };
@@ -204,21 +207,36 @@ const run = async () => {
   const multiRatePeakComparison = await Promise.all(
     [44_100, 48_000, 96_000].map(async (outputSampleRate) => {
       const preview = protectedMasterStressPreview(outputSampleRate);
-      const [currentMaster, peakGuardCandidate] = await Promise.all([
-        renderProtectedMasterRehearsalCheck(preview),
-        renderMasterPeakGuardCandidateCheck(preview)
-      ]);
-      return { outputSampleRate, currentMaster, peakGuardCandidate };
+      const comparison = await renderMasterPeakGuardListeningComparison(preview);
+      return Object.freeze({
+        outputSampleRate,
+        currentMaster: comparison.currentMaster.peak,
+        identity4x: comparison.identity4x.peak,
+        peakGuardCandidate: comparison.peakGuardCandidate.peak,
+        identityMaximumDelta: comparison.identityMaximumDelta,
+        identityRmsDeltaDb: comparison.identityRmsDeltaDb,
+        identityPeakDeltaDb: comparison.identityPeakDeltaDb,
+        identityResidualDb: comparison.identityResidualDb,
+        identityAlignedMaximumDelta: comparison.identityAlignedMaximumDelta,
+        guardMaximumDelta: comparison.guardMaximumDelta,
+        peakReductionDb: comparison.peakReductionDb
+      });
     })
   );
-  for (const { outputSampleRate, peakGuardCandidate } of multiRatePeakComparison) {
-    const check = peakGuardCandidate.peak;
+  for (const comparison of multiRatePeakComparison) {
+    const { outputSampleRate, currentMaster, peakGuardCandidate } = comparison;
+    const currentOverloaded = currentMaster.failureCodes.includes("post-master-estimated-true-peak-overload");
+    const candidateEngaged = comparison.guardMaximumDelta >= 1e-5 &&
+      comparison.peakReductionDb != null && comparison.peakReductionDb >= 0.2;
+    const identityTransparent = comparison.identityRmsDeltaDb != null &&
+      comparison.identityRmsDeltaDb <= 0.1 && comparison.identityPeakDeltaDb != null &&
+      comparison.identityPeakDeltaDb <= 0.3 && comparison.identityResidualDb != null &&
+      comparison.identityResidualDb <= -40 && comparison.identityAlignedMaximumDelta != null &&
+      comparison.identityAlignedMaximumDelta <= 0.02;
     checks.push({
-      name: `Diagnostics-only peak-guard candidate at ${outputSampleRate / 1_000} kHz`,
-      passed: check.passed,
-      evidence: check.passed
-        ? `sample ${check.samplePeakDbfs?.toFixed(1)} dBFS · estimated ${check.estimatedTruePeakDbtp?.toFixed(1)} dBTP · ceiling ${check.ceilingDbtp.toFixed(1)} dBTP`
-        : check.failureCodes.join(", ")
+      name: `Diagnostics-only peak-guard paired stress at ${outputSampleRate / 1_000} kHz`,
+      passed: currentOverloaded && peakGuardCandidate.passed && candidateEngaged && identityTransparent,
+      evidence: `current ${currentMaster.estimatedTruePeakDbtp?.toFixed(1)} dBTP · candidate ${peakGuardCandidate.estimatedTruePeakDbtp?.toFixed(1)} dBTP · reduction ${comparison.peakReductionDb?.toFixed(1)} dB · guard delta ${comparison.guardMaximumDelta.toExponential(2)} · identity RMS ${comparison.identityRmsDeltaDb?.toFixed(3)} dB · identity peak ${comparison.identityPeakDeltaDb?.toFixed(1)} dB · identity residual ${comparison.identityResidualDb?.toFixed(1)} dB · aligned max ${comparison.identityAlignedMaximumDelta?.toExponential(2)}`
     });
   }
 
@@ -250,7 +268,7 @@ const run = async () => {
     return row;
   }));
   const report = Object.freeze({
-    schemaVersion: "transition-rehearsal-browser-check/v5",
+    schemaVersion: "transition-rehearsal-browser-check/v6",
     sampleRate,
     passed: checks.every((check) => check.passed),
     liveMasterPromotionReady: false,

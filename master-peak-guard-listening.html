@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Mazzy · Private Master Peak-Guard Listening Lab</title>
+    <style>
+      body { max-width: 820px; margin: 36px auto; padding: 0 20px 60px; font: 16px/1.55 system-ui; background: #101010; color: #eee; }
+      section { margin: 22px 0; padding: 18px; border: 1px solid #3a3a3a; background: #171717; }
+      h1, h2 { line-height: 1.2; }
+      .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+      button { min-height: 44px; box-sizing: border-box; padding: 10px 15px; border: 1px solid #b99b64; background: #222; color: #fff; font: inherit; cursor: pointer; }
+      button:disabled { opacity: .45; cursor: not-allowed; }
+      input[type=file] { max-width: 100%; min-height: 44px; padding: 8px; }
+      fieldset { border: 1px solid #444; padding: 12px; }
+      legend { padding: 0 6px; }
+      label.check { display: inline-flex; min-height: 44px; align-items: center; gap: 7px; }
+      .muted { color: #aaa; }
+      .warning { color: #ffd48a; }
+      pre { white-space: pre-wrap; background: #0d0d0d; border: 1px solid #333; padding: 12px; }
+      :focus-visible { outline: 3px solid #f4c873; outline-offset: 3px; }
+    </style>
+  </head>
+  <body>
+    <main aria-busy="false">
+      <h1>Private master peak-guard listening lab</h1>
+      <p>This advanced check compares Mazzy’s current protected master with a diagnostics-only overload guard. It cannot approve the candidate by itself. Music stays in this tab; filenames, audio, measurements, presentation order, and individual trials are never saved, uploaded, or exported.</p>
+      <section aria-labelledby="prepare-title">
+        <h2 id="prepare-title">1. Prepare one local song</h2>
+        <p class="muted">Choose a dynamic song you know well. Mazzy creates a bounded adversarial stress from two correlated copies at the equal-power midpoint with the +3 dB trim limit. That deliberately stricter combination is not a reachable Autopilot normalization state or production-fidelity transition. Only eligible trials retain two anonymous ten-second renders in this tab. Playback is attenuation-matched, routed directly after the rendered master, and never mastered a second time. Start with comfortable speaker volume.</p>
+        <div class="row">
+          <label>Local song <input id="file" type="file" accept="audio/*" /></label>
+          <button id="prepare" type="button">Prepare blinded comparison</button>
+          <button id="stop" type="button" disabled>Cancel or stop audio</button>
+        </div>
+        <p id="prepare-status" role="status" aria-live="polite">No private comparison prepared.</p>
+        <p id="error-status" role="alert"></p>
+      </section>
+      <section aria-labelledby="listen-title">
+        <h2 id="listen-title">2. Listen blind</h2>
+        <p class="muted">Version 1 and Version 2 use a precommitted counterbalanced order, with an occasional hidden identical-arm control. Listen to both on the same speakers and volume. A judgment unlocks only after each version completes once with valid browser-audio evidence.</p>
+        <div class="row">
+          <button class="listen" data-label="a" disabled>Play anonymous Version 1</button>
+          <button class="listen" data-label="b" disabled>Play anonymous Version 2</button>
+        </div>
+        <p id="listen-status" role="status" aria-live="polite">Prepare a song first.</p>
+      </section>
+      <section aria-labelledby="rating-title">
+        <h2 id="rating-title">3. Record a private judgment</h2>
+        <fieldset id="rating-group" tabindex="-1">
+          <legend>Which version had fewer audible artifacts?</legend>
+          <div class="row">
+            <button class="rating" data-rating="a-cleaner" disabled>Version 1</button>
+            <button class="rating" data-rating="b-cleaner" disabled>Version 2</button>
+            <button class="rating" data-rating="no-difference" disabled>No meaningful difference</button>
+            <button class="rating" data-rating="both-rough" disabled>Both sounded rough</button>
+            <button class="rating" data-rating="unsure" disabled>Not sure</button>
+          </div>
+          <p>Optional artifact notes for this trial:</p>
+          <div class="row">
+            <label class="check"><input type="checkbox" data-artifact="harsh-transients" disabled /> Harsh transients</label>
+            <label class="check"><input type="checkbox" data-artifact="dull-or-soft" disabled /> Dull or soft</label>
+            <label class="check"><input type="checkbox" data-artifact="pumping" disabled /> Pumping</label>
+            <label class="check"><input type="checkbox" data-artifact="stereo-change" disabled /> Stereo changed</label>
+            <label class="check"><input type="checkbox" data-artifact="click-or-dropout" disabled /> Click or dropout</label>
+          </div>
+        </fieldset>
+        <p class="muted">One judgment is accepted per immutable trial. Arm mapping stays hidden until an eight-trial block closes. Aggregate results are descriptive only and cannot approve the candidate.</p>
+        <pre id="summary" aria-label="Private master peak-guard listening summary">No judgments yet. Nothing is saved.</pre>
+        <div class="row">
+          <button id="clear-song" type="button" disabled>Clear private renders</button>
+          <button id="discard-feedback" type="button">Discard this tab’s judgments</button>
+        </div>
+      </section>
+    </main>
+    <script type="module" src="/src/diagnostics/masterPeakGuardListeningPage.ts"></script>
+  </body>
+</html>

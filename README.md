@@ -183,16 +183,42 @@ run measured −2.5 dBFS sample peak and −2.5 dBTP estimated peak against a
 it is not live scheduling, decoded-music, output-device, speaker, or certified
 true-peak evidence.
 
-The current diagnostics-only `transition-rehearsal-browser-check/v5` tightens
+The current diagnostics-only `transition-rehearsal-browser-check/v6` tightens
 that overload gate to −1 dBTP and adds a deliberately harsher mixed-frequency
 stress at 44.1, 48, and 96 kHz. It correctly exposes that the live
 `mazzy-master/v1` compressor can reach about +0.3 dBTP on this bounded overload.
 A separate non-production `mazzy-master-peak-guard-candidate/v1`—a 4×
 oversampled final safety curve that stays linear below −3 dBFS—measured −2.5
-dBTP at all three rates. The report hard-codes `liveMasterPromotionReady:
-false`; the candidate is not bundled into the normal app graph. Real-music
-listening for overload distortion, a newly versioned live graph, and a fresh
-device soak are required before promotion.
+dBTP at all three rates. The current check now renders the master once, then
+fans the same PCM into direct, identity-4×, and guarded-4× branches. It requires
+the current branch to fail, the candidate to pass, at least 0.2 dB of peak
+reduction, nonzero nonlinear engagement, bounded identity-branch RMS/peak
+change, a delay-aligned stereo residual below −40 dB, and aligned sample error
+no greater than 0.02. The report hard-codes
+`liveMasterPromotionReady: false`; the candidate is not bundled into the normal
+app graph.
+
+A diagnostics-only private listening lab is now available for the required
+human artifact check. It uses one local song to create a bounded adversarial
+stress—two correlated copies at the equal-power midpoint, each using the +3 dB
+trim parameter limit—and rejects a trial unless the unchanged current master
+actually exceeds −1 dBTP while the candidate contains it. This deliberately
+strict combination is not a reachable Autopilot normalization state or a
+production-fidelity transition. Both central
+ten-second renders are matched by attenuation only to within 0.1 LU and then
+share enough additional attenuation to remain at or below −6 dBTP. They play at
+the live context's native rate through a neutral post-master path, not through
+the master a second time. A rating unlocks only after both anonymous versions
+complete with reset-owned browser-audio health evidence. Orders alternate from
+a cryptographically random start, every fourth trial is a hidden identical-arm
+control, and each immutable trial accepts one rating. Mapping remains hidden
+until an eight-trial block closes. Only aggregate counts remain in tab memory;
+there is no filename/audio/measurement/order persistence, upload, or export. A
+fresh Chromium run with a generated stereo fixture verified preparation, both
+healthy playbacks, one-vote ownership, hidden aggregation, and mid-play
+cancellation. It did not provide a human real-music judgment. A predeclared
+multi-listener/genre/device protocol, a newly versioned live graph, and a fresh
+device soak are still required before promotion.
 
 A deterministic three-hour Party Autopilot coordinator soak now drives the same
 `party-autopilot-decision/v3` function used by the live app. It therefore exercises the real

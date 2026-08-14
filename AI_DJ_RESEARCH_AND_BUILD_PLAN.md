@@ -2083,21 +2083,75 @@ These are the active backlog, not reasons to discard the prototype.
   the live post-master/output path.
 - **D-056 — Fail the current master before evaluating a bounded peak guard:**
   `post-master-peak-check/v2` lowers the diagnostics overload ceiling from 0 to
-  −1 dBTP. `transition-rehearsal-browser-check/v5` keeps the existing hot
-  transition check and adds a two-tone overload at 44.1, 48, and 96 kHz. In a
+  −1 dBTP. `transition-rehearsal-browser-check/v6` keeps the existing hot
+  transition check and adds a distinct-stereo mixed-frequency overload at
+  44.1, 48, and 96 kHz. It renders the current master once and fans that exact
+  PCM into direct, identity-4×, and guarded-4× branches, making the paired
+  evidence materially different from the earlier v5 candidate-only result. In a
   fresh Chromium `OfflineAudioContext` run, the unchanged live
-  `mazzy-master/v1` path reached −0.1 dBFS sample peak and +0.3 dBTP estimated
-  peak at every rate, so it correctly fails the stronger gate. A separate
+  `mazzy-master/v1` path reached +0.2 dBTP at 44.1/48 kHz and +0.1 dBTP at
+  96 kHz, so it correctly fails the stronger gate. A separate
   `mazzy-master-peak-guard-candidate/v1` inserts a four-times-oversampled final
   safety curve that is identity below −3 dBFS and bounded above it; the same
   cells measured −2.7 dBFS sample peak and −2.5 dBTP estimated peak. All other
-  v5 rehearsal checks passed. The report explicitly stores
+  v6 rehearsal checks passed. The report explicitly stores
   `liveMasterPromotionReady: false`, and normal builds do not import the
   candidate. A hard safety curve may introduce audible overload distortion, so
   real-music current/candidate listening, a new master/audio-engine contract,
   and a fresh device soak are mandatory before any live wiring. This is a
   viable diagnostics candidate, not output-device, speaker, certified-meter,
   or production peak-ceiling evidence.
+- **D-057 — Keep peak-guard listening private, bounded, paired, and blind:** the
+  diagnostics-only `master-peak-guard-private-listening/v2` lab does not create
+  arbitrary adaptive overload. It constructs one fixed, bounded adversarial
+  stress: two correlated copies at the equal-power midpoint, each using the
+  existing +3 dB track-trim parameter limit (approximately 2× pre-master).
+  Because the live peak-aware trim policy and no-repeat rule make that combined
+  state unreachable, this is not production-fidelity transition evidence. A trial is
+  eligible only when the current `mazzy-master/v1` branch exceeds −1 dBTP, the
+  diagnostics candidate remains within the gate, its nonlinear delta is
+  nonzero, and its peak reduction is at least 0.2 dB. The paired-render contract
+  renders the current master once with identical padding, then fans that exact
+  PCM into synchronized direct, identity-4×, and guarded-4× branches before
+  cropping the same central program window. Runtime validation binds branch
+  kind, variant, stage, master/candidate version, sample rate, frame count, and
+  an ephemeral comparison ordinal. Distinct left/right stress signals make
+  swaps and crosstalk observable. The identity path is checked by bounded RMS
+  and estimated-peak deltas plus a delay-aligned stereo residual below −40 dB
+  and aligned sample error no greater than 0.02; raw unaligned sample delta
+  remains descriptive because oversampling latency by itself is not an
+  audio-level failure.
+
+  The private artifact audition uses attenuation only: the louder integrated-
+  loudness arm is reduced to the quieter arm, one common safety attenuation is
+  then applied, and both results are remeasured. A trial fails closed unless the
+  residual difference is at most 0.1 LU and both estimated peaks are at or
+  below −6 dBTP. Already-mastered buffers play at the live AudioContext sample
+  rate through a diagnostics-only meter/health/output path that bypasses
+  `masterGain` and the limiter, preventing double mastering and resampling. Each
+  audition interval requires an acknowledged health reset, exact sample-rate
+  support, full frame/report coverage, finite unclipped signal, no processor or
+  context interruption, and expected-active false at settlement. Both arms
+  must complete once under the same generation before one rating is accepted.
+
+  Each eight-trial block starts with a cryptographically random arm order,
+  alternates comparison order, and inserts a hidden identical-arm control every
+  fourth trial. Arm mapping and variant-specific counts remain hidden until the
+  block closes; a consumed trial cannot be replayed or rated again. Stop,
+  visibility loss, context interruption, media-device change, pagehide, stale
+  async completion, or unhealthy output invalidates rating authority. The page
+  stops retaining the selected File, full decode, and unmatched renders after
+  preparation and keeps only two short anonymous matched buffers plus aggregate
+  fixed-enum counts in tab memory. It has no storage, cache, upload, network,
+  export, clipboard, filename, measurement, order, timestamp, or device-ID
+  report path. A fresh Chromium run with generated stereo PCM verified eligible
+  preparation, both healthy neutral playbacks, hidden one-vote aggregation, and
+  authoritative mid-play cancellation; it is workflow evidence, not a human
+  real-music result. `candidatePromotionReady` remains false. Promotion still
+  requires a predeclared multi-listener/genre/device protocol, remaining
+  true-peak conformance, browser CPU/latency evidence, a new master/audio-engine
+  contract covering every output path, a fresh two-hour device soak, and real
+  party evidence.
 
 ### Open questions
 
