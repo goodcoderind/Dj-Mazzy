@@ -8,7 +8,10 @@ import { buildAutoPilotPlanningIds } from "./autoPilotCrate";
 import type { TransitionPlanV3 } from "../domain/transitionPlan";
 import type { KeyLockCapability } from "../domain/keyLockCapability";
 
-export const PARTY_AUTOPILOT_DECISION_VERSION = "party-autopilot-decision/v3" as const;
+export const PARTY_AUTOPILOT_DECISION_VERSION = "party-autopilot-decision/v4" as const;
+export const PARTY_AUTOPILOT_PRELOAD_LEASE_SECONDS = 20;
+export const PARTY_AUTOPILOT_PRELOAD_RUNWAY_RESERVE_SECONDS = 5;
+export const PARTY_AUTOPILOT_MIN_PRELOAD_LEASE_SECONDS = 0.5;
 
 export type AutoPilotDeck = "a" | "b";
 
@@ -30,6 +33,18 @@ export type AutoPilotDeckObservation = Readonly<{
   analysis?: Partial<TransitionTrack> | null;
 }>;
 
+export type AutoPilotPreloadLease = Readonly<{
+  operation: number;
+  generation: number;
+  deck: AutoPilotDeck;
+  trackId: string;
+  loadOrdinal: number;
+  sourceTrackId: string | null;
+  sourceLoadKey: string | null;
+  startedAtSeconds: number;
+  deadlineSeconds: number;
+}>;
+
 export type AutoPilotSessionDecisionInput = Readonly<{
   nowSeconds: number;
   source: AutoPilotDeckObservation;
@@ -41,23 +56,27 @@ export type AutoPilotSessionDecisionInput = Readonly<{
   includeRestOfLibrary: boolean;
   energyCurve: HostEnergyCurve;
   sessionProgress: number;
-  preloadBusy: boolean;
+  preloadLease: AutoPilotPreloadLease | null;
   activeTransitionKey: string | null;
   keyLockCapability?: KeyLockCapability | null;
 }>;
 
 export type AutoPilotSessionDecision =
   | Readonly<{ version: typeof PARTY_AUTOPILOT_DECISION_VERSION; kind: "pause-source-stopped" }>
-  | Readonly<{ version: typeof PARTY_AUTOPILOT_DECISION_VERSION; kind: "wait-preload" }>
+  | Readonly<{ version: typeof PARTY_AUTOPILOT_DECISION_VERSION; kind: "wait-preload"; lease: AutoPilotPreloadLease }>
+  | Readonly<{ version: typeof PARTY_AUTOPILOT_DECISION_VERSION; kind: "expire-preload"; lease: AutoPilotPreloadLease }>
+  | Readonly<{ version: typeof PARTY_AUTOPILOT_DECISION_VERSION; kind: "cancel-preload-source-changed"; lease: AutoPilotPreloadLease }>
   | Readonly<{ version: typeof PARTY_AUTOPILOT_DECISION_VERSION; kind: "eject-blocked-target"; targetTrackId: string }>
   | Readonly<{
       version: typeof PARTY_AUTOPILOT_DECISION_VERSION;
       kind: "preload";
       trackId: string;
+      preloadDeadlineSeconds: number;
       selectionSource: "queue" | "library";
       afterNextTrackId: string | null;
       reasons: readonly string[];
     }>
+  | Readonly<{ version: typeof PARTY_AUTOPILOT_DECISION_VERSION; kind: "pause-preload-runway" }>
   | Readonly<{ version: typeof PARTY_AUTOPILOT_DECISION_VERSION; kind: "declare-final"; sourceTrackId: string | null }>
   | Readonly<{ version: typeof PARTY_AUTOPILOT_DECISION_VERSION; kind: "wait-target"; reason: "target-active" | "invalid-observation" | "unsupported-template" }>
   | Readonly<{ version: typeof PARTY_AUTOPILOT_DECISION_VERSION; kind: "wait-owned-transition"; transitionKey: string }>
@@ -65,6 +84,37 @@ export type AutoPilotSessionDecision =
   | Readonly<{ version: typeof PARTY_AUTOPILOT_DECISION_VERSION; kind: "arm"; transitionKey: string; plan: Readonly<TransitionPlanV3> }>;
 
 const finiteNonNegative = (value: number) => Number.isFinite(value) && value >= 0;
+const positiveSafeInteger = (value: number) => Number.isSafeInteger(value) && value > 0;
+
+const validPreloadLease = (lease: AutoPilotPreloadLease, targetDeck: AutoPilotDeck, nowSeconds: number) =>
+  positiveSafeInteger(lease.operation) && positiveSafeInteger(lease.generation) &&
+  positiveSafeInteger(lease.loadOrdinal) && lease.deck === targetDeck &&
+  typeof lease.trackId === "string" && lease.trackId.length > 0 &&
+  (lease.sourceTrackId == null || (typeof lease.sourceTrackId === "string" && lease.sourceTrackId.length > 0)) &&
+  (lease.sourceLoadKey == null || (typeof lease.sourceLoadKey === "string" && lease.sourceLoadKey.length > 0)) &&
+  finiteNonNegative(lease.startedAtSeconds) && finiteNonNegative(lease.deadlineSeconds) &&
+  lease.startedAtSeconds <= nowSeconds &&
+  lease.deadlineSeconds > lease.startedAtSeconds &&
+  lease.deadlineSeconds - lease.startedAtSeconds >= PARTY_AUTOPILOT_MIN_PRELOAD_LEASE_SECONDS - 1e-9 &&
+  lease.deadlineSeconds - lease.startedAtSeconds <= PARTY_AUTOPILOT_PRELOAD_LEASE_SECONDS + 1e-9;
+
+export const deriveAutoPilotPreloadDeadline = (input: Readonly<{
+  nowSeconds: number;
+  sourceDurationSeconds: number;
+  sourcePositionSeconds: number;
+  sourcePlaybackRate: number;
+}>) => {
+  if (!finiteNonNegative(input.nowSeconds) || !finiteNonNegative(input.sourceDurationSeconds) ||
+    !finiteNonNegative(input.sourcePositionSeconds) || !Number.isFinite(input.sourcePlaybackRate) ||
+    input.sourcePlaybackRate <= 0) return null;
+  const remainingWallSeconds = Math.max(
+    0,
+    (input.sourceDurationSeconds - input.sourcePositionSeconds) / input.sourcePlaybackRate
+  );
+  const usableSeconds = remainingWallSeconds - PARTY_AUTOPILOT_PRELOAD_RUNWAY_RESERVE_SECONDS;
+  if (usableSeconds < PARTY_AUTOPILOT_MIN_PRELOAD_LEASE_SECONDS) return null;
+  return input.nowSeconds + Math.min(PARTY_AUTOPILOT_PRELOAD_LEASE_SECONDS, usableSeconds);
+};
 
 const validObservation = (observation: AutoPilotDeckObservation) =>
   finiteNonNegative(observation.durationSeconds) &&
@@ -163,7 +213,18 @@ export const decideAutoPilotSessionTick = (
   if (!validObservation(input.source) || (input.target.ready && !validObservation(input.target))) {
     return Object.freeze({ version, kind: "wait-target", reason: "invalid-observation" });
   }
-  if (input.preloadBusy) return Object.freeze({ version, kind: "wait-preload" });
+  if (input.preloadLease) {
+    if (!validPreloadLease(input.preloadLease, input.target.deck, input.nowSeconds)) {
+      throw new RangeError("preload lease must be exact, finite, and owned by the target deck");
+    }
+    if (input.preloadLease.sourceTrackId !== input.source.trackId ||
+      input.preloadLease.sourceLoadKey !== input.source.loadKey) {
+      return Object.freeze({ version, kind: "cancel-preload-source-changed", lease: input.preloadLease });
+    }
+    return input.nowSeconds < input.preloadLease.deadlineSeconds
+      ? Object.freeze({ version, kind: "wait-preload" as const, lease: input.preloadLease })
+      : Object.freeze({ version, kind: "expire-preload" as const, lease: input.preloadLease });
+  }
 
   const loadedTarget = input.target.trackId
     ? input.library.find((track) => track.id === input.target.trackId)
@@ -192,10 +253,20 @@ export const decideAutoPilotSessionTick = (
     if (!nextTrack) {
       return Object.freeze({ version, kind: "declare-final", sourceTrackId: input.source.trackId });
     }
+    const preloadDeadlineSeconds = deriveAutoPilotPreloadDeadline({
+      nowSeconds: input.nowSeconds,
+      sourceDurationSeconds: input.source.durationSeconds,
+      sourcePositionSeconds: input.source.positionSeconds,
+      sourcePlaybackRate: input.source.playbackRate
+    });
+    if (preloadDeadlineSeconds == null) {
+      return Object.freeze({ version, kind: "pause-preload-runway" });
+    }
     return Object.freeze({
       version,
       kind: "preload",
       trackId: nextTrack.id,
+      preloadDeadlineSeconds,
       selectionSource: input.queueTrackIds.includes(nextTrack.id) ? "queue" : "library",
       afterNextTrackId: horizon?.afterNextTrack?.id ?? null,
       reasons: Object.freeze(horizon?.reasons ?? ["Queue order preserved."])

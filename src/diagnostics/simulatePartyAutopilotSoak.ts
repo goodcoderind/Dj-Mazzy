@@ -1,4 +1,9 @@
-import { decideAutoPilotSessionTick, type AutoPilotDeck, type AutoPilotSessionTrack } from "../planning/autoPilotSessionDecision";
+import {
+  decideAutoPilotSessionTick,
+  type AutoPilotDeck,
+  type AutoPilotPreloadLease,
+  type AutoPilotSessionTrack
+} from "../planning/autoPilotSessionDecision";
 import { PARTY_ENERGY_CURVES } from "../planning/energyProfiles";
 import { decideRescueTransition } from "../planning/rescueTransition";
 import { createPartySessionClock, partySessionClockSnapshot, pausePartySessionClock, startPartySessionClock } from "../planning/PartySessionClock";
@@ -6,7 +11,7 @@ import type { TransitionTrack } from "../planning/TransitionPlanner";
 import type { KeyLockCapability } from "../domain/keyLockCapability";
 import { createPartyAutopilotTraceRecorder, evaluatePartyAutopilotTrace, type PartyAutopilotEvaluation } from "./partyAutopilotTrace";
 
-export const PARTY_AUTOPILOT_SOAK_SCHEMA_VERSION = "party-autopilot-coordinator-soak/v4" as const;
+export const PARTY_AUTOPILOT_SOAK_SCHEMA_VERSION = "party-autopilot-coordinator-soak/v5" as const;
 
 export type SimulatedPartyTrack = Readonly<{
   id: string;
@@ -38,6 +43,8 @@ export type PartyAutopilotSoakOptions = Readonly<{
   keyLockCapability?: KeyLockCapability | null;
   /** Synthetic load failures, consumed once per listed track in this run. */
   unplayableTrackIds?: readonly string[];
+  /** Synthetic preloads that never settle until the production lease expires. */
+  neverSettlingPreloadTrackIds?: readonly string[];
 }>;
 
 export type SimulatedPartyRescueEvent = Readonly<{
@@ -49,7 +56,7 @@ export type SimulatedPartyRescueEvent = Readonly<{
 export type PartyAutopilotSoakResult = Readonly<{
   schemaVersion: typeof PARTY_AUTOPILOT_SOAK_SCHEMA_VERSION;
   completed: boolean;
-  stopReason: "observation-horizon" | "crate-exhausted" | "rescue-paused" | "invalid";
+  stopReason: "observation-horizon" | "crate-exhausted" | "rescue-paused" | "preload-timeout-paused" | "preload-runway-paused" | "invalid";
   evidenceScope: "shared Autopilot coordinator and state invariants only; not audio continuity, musical quality, decode, or speaker output";
   observationHorizonSeconds: number;
   elapsedActiveSeconds: number;
@@ -152,8 +159,11 @@ export const simulatePartyAutopilotSoak = (options: PartyAutopilotSoakOptions): 
   let nextOperation = 0;
   let nextTransition = 0;
   let activeTransitionKey: string | null = null;
+  let preloadLease: AutoPilotPreloadLease | null = null;
   const unavailableTrackIds = new Set<string>();
   const syntheticUnplayableIds = new Set(options.unplayableTrackIds ?? []);
+  const syntheticNeverSettlingIds = new Set(options.neverSettlingPreloadTrackIds ?? []);
+  let consecutivePreloadTimeouts = 0;
   let stopReason: PartyAutopilotSoakResult["stopReason"] = "invalid";
 
   const clockSnapshot = () => partySessionClockSnapshot(clock, now);
@@ -212,10 +222,41 @@ export const simulatePartyAutopilotSoak = (options: PartyAutopilotSoakOptions): 
       includeRestOfLibrary: options.includeRestOfLibrary ?? true,
       energyCurve: PARTY_ENERGY_CURVES.build,
       sessionProgress: clockSnapshot().energyProgress,
-      preloadBusy: false,
+      preloadLease,
       activeTransitionKey,
       keyLockCapability: options.keyLockCapability ?? null
     });
+
+    if (decision.kind === "wait-preload") {
+      const untilDeadline = Math.max(0, decision.lease.deadlineSeconds - now);
+      const rendered = advance(untilDeadline);
+      if (rendered + 1e-9 < untilDeadline) {
+        stopReason = "observation-horizon";
+        break;
+      }
+      continue;
+    }
+    if (decision.kind === "expire-preload") {
+      append({ type: "preload-settled", activeSecond: 0, operation: decision.lease.operation, outcome: "timed-out" });
+      unavailableTrackIds.add(decision.lease.trackId);
+      targetId = null;
+      targetLoad = null;
+      preloadLease = null;
+      consecutivePreloadTimeouts += 1;
+      if (consecutivePreloadTimeouts >= 2) {
+        append({ type: "session-paused", activeSecond: 0, reason: "preload-timeout" });
+        clock = pausePartySessionClock(clock, now);
+        stopReason = "preload-timeout-paused";
+        break;
+      }
+      continue;
+    }
+    if (decision.kind === "pause-preload-runway") {
+      append({ type: "session-paused", activeSecond: 0, reason: "preload-runway" });
+      clock = pausePartySessionClock(clock, now);
+      stopReason = "preload-runway-paused";
+      break;
+    }
 
     if (decision.kind === "preload") {
       const requestedId = decision.trackId;
@@ -223,14 +264,30 @@ export const simulatePartyAutopilotSoak = (options: PartyAutopilotSoakOptions): 
       targetLoad = ++nextLoad;
       const operation = ++nextOperation;
       append({ type: "preload-started", activeSecond: 0, operation, generation: operation, deck: targetDeck, trackOrdinal: ordinals.get(targetId)!, loadOrdinal: targetLoad, selectionSource: decision.selectionSource });
+      if (syntheticNeverSettlingIds.delete(requestedId)) {
+        preloadLease = Object.freeze({
+          operation,
+          generation: operation,
+          deck: targetDeck,
+          trackId: requestedId,
+          loadOrdinal: targetLoad,
+          sourceTrackId: sourceId,
+          sourceLoadKey: `${ordinals.get(sourceId)}:${sourceLoad}`,
+          startedAtSeconds: now,
+          deadlineSeconds: decision.preloadDeadlineSeconds
+        });
+        continue;
+      }
       if (syntheticUnplayableIds.delete(requestedId)) {
         append({ type: "preload-settled", activeSecond: 0, operation, outcome: "unplayable" });
         unavailableTrackIds.add(requestedId);
+        consecutivePreloadTimeouts = 0;
         targetId = null;
         targetLoad = null;
         continue;
       }
       append({ type: "preload-settled", activeSecond: 0, operation, outcome: "committed" });
+      consecutivePreloadTimeouts = 0;
       queue = queue.filter((id) => id !== targetId);
       append({ type: "queue-committed", activeSecond: 0, revision: ++queueRevision, trackOrdinals: queue.map((id) => ordinals.get(id)!) });
       continue;

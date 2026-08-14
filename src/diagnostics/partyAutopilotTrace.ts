@@ -1,5 +1,5 @@
-export const PARTY_AUTOPILOT_TRACE_SCHEMA_VERSION = "party-autopilot-trace/v3" as const;
-export const PARTY_AUTOPILOT_EVALUATION_SCHEMA_VERSION = "party-autopilot-evaluation/v3" as const;
+export const PARTY_AUTOPILOT_TRACE_SCHEMA_VERSION = "party-autopilot-trace/v4" as const;
+export const PARTY_AUTOPILOT_EVALUATION_SCHEMA_VERSION = "party-autopilot-evaluation/v4" as const;
 
 export type PartyDeck = "a" | "b";
 export type PartyTrackOrdinal = number;
@@ -12,11 +12,11 @@ type EventBase = Readonly<{
 
 export type PartyAutopilotEvent = EventBase & (
   | Readonly<{ type: "session-started" | "session-resumed" }>
-  | Readonly<{ type: "session-paused"; reason: "host-control" | "host-request" | "rescue" | "source-stopped" }>
+  | Readonly<{ type: "session-paused"; reason: "host-control" | "host-request" | "rescue" | "source-stopped" | "preload-timeout" | "preload-runway" }>
   | Readonly<{ type: "queue-committed"; revision: number; trackOrdinals: readonly PartyTrackOrdinal[] }>
   | Readonly<{ type: "track-played"; trackOrdinal: PartyTrackOrdinal; loadOrdinal: PartyLoadOrdinal; cause: "host" | "transition" | "rescue" }>
   | Readonly<{ type: "preload-started"; operation: number; generation: number; deck: PartyDeck; trackOrdinal: PartyTrackOrdinal; loadOrdinal: PartyLoadOrdinal; selectionSource: "queue" | "library" }>
-  | Readonly<{ type: "preload-settled"; operation: number; outcome: "committed" | "failed" | "unplayable" | "superseded" | "discarded" }>
+  | Readonly<{ type: "preload-settled"; operation: number; outcome: "committed" | "failed" | "unplayable" | "timed-out" | "superseded" | "discarded" }>
   | Readonly<{ type: "track-playability-restored"; trackOrdinal: PartyTrackOrdinal }>
   | Readonly<{ type: "arm-started"; operation: number; origin: "autopilot" | "host" }>
   | Readonly<{ type: "arm-settled"; operation: number; outcome: "scheduled" | "cancelled" | "failed" }>
@@ -51,6 +51,9 @@ export type PartyAutopilotFailureCode =
   | "overlapping-preload"
   | "preload-owner-mismatch"
   | "unplayable-track-retried"
+  | "timed-out-track-retried"
+  | "preload-timeout-not-paused"
+  | "unexpected-preload-timeout-pause"
   | "overlapping-arm"
   | "arm-owner-mismatch"
   | "overlapping-transition"
@@ -72,6 +75,7 @@ export type PartyAutopilotEvaluation = Readonly<{
   counters: Readonly<{
     playedTracks: number;
     preloadsCommitted: number;
+    preloadsTimedOut: number;
     transitionsCompleted: number;
     transitionsRescued: number;
     pauses: number;
@@ -96,7 +100,7 @@ const projectEvent = (event: PartyAutopilotEventInput, sequence: number): PartyA
     case "final-revoked":
       return Object.freeze({ ...base, type: event.type });
     case "session-paused":
-      if (!["host-control", "host-request", "rescue", "source-stopped"].includes(event.reason)) return null;
+      if (!["host-control", "host-request", "rescue", "source-stopped", "preload-timeout", "preload-runway"].includes(event.reason)) return null;
       return Object.freeze({ ...base, type: event.type, reason: event.reason });
     case "queue-committed":
       if (!isPositiveInteger(event.revision) || !Array.isArray(event.trackOrdinals) ||
@@ -112,7 +116,7 @@ const projectEvent = (event: PartyAutopilotEventInput, sequence: number): PartyA
         !isPositiveInteger(event.loadOrdinal) || !["queue", "library"].includes(event.selectionSource)) return null;
       return Object.freeze({ ...base, type: event.type, operation: event.operation, generation: event.generation, deck: event.deck, trackOrdinal: event.trackOrdinal, loadOrdinal: event.loadOrdinal, selectionSource: event.selectionSource });
     case "preload-settled":
-      if (!isPositiveInteger(event.operation) || !["committed", "failed", "unplayable", "superseded", "discarded"].includes(event.outcome)) return null;
+      if (!isPositiveInteger(event.operation) || !["committed", "failed", "unplayable", "timed-out", "superseded", "discarded"].includes(event.outcome)) return null;
       return Object.freeze({ ...base, type: event.type, operation: event.operation, outcome: event.outcome });
     case "track-playability-restored":
       if (!isPositiveInteger(event.trackOrdinal)) return null;
@@ -220,14 +224,23 @@ export const evaluatePartyAutopilotTrace = (trace: PartyAutopilotTrace): PartyAu
   const playedLoads = new Set<string>();
   const playedTracks = new Set<number>();
   const unplayableTracks = new Set<number>();
+  const timedOutTracks = new Set<number>();
   let currentPlayedOwner: { trackOrdinal: number; loadOrdinal: number } | null = null;
   let preloadsCommitted = 0;
+  let preloadsTimedOut = 0;
+  let consecutivePreloadTimeouts = 0;
+  let preloadTimeoutPauseRequired = false;
   let transitionsCompleted = 0;
   let transitionsRescued = 0;
   let pauses = 0;
 
   for (let index = 0; index < trace.events.length; index += 1) {
     const event = trace.events[index];
+    if (preloadTimeoutPauseRequired &&
+      !(event?.type === "session-paused" && event.reason === "preload-timeout")) {
+      failures.add("preload-timeout-not-paused");
+      preloadTimeoutPauseRequired = false;
+    }
     if (ended) failures.add("invalid-session-lifecycle");
     if (!event || event.sequence !== index + 1) failures.add("sequence-gap");
     if (!Number.isInteger(event?.activeSecond) || event.activeSecond < 0) failures.add("malformed-event");
@@ -247,11 +260,16 @@ export const evaluatePartyAutopilotTrace = (trace: PartyAutopilotTrace): PartyAu
       case "session-resumed":
         if (!started || running || ended) failures.add("invalid-session-lifecycle");
         running = true;
+        consecutivePreloadTimeouts = 0;
         break;
       case "session-paused":
         if (!started || !running || ended) failures.add("invalid-session-lifecycle");
         if (rescuePauseRequired && event.reason !== "rescue") failures.add("rescue-not-paused");
         rescuePauseRequired = false;
+        if (event.reason === "preload-timeout") {
+          if (consecutivePreloadTimeouts < 2) failures.add("unexpected-preload-timeout-pause");
+          preloadTimeoutPauseRequired = false;
+        }
         running = false;
         pauses += 1;
         break;
@@ -290,6 +308,7 @@ export const evaluatePartyAutopilotTrace = (trace: PartyAutopilotTrace): PartyAu
         }
         if (!queueEvidenceSeen) failures.add("queue-evidence-missing");
         if (unplayableTracks.has(event.trackOrdinal)) failures.add("unplayable-track-retried");
+        if (timedOutTracks.has(event.trackOrdinal)) failures.add("timed-out-track-retried");
         activePreload = event;
         break;
       case "preload-settled":
@@ -301,15 +320,28 @@ export const evaluatePartyAutopilotTrace = (trace: PartyAutopilotTrace): PartyAu
             committedPreload = activePreload;
             if (activePreload.selectionSource === "queue") queuedCommittedTarget = activePreload.trackOrdinal;
             preloadsCommitted += 1;
+            consecutivePreloadTimeouts = 0;
           } else if (event.outcome === "unplayable") {
             unplayableTracks.add(activePreload.trackOrdinal);
+            consecutivePreloadTimeouts = 0;
+          } else if (event.outcome === "timed-out") {
+            timedOutTracks.add(activePreload.trackOrdinal);
+            preloadsTimedOut += 1;
+            consecutivePreloadTimeouts += 1;
+            if (consecutivePreloadTimeouts >= 2) preloadTimeoutPauseRequired = true;
+          } else {
+            consecutivePreloadTimeouts = 0;
           }
           activePreload = null;
         }
         break;
       case "track-playability-restored":
         if (!started || ended || !isPositiveInteger(event.trackOrdinal)) failures.add("invalid-session-lifecycle");
-        else unplayableTracks.delete(event.trackOrdinal);
+        else {
+          unplayableTracks.delete(event.trackOrdinal);
+          timedOutTracks.delete(event.trackOrdinal);
+          consecutivePreloadTimeouts = 0;
+        }
         break;
       case "arm-started":
         if (!started || !running || ended) failures.add("invalid-session-lifecycle");
@@ -435,6 +467,7 @@ export const evaluatePartyAutopilotTrace = (trace: PartyAutopilotTrace): PartyAu
   if (!trace.events.length) failures.add("empty-trace");
   if (!started && trace.events.length) failures.add("invalid-session-lifecycle");
   if (rescuePauseRequired) failures.add("rescue-not-paused");
+  if (preloadTimeoutPauseRequired) failures.add("preload-timeout-not-paused");
   const status = failures.size
     ? "invalid"
     : ended
@@ -447,6 +480,7 @@ export const evaluatePartyAutopilotTrace = (trace: PartyAutopilotTrace): PartyAu
     counters: Object.freeze({
       playedTracks: playedTracks.size,
       preloadsCommitted,
+      preloadsTimedOut,
       transitionsCompleted,
       transitionsRescued,
       pauses

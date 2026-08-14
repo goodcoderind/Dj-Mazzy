@@ -44,6 +44,7 @@ describe("Party Autopilot trace", () => {
     expect(evaluation.counters).toEqual({
       playedTracks: 3,
       preloadsCommitted: 2,
+      preloadsTimedOut: 0,
       transitionsCompleted: 2,
       transitionsRescued: 0,
       pauses: 0
@@ -212,6 +213,61 @@ describe("Party Autopilot trace", () => {
       { type: "preload-settled", activeSecond: 6, operation: 2, outcome: "failed" }
     ]);
     expect(evaluatePartyAutopilotTrace(trace).failureCodes).not.toContain("unplayable-track-retried");
+  });
+
+  it("rejects retrying a timed-out preload unless a manual load restores it", () => {
+    const rejected = evaluatePartyAutopilotTrace(record([
+      { type: "session-started", activeSecond: 0 },
+      { type: "queue-committed", activeSecond: 0, revision: 1, trackOrdinals: [2] },
+      { type: "track-played", activeSecond: 0, trackOrdinal: 1, loadOrdinal: 1, cause: "host" },
+      { type: "preload-started", activeSecond: 1, operation: 1, generation: 1, deck: "b", trackOrdinal: 2, loadOrdinal: 2, selectionSource: "queue" },
+      { type: "preload-settled", activeSecond: 21, operation: 1, outcome: "timed-out" },
+      { type: "preload-started", activeSecond: 22, operation: 2, generation: 2, deck: "b", trackOrdinal: 2, loadOrdinal: 3, selectionSource: "queue" }
+    ]));
+    expect(rejected.failureCodes).toContain("timed-out-track-retried");
+    expect(rejected.counters.preloadsTimedOut).toBe(1);
+
+    const restored = evaluatePartyAutopilotTrace(record([
+      { type: "session-started", activeSecond: 0 },
+      { type: "queue-committed", activeSecond: 0, revision: 1, trackOrdinals: [2] },
+      { type: "track-played", activeSecond: 0, trackOrdinal: 1, loadOrdinal: 1, cause: "host" },
+      { type: "preload-started", activeSecond: 1, operation: 1, generation: 1, deck: "b", trackOrdinal: 2, loadOrdinal: 2, selectionSource: "queue" },
+      { type: "preload-settled", activeSecond: 21, operation: 1, outcome: "timed-out" },
+      { type: "session-paused", activeSecond: 21, reason: "host-control" },
+      { type: "track-playability-restored", activeSecond: 21, trackOrdinal: 2 },
+      { type: "session-resumed", activeSecond: 22 },
+      { type: "preload-started", activeSecond: 23, operation: 2, generation: 2, deck: "b", trackOrdinal: 2, loadOrdinal: 3, selectionSource: "queue" },
+      { type: "preload-settled", activeSecond: 24, operation: 2, outcome: "failed" }
+    ]));
+    expect(restored.failureCodes).not.toContain("timed-out-track-retried");
+  });
+
+  it("requires the second consecutive timeout to pause immediately and rejects premature timeout pauses", () => {
+    const missingPause = evaluatePartyAutopilotTrace(record([
+      { type: "session-started", activeSecond: 0 },
+      { type: "queue-committed", activeSecond: 0, revision: 1, trackOrdinals: [2, 3] },
+      { type: "track-played", activeSecond: 0, trackOrdinal: 1, loadOrdinal: 1, cause: "host" },
+      { type: "preload-started", activeSecond: 1, operation: 1, generation: 1, deck: "b", trackOrdinal: 2, loadOrdinal: 2, selectionSource: "queue" },
+      { type: "preload-settled", activeSecond: 21, operation: 1, outcome: "timed-out" },
+      { type: "preload-started", activeSecond: 22, operation: 2, generation: 2, deck: "b", trackOrdinal: 3, loadOrdinal: 3, selectionSource: "queue" },
+      { type: "preload-settled", activeSecond: 42, operation: 2, outcome: "timed-out" }
+    ]));
+    expect(missingPause.failureCodes).toContain("preload-timeout-not-paused");
+
+    const prematurePause = evaluatePartyAutopilotTrace(record([
+      { type: "session-started", activeSecond: 0 },
+      { type: "queue-committed", activeSecond: 0, revision: 1, trackOrdinals: [2] },
+      { type: "track-played", activeSecond: 0, trackOrdinal: 1, loadOrdinal: 1, cause: "host" },
+      { type: "session-paused", activeSecond: 1, reason: "preload-timeout" }
+    ]));
+    expect(prematurePause.failureCodes).toContain("unexpected-preload-timeout-pause");
+
+    const runwayPause = evaluatePartyAutopilotTrace(record([
+      { type: "session-started", activeSecond: 0 },
+      { type: "track-played", activeSecond: 0, trackOrdinal: 1, loadOrdinal: 1, cause: "host" },
+      { type: "session-paused", activeSecond: 1, reason: "preload-runway" }
+    ]));
+    expect(runwayPause.status).toBe("valid-in-progress");
   });
 
   it("records only bounded allowlisted fields", () => {

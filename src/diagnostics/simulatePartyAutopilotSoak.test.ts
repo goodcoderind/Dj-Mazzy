@@ -102,6 +102,60 @@ describe("shared Party Autopilot coordinator soak", () => {
     expect(result.errors).toEqual([]);
   });
 
+  it("expires one never-settling preload and fails over to the next queued song", () => {
+    const result = simulatePartyAutopilotSoak({
+      tracks: library(4, 120),
+      queuedTrackIds: ["track-1", "track-2"],
+      neverSettlingPreloadTrackIds: ["track-1"],
+      includeRestOfLibrary: false,
+      sessionDurationSeconds: 600
+    });
+
+    expect(result.playedTrackIds).toEqual(["track-0", "track-2"]);
+    expect(result.evaluation.counters.preloadsTimedOut).toBe(1);
+    expect(result.evaluation.failureCodes).not.toContain("timed-out-track-retried");
+    expect(result.stopReason).toBe("crate-exhausted");
+    expect(result.errors).toEqual([]);
+  });
+
+  it("pauses safely after two consecutive never-settling preloads", () => {
+    const result = simulatePartyAutopilotSoak({
+      tracks: library(4, 120),
+      queuedTrackIds: ["track-1", "track-2", "track-3"],
+      neverSettlingPreloadTrackIds: ["track-1", "track-2"],
+      includeRestOfLibrary: false,
+      sessionDurationSeconds: 600
+    });
+
+    expect(result.playedTrackIds).toEqual(["track-0"]);
+    expect(result.elapsedActiveSeconds).toBe(40);
+    expect(result.stopReason).toBe("preload-timeout-paused");
+    expect(result.evaluation.status).toBe("valid-in-progress");
+    expect(result.evaluation.counters.preloadsTimedOut).toBe(2);
+    expect(result.evaluation.counters.pauses).toBe(1);
+    expect(result.errors).toEqual([]);
+  });
+
+  it.each([
+    { durationSeconds: 45, stopReason: "preload-timeout-paused", elapsed: 40, timeouts: 2 },
+    { durationSeconds: 30, stopReason: "preload-timeout-paused", elapsed: 25, timeouts: 2 },
+    { durationSeconds: 10, stopReason: "preload-runway-paused", elapsed: 5, timeouts: 1 },
+    { durationSeconds: 4, stopReason: "preload-runway-paused", elapsed: 0, timeouts: 0 }
+  ])("preserves source runway for a $durationSeconds-second starting song", ({ durationSeconds, stopReason, elapsed, timeouts }) => {
+    const result = simulatePartyAutopilotSoak({
+      tracks: library(4, durationSeconds),
+      queuedTrackIds: ["track-1", "track-2", "track-3"],
+      neverSettlingPreloadTrackIds: ["track-1", "track-2"],
+      includeRestOfLibrary: false,
+      sessionDurationSeconds: 300
+    });
+    expect(result.stopReason).toBe(stopReason);
+    expect(result.elapsedActiveSeconds).toBe(elapsed);
+    expect(result.evaluation.counters.preloadsTimedOut).toBe(timeouts);
+    expect(result.evaluation.status).toBe("valid-in-progress");
+    expect(result.errors).toEqual([]);
+  });
+
   it("models production Rescue as an immediate paused state", () => {
     const result = simulatePartyAutopilotSoak({
       tracks: library(10, 180),

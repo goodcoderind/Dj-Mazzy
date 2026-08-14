@@ -2152,6 +2152,36 @@ These are the active backlog, not reasons to discard the prototype.
   true-peak conformance, browser CPU/latency evidence, a new master/audio-engine
   contract covering every output path, a fresh two-hour device soak, and real
   party evidence.
+- **D-058 — Bound every unattended preload with exact audio-clock ownership:**
+  `party-autopilot-decision/v4` replaces the open-ended preload-busy boolean
+  with an immutable operation/generation/deck/track/load lease whose deadline is
+  at most 20 seconds of Web Audio clock time. The coordinator shortens the
+  deadline to preserve five seconds of audible source runway and pauses before
+  starting a load when even a half-second owned attempt cannot preserve that
+  reserve. Before the deadline the coordinator waits;
+  at or after it the coordinator returns the exact lease to expire. Production
+  revalidates that full identity before invalidating the deck load, settling the
+  trace, or changing eligibility, so a stale promise cannot clear, eject, or
+  commit a successor. One expiry places only that song in a tab-memory
+  “took too long” skip set and immediately replans queue-first while the source
+  keeps playing. Two consecutive expiries pause Autopilot and its party clock,
+  release the wake lock, preserve the current song, and require an explicit host
+  restart. Any current non-timeout settlement breaks the consecutive run.
+  Settlement rechecks the audio clock itself, so a completion at or after the
+  deadline cannot beat the 500 ms watchdog poll. File reads are aborted and the
+  operation-scoped analysis worker is terminated on invalidation. The Web Audio
+  decode API has no cancellation primitive, so a browser-owned decode may finish
+  in the background; its generation is invalid, and the two-attempt pause bounds
+  concurrent abandoned work. Successful manual loading or **New Party** clears the timeout skip; a timeout
+  is not classified as corrupt audio and is never persisted.
+
+  `party-autopilot-trace/v4` records an allowlisted `timed-out` settlement and
+  `preload-timeout` pause, rejects retrying the same session-local ordinal until
+  a manual playability-restored event, and exposes only aggregate timeout count.
+  `party-autopilot-coordinator-soak/v5` injects never-settling synthetic loads to
+  prove one-song failover and the two-timeout safe pause. This is deterministic
+  coordinator/ownership evidence, not browser decode, main-thread scheduling,
+  audio continuity, or speaker-output evidence.
 
 ### Open questions
 

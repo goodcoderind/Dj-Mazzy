@@ -2,7 +2,7 @@ import { forwardRef, useEffect, useId, useImperativeHandle, useMemo, useRef, use
 import WaveSurfer from "wavesurfer.js";
 import { getAudioEngine } from "../audioContext";
 import { DECK_LOAD_OUTCOME } from "../audio/deckLoadOutcome";
-import { getAnalysisClient } from "../analysis/AnalysisClient";
+import { AnalysisClient, getAnalysisClient } from "../analysis/AnalysisClient";
 import { hasCurrentBasicAnalysis } from "../analysis/analysisVersion";
 import { normalizeProgramLevel } from "../analysis/programLevel";
 import { programLevelFailurePolicy } from "../analysis/programLevelRuntime";
@@ -32,11 +32,28 @@ const manualGridFields = (overrides) => ({
 const manualGridChanged = (before, after) =>
   JSON.stringify(manualGridFields(before)) !== JSON.stringify(manualGridFields(after));
 
-const readFileAsArrayBuffer = (file) =>
+const readFileAsArrayBuffer = (file, signal) =>
   new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.onload = () => resolve(reader.result);
-    reader.onerror = () => reject(new Error("Failed to read audio file"));
+    let settled = false;
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener?.("abort", onAbort);
+      callback(value);
+    };
+    const onAbort = () => {
+      try { reader.abort(); } catch { /* reader already settled */ }
+      finish(reject, new Error("Audio file read cancelled"));
+    };
+    reader.onload = () => finish(resolve, reader.result);
+    reader.onerror = () => finish(reject, new Error("Failed to read audio file"));
+    reader.onabort = () => finish(reject, new Error("Audio file read cancelled"));
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
+    signal?.addEventListener?.("abort", onAbort, { once: true });
     reader.readAsArrayBuffer(file);
   });
 
@@ -104,6 +121,8 @@ const Deck = forwardRef(function Deck(
   const releaseRafRef = useRef(0);
   const currentTrackIdRef = useRef(null);
   const loadGenerationRef = useRef(0);
+  const loadAbortControllerRef = useRef(null);
+  const isolatedAnalysisClientRef = useRef(null);
   const metronomeCancelRef = useRef(null);
   const metronomeUiTimerRef = useRef(0);
   const clickPulseTimersRef = useRef([]);
@@ -574,6 +593,8 @@ const Deck = forwardRef(function Deck(
       metronomeCancelRef.current?.();
       window.clearTimeout(metronomeUiTimerRef.current);
       clickPulseTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+      loadAbortControllerRef.current?.abort?.();
+      isolatedAnalysisClientRef.current?.dispose?.();
       unsubscribe();
       wavesurferRef.current?.destroy();
       if (lastObjectUrlRef.current) {
@@ -582,12 +603,17 @@ const Deck = forwardRef(function Deck(
     };
   }, [color]);
 
-  const loadFileToDeck = async (file, trackId = null, knownAnalysis = null) => {
+  const loadFileToDeck = async (file, trackId = null, knownAnalysis = null, { isolatedAnalysis = false } = {}) => {
     if (playbackStartLocked || playbackStartLockRef?.current) {
       return DECK_LOAD_OUTCOME.cancelled;
     }
     if (!(file instanceof Blob)) return DECK_LOAD_OUTCOME.unplayableFile;
 
+    loadAbortControllerRef.current?.abort?.();
+    isolatedAnalysisClientRef.current?.dispose?.();
+    isolatedAnalysisClientRef.current = null;
+    const loadAbortController = new AbortController();
+    loadAbortControllerRef.current = loadAbortController;
     loadGenerationRef.current += 1;
     const loadGeneration = loadGenerationRef.current;
     let audioContext;
@@ -622,7 +648,7 @@ const Deck = forwardRef(function Deck(
     let decoded;
     const hadCurrentBasicAnalysis = !!knownAnalysis && hasCurrentBasicAnalysis(knownAnalysis);
     try {
-      const arrayBuffer = await readFileAsArrayBuffer(file);
+      const arrayBuffer = await readFileAsArrayBuffer(file, loadAbortController.signal);
       decoded = await audioContext.decodeAudioData(arrayBuffer.slice(0));
       if (loadGenerationRef.current !== loadGeneration || currentTrackIdRef.current !== trackId) {
         return DECK_LOAD_OUTCOME.cancelled;
@@ -643,6 +669,15 @@ const Deck = forwardRef(function Deck(
       return DECK_LOAD_OUTCOME.unplayableFile;
     }
 
+    let isolatedAnalysisClient = null;
+    const analysisClient = () => {
+      if (!isolatedAnalysis) return getAnalysisClient();
+      if (!isolatedAnalysisClient) {
+        isolatedAnalysisClient = new AnalysisClient();
+        isolatedAnalysisClientRef.current = isolatedAnalysisClient;
+      }
+      return isolatedAnalysisClient;
+    };
     try {
       if (loadGenerationRef.current !== loadGeneration || currentTrackIdRef.current !== trackId) return DECK_LOAD_OUTCOME.cancelled;
       let generatedAnalysis = null;
@@ -657,7 +692,7 @@ const Deck = forwardRef(function Deck(
           false
         );
       } else {
-        generatedAnalysis = await getAnalysisClient().analyzeAudioBuffer(decoded);
+        generatedAnalysis = await analysisClient().analyzeAudioBuffer(decoded);
         if (loadGenerationRef.current !== loadGeneration || currentTrackIdRef.current !== trackId) return DECK_LOAD_OUTCOME.cancelled;
         applyAnalysis(
           { ...generatedAnalysis, analysisOverrides: knownAnalysis?.analysisOverrides },
@@ -670,7 +705,7 @@ const Deck = forwardRef(function Deck(
         deckEngine.setTrackTrimDb(activeProgramLevel.normalization.trimDb);
         setProgramLevelRuntimeStatus("ready");
       } else {
-        const current = await getAnalysisClient().analyzeAudioBuffer(decoded);
+        const current = await analysisClient().analyzeAudioBuffer(decoded);
         if (loadGenerationRef.current !== loadGeneration || currentTrackIdRef.current !== trackId) return DECK_LOAD_OUTCOME.cancelled;
         deckEngine.setTrackTrimDb(current.programLevel.normalization.trimDb);
         setProgramLevelRuntimeStatus("ready");
@@ -708,6 +743,11 @@ const Deck = forwardRef(function Deck(
         setKeyLabel("--");
         onBpmChange(channel, null);
       }
+    } finally {
+      if (isolatedAnalysisClientRef.current === isolatedAnalysisClient) {
+        isolatedAnalysisClientRef.current = null;
+      }
+      isolatedAnalysisClient?.dispose();
     }
     if (loadGenerationRef.current !== loadGeneration || currentTrackIdRef.current !== trackId) return DECK_LOAD_OUTCOME.cancelled;
     // Publish deck readiness only after the current track has either a valid
@@ -885,8 +925,8 @@ const Deck = forwardRef(function Deck(
       getCurrentBpm: () => (originalBpm ? Math.round(originalBpm * tempo * 10) / 10 : null),
       play: async () => play(),
       playAt: async (startTime, offset = 0) => play(offset, startTime, false),
-      loadTrack: async (file, trackId = null, knownAnalysis = null) =>
-        loadFileToDeck(file, trackId, knownAnalysis),
+      loadTrack: async (file, trackId = null, knownAnalysis = null, options = undefined) =>
+        loadFileToDeck(file, trackId, knownAnalysis, options),
       getTrackId: () => deckEngine.getSnapshot().trackId,
       getTrackName: () => trackName,
       getDeckSnapshot: () => deckEngine.getSnapshot(),
@@ -901,6 +941,10 @@ const Deck = forwardRef(function Deck(
       stopAt: (when) => stopAt(when),
       eject: () => {
         stopMetronomeAudition();
+        loadAbortControllerRef.current?.abort?.();
+        loadAbortControllerRef.current = null;
+        isolatedAnalysisClientRef.current?.dispose?.();
+        isolatedAnalysisClientRef.current = null;
         loadGenerationRef.current += 1;
         wavesurferRef.current?.empty?.();
         if (lastObjectUrlRef.current) {

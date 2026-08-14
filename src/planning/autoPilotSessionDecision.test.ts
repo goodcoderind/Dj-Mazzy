@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { decideAutoPilotSessionTick, type AutoPilotSessionDecisionInput } from "./autoPilotSessionDecision";
+import {
+  decideAutoPilotSessionTick,
+  deriveAutoPilotPreloadDeadline,
+  type AutoPilotSessionDecisionInput
+} from "./autoPilotSessionDecision";
 import { PARTY_ENERGY_CURVES } from "./energyProfiles";
 
 const track = (id: string, duration = 120, energy = 0.5) => ({
@@ -44,7 +48,7 @@ const input = (overrides: Partial<AutoPilotSessionDecisionInput> = {}): AutoPilo
   includeRestOfLibrary: false,
   energyCurve: PARTY_ENERGY_CURVES.steady,
   sessionProgress: 0.2,
-  preloadBusy: false,
+  preloadLease: null,
   activeTransitionKey: null,
   ...overrides
 });
@@ -53,7 +57,46 @@ describe("production Autopilot tick decision", () => {
   it("pauses when the source is not playing and waits for unsettled preload ownership", () => {
     expect(decideAutoPilotSessionTick(input({ source: { ...input().source, playing: false } })).kind)
       .toBe("pause-source-stopped");
-    expect(decideAutoPilotSessionTick(input({ preloadBusy: true })).kind).toBe("wait-preload");
+    const lease = {
+      operation: 1,
+      generation: 1,
+      deck: "b" as const,
+      trackId: "next",
+      loadOrdinal: 2,
+      sourceTrackId: "source",
+      sourceLoadKey: "a-load-1",
+      startedAtSeconds: 0,
+      deadlineSeconds: 20
+    };
+    expect(decideAutoPilotSessionTick(input({ preloadLease: lease, nowSeconds: 19.999 })).kind)
+      .toBe("wait-preload");
+    expect(decideAutoPilotSessionTick(input({ preloadLease: lease, nowSeconds: 20 })).kind)
+      .toBe("expire-preload");
+    expect(() => decideAutoPilotSessionTick(input({
+      preloadLease: { ...lease, deadlineSeconds: 20.001 },
+      nowSeconds: 10
+    }))).toThrow("preload lease");
+    expect(() => decideAutoPilotSessionTick(input({
+      preloadLease: { ...lease, startedAtSeconds: 100, deadlineSeconds: 100.5 },
+      nowSeconds: 99.5
+    }))).toThrow("preload lease");
+    expect(() => decideAutoPilotSessionTick(input({
+      preloadLease: { ...lease, deadlineSeconds: 0.499 },
+      nowSeconds: 0
+    }))).toThrow("preload lease");
+    expect(decideAutoPilotSessionTick(input({
+      preloadLease: { ...lease, deadlineSeconds: 0.5 },
+      nowSeconds: 0
+    })).kind).toBe("wait-preload");
+  });
+
+  it("cancels an owned preload when the exact source load changes", () => {
+    const lease = {
+      operation: 1, generation: 1, deck: "b" as const, trackId: "next", loadOrdinal: 2,
+      sourceTrackId: "old-source", sourceLoadKey: "1:1", startedAtSeconds: 0, deadlineSeconds: 20
+    };
+    expect(decideAutoPilotSessionTick(input({ preloadLease: lease, nowSeconds: 10 })))
+      .toMatchObject({ kind: "cancel-preload-source-changed", lease });
   });
 
   it("uses queue-first planning and exposes only an advisory later identity", () => {
@@ -63,6 +106,30 @@ describe("production Autopilot tick decision", () => {
     expect(decision.selectionSource).toBe("queue");
     expect(["next", "later"]).toContain(decision.trackId);
     expect(decision).not.toHaveProperty("schedule");
+  });
+
+  it("bounds preload leases by source runway at real playback rates", () => {
+    expect(deriveAutoPilotPreloadDeadline({
+      nowSeconds: 10, sourceDurationSeconds: 120, sourcePositionSeconds: 75, sourcePlaybackRate: 1
+    })).toBe(30);
+    expect(deriveAutoPilotPreloadDeadline({
+      nowSeconds: 10, sourceDurationSeconds: 120, sourcePositionSeconds: 90, sourcePlaybackRate: 1
+    })).toBe(30);
+    expect(deriveAutoPilotPreloadDeadline({
+      nowSeconds: 30, sourceDurationSeconds: 120, sourcePositionSeconds: 110, sourcePlaybackRate: 1
+    })).toBe(35);
+    expect(deriveAutoPilotPreloadDeadline({
+      nowSeconds: 10, sourceDurationSeconds: 120, sourcePositionSeconds: 110, sourcePlaybackRate: 0.5
+    })).toBe(25);
+    expect(deriveAutoPilotPreloadDeadline({
+      nowSeconds: 10, sourceDurationSeconds: 120, sourcePositionSeconds: 116, sourcePlaybackRate: 1
+    })).toBeNull();
+  });
+
+  it("pauses before starting a preload when the source lacks intervention runway", () => {
+    expect(decideAutoPilotSessionTick(input({
+      source: { ...input().source, positionSeconds: 116 }
+    }))).toMatchObject({ kind: "pause-preload-runway" });
   });
 
   it("uses library continuation only after the eligible queue is empty", () => {

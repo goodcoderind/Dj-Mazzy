@@ -221,18 +221,29 @@ multi-listener/genre/device protocol, a newly versioned live graph, and a fresh
 device soak are still required before promotion.
 
 A deterministic three-hour Party Autopilot coordinator soak now drives the same
-`party-autopilot-decision/v3` function used by the live app. It therefore exercises the real
+`party-autopilot-decision/v4` function used by the live app. It therefore exercises the real
 queue-first two-song lookahead, library continuation, transition-plan arm
 windows, target cue offsets, no-repeat history, exact final-track ownership, and
-`party-autopilot-trace/v3` evaluator. A Rescue correctly ends the unattended observation
+`party-autopilot-trace/v4` evaluator. A Rescue correctly ends the unattended observation
 in a paused state. This is state/coordinator evidence only: it does not exercise
 browser decoding, Web Audio rendering, analysis workers, musical quality, or
 speaker output, and it does not replace the visible two-hour device check.
-The v3 coordinator also receives a session-only list of files that genuinely
+The v4 coordinator also receives a session-only list of files that genuinely
 failed browser read/decode. Autopilot skips each such song instead of retrying it
 every half-second, preserves it visibly in the queue/library, and immediately
 tries the next eligible song. Manual successful loading or **New Party** clears
 the skip; analysis failure and cancelled/audio-blocked loads never poison a song.
+Every automatic preload also owns an exact, at-most-20-second Web Audio clock
+lease. The deadline shortens when needed to preserve five seconds of source-song
+runway; if even a half-second attempt cannot preserve that reserve, Autopilot
+pauses before starting another load. If a read/decode/analysis operation never settles, Mazzy invalidates that exact load,
+marks the song as “took too long” for this party, and tries the next queue-first
+candidate without touching the playing source. Two consecutive lease expiries
+pause Autopilot and leave the current song playing so the host can retry a song
+manually or choose **New Party**. Synthetic soak coverage includes one-time
+failover, the two-timeout pause, and no retry of an excluded song. Separate
+exact-ownership tests reject late settlement at and after the deadline; the soak
+does not claim that browser decoding or late browser callbacks were exercised.
 
 Tempo-changing phrase blends also remain fail-closed until pitch-preserving
 playback is ready on the exact loaded decks. A developer-only Signalsmith
