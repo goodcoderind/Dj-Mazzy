@@ -24,8 +24,12 @@ import {
   createDeckPlaybackCompletionLease,
   inspectDeckPlaybackCompletion
 } from "../planning/deckPlaybackCompletionOwnership";
+import {
+  decideAutoPilotPreloadPause,
+  ownsAutoPilotPreloadLease
+} from "../planning/autoPilotPreloadOwnership";
 
-export const PARTY_AUTOPILOT_SOAK_SCHEMA_VERSION = "party-autopilot-coordinator-soak/v9" as const;
+export const PARTY_AUTOPILOT_SOAK_SCHEMA_VERSION = "party-autopilot-coordinator-soak/v10" as const;
 
 export type SimulatedPartyTrack = Readonly<{
   id: string;
@@ -59,6 +63,8 @@ export type PartyAutopilotSoakOptions = Readonly<{
   unplayableTrackIds?: readonly string[];
   /** Synthetic preloads that never settle until the production lease expires. */
   neverSettlingPreloadTrackIds?: readonly string[];
+  /** One deferred preload synchronously superseded by a host pause, then resumed. */
+  pauseDuringPreloadAttempt?: number;
   /** Ordered synthetic arm outcomes. Unspecified attempts schedule successfully. */
   armOutcomes?: readonly ("failed" | "timed-out" | "scheduled")[];
   /** Synthetic audio-clock settlement delays for the matching arm attempt. */
@@ -94,6 +100,8 @@ export type PartyAutopilotSoakResult = Readonly<{
   repeatTrackIds: readonly string[];
   transitionAttempts: number;
   successfulHandoffs: number;
+  preloadPauseSupersessions: number;
+  stalePausedPreloadSettlementsIgnored: number;
   rescueEvents: readonly SimulatedPartyRescueEvent[];
   transitionTemplates: Readonly<Record<"safe-fade" | "filtered-fade" | "downbeat-cut" | "phrase-blend", number>>;
   evaluation: PartyAutopilotEvaluation;
@@ -120,6 +128,10 @@ const validate = (options: PartyAutopilotSoakOptions) => {
   if (options.coordinatorFailureIteration != null &&
     (!Number.isSafeInteger(options.coordinatorFailureIteration) || options.coordinatorFailureIteration < 1)) {
     throw new RangeError("coordinatorFailureIteration must be a positive safe integer");
+  }
+  if (options.pauseDuringPreloadAttempt != null &&
+    (!Number.isSafeInteger(options.pauseDuringPreloadAttempt) || options.pauseDuringPreloadAttempt < 1)) {
+    throw new RangeError("pauseDuringPreloadAttempt must be a positive safe integer");
   }
   if (options.finalDeckCompletionSignal != null &&
     !["source-onended", "audio-clock", "reconcile"].includes(options.finalDeckCompletionSignal)) {
@@ -230,6 +242,10 @@ export const simulatePartyAutopilotSoak = (options: PartyAutopilotSoakOptions): 
   let nextLoad = 1;
   let nextOperation = 0;
   let nextTransition = 0;
+  let preloadAttempts = 0;
+  let preloadPauseSupersessions = 0;
+  let stalePausedPreloadSettlementsIgnored = 0;
+  let stalePausedPreload: AutoPilotPreloadLease | null = null;
   let armAttempts = 0;
   let consecutiveArmFailures = 0;
   let activeTransitionKey: string | null = null;
@@ -349,26 +365,75 @@ export const simulatePartyAutopilotSoak = (options: PartyAutopilotSoakOptions): 
     }
 
     if (decision.kind === "preload") {
+      preloadAttempts += 1;
       const requestedId = decision.trackId;
       targetId = requestedId;
       targetLoad = ++nextLoad;
       const operation = ++nextOperation;
       append({ type: "preload-started", activeSecond: 0, operation, generation: operation, deck: targetDeck, trackOrdinal: ordinals.get(targetId)!, loadOrdinal: targetLoad, selectionSource: decision.selectionSource });
-      if (syntheticNeverSettlingIds.delete(requestedId)) {
-        preloadLease = Object.freeze({
-          operation,
-          generation: operation,
-          deck: targetDeck,
-          trackId: requestedId,
-          loadOrdinal: targetLoad,
-          sourceTrackId: sourceId,
-          sourceLoadKey: `${ordinals.get(sourceId)}:${sourceLoad}`,
-          startedAtSeconds: now,
-          deadlineSeconds: decision.preloadDeadlineSeconds
+      const startedLease = Object.freeze({
+        operation,
+        generation: operation,
+        deck: targetDeck,
+        trackId: requestedId,
+        loadOrdinal: targetLoad,
+        sourceTrackId: sourceId,
+        sourceLoadKey: `${ordinals.get(sourceId)}:${sourceLoad}`,
+        startedAtSeconds: now,
+        deadlineSeconds: decision.preloadDeadlineSeconds
+      });
+      preloadLease = startedLease;
+      if (stalePausedPreload) {
+        const currentTargetId = targetId;
+        const currentTargetLoad = targetLoad;
+        const currentQueue = queue;
+        const currentLease = preloadLease;
+        // Deliver the old async settlement only after a fresh operation owns
+        // the target. Exact ownership must make it a complete no-op.
+        if (ownsAutoPilotPreloadLease(preloadLease, stalePausedPreload)) {
+          targetId = stalePausedPreload.trackId;
+          targetLoad = stalePausedPreload.loadOrdinal;
+          preloadLease = null;
+          queue = queue.filter((id) => id !== stalePausedPreload?.trackId);
+        }
+        if (targetId !== currentTargetId || targetLoad !== currentTargetLoad ||
+          queue !== currentQueue || preloadLease !== currentLease) {
+          throw new Error("late paused preload mutated its successor");
+        }
+        stalePausedPreloadSettlementsIgnored += 1;
+        stalePausedPreload = null;
+      }
+      if (preloadAttempts === options.pauseDuringPreloadAttempt) {
+        const pauseDecision = decideAutoPilotPreloadPause({
+          lease: startedLease,
+          pendingLoadOrdinal: targetLoad,
+          targetTrackId: null,
+          targetLoadOrdinal: null,
+          targetPlaying: false
         });
+        if (pauseDecision.kind !== "supersede" || !pauseDecision.cleanupTarget) {
+          throw new Error("paused preload was not synchronously superseded");
+        }
+        preloadLease = null;
+        append({ type: "preload-settled", activeSecond: 0, operation, outcome: "superseded" });
+        append({ type: "session-paused", activeSecond: 0, reason: "host-request" });
+        clock = pausePartySessionClock(clock, now);
+        targetId = null;
+        targetLoad = null;
+        preloadPauseSupersessions += 1;
+        stalePausedPreload = startedLease;
+        if (ownsAutoPilotPreloadLease(preloadLease, startedLease)) {
+          throw new Error("late paused preload retained mutation authority");
+        }
+        clock = startPartySessionClock(clock, now);
+        append({ type: "session-resumed", activeSecond: 0 });
+        continue;
+      }
+      if (syntheticNeverSettlingIds.delete(requestedId)) {
         continue;
       }
       if (syntheticUnplayableIds.delete(requestedId)) {
+        preloadLease = null;
         append({ type: "preload-settled", activeSecond: 0, operation, outcome: "unplayable" });
         unavailableTrackIds.add(requestedId);
         consecutivePreloadTimeouts = 0;
@@ -376,6 +441,7 @@ export const simulatePartyAutopilotSoak = (options: PartyAutopilotSoakOptions): 
         targetLoad = null;
         continue;
       }
+      preloadLease = null;
       append({ type: "preload-settled", activeSecond: 0, operation, outcome: "committed" });
       consecutivePreloadTimeouts = 0;
       queue = queue.filter((id) => id !== targetId);
@@ -669,6 +735,8 @@ export const simulatePartyAutopilotSoak = (options: PartyAutopilotSoakOptions): 
     repeatTrackIds: Object.freeze(repeatTrackIds),
     transitionAttempts: armAttempts,
     successfulHandoffs: evaluation.counters.transitionsCompleted,
+    preloadPauseSupersessions,
+    stalePausedPreloadSettlementsIgnored,
     rescueEvents: Object.freeze(rescueEvents),
     transitionTemplates: Object.freeze(transitionTemplates),
     evaluation,

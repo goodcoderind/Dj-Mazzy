@@ -44,8 +44,10 @@ import {
   decideAutoPilotSessionTick
 } from "./planning/autoPilotSessionDecision";
 import {
+  autoPilotPreloadLoadAuthorityKey,
   maySettleAutoPilotPreloadLease,
   ownsAutoPilotPreloadLease,
+  runAutoPilotPreloadPauseCleanup,
   shouldCommitAutoPilotPreload,
   shouldDiscardSettledAutoPilotPreload
 } from "./planning/autoPilotPreloadOwnership";
@@ -396,21 +398,48 @@ export default function App() {
       outputDevicePendingRef.current = true;
       refreshPlaybackRecoveryLock();
       setOutputDeviceChanged(true);
+      const transitionWasActive = Boolean(activeTransitionScheduleRef.current);
+      if (autoPilotEnabledRef.current && transitionWasActive) {
+        advancePartyAutopilotCoordinatorEpoch();
+        autoPilotEnabledRef.current = false;
+        settleAutoPilotPreloadForPause("superseded");
+        setAutoPilotEnabled(false);
+        finalTrackRef.current = null;
+        setPartyEndingFinalTrack(false);
+        partyCheckpointPauseReasonRef.current = "audio-recovery";
+        pausePartyClockFailClosed();
+        try { void partyWakeLockRef.current?.release?.(); } catch { /* Authority is already paused. */ }
+      } else if (autoPilotEnabledRef.current) {
+        pauseAutoPilotForHostControl(
+          "Party Autopilot paused · audio device changed",
+          "output-change"
+        );
+      }
       rehearsalGenerationRef.current += 1;
-      rehearsalCancelRef.current?.();
+      try { rehearsalCancelRef.current?.(); } catch { /* Recovery authority remains active. */ }
       rehearsalCancelRef.current = null;
       setRehearsalActive(false);
       setRehearsalStatus((current) => current
         ? { state: "stopped", message: "Preview stopped while the audio output is checked. Nothing was saved." }
         : current);
       autoPilotPreloadGenerationRef.current += 1;
-      cancelCurrentTransitionArm();
+      try { cancelCurrentTransitionArm(); } catch { /* Transition Rescue remains authoritative. */ }
       transitionArmGenerationRef.current += 1;
-      if (activeTransitionScheduleRef.current) rescueTransition();
-      if (autoPilotEnabledRef.current) pauseAutoPilotForHostControl(
-        "Party Autopilot paused · audio device changed",
-        "output-change"
-      );
+      if (transitionWasActive && activeTransitionScheduleRef.current) {
+        try {
+          rescueTransition();
+        } catch {
+          transitionCompletionUncertainRef.current = true;
+          setTransitionCompletionUncertain(true);
+          refreshPlaybackRecoveryLock();
+          if (partyTraceRecorderRef.current) {
+            partyTraceRunningRef.current = false;
+            partyTraceRecorderRef.current.markInterrupted();
+            updatePartyDiagnosticEvaluation();
+          }
+          showAutoPilotArmIntervention("transition-completion-lost");
+        }
+      }
     };
     mediaDevices.addEventListener("devicechange", onDeviceChange);
     return () => mediaDevices.removeEventListener("devicechange", onDeviceChange);
@@ -443,19 +472,46 @@ export default function App() {
       audioRecoveryPendingRef.current = true;
       refreshPlaybackRecoveryLock();
       setAudioRecoveryState(state);
+      const transitionWasActive = Boolean(activeTransitionScheduleRef.current);
+      if (autoPilotEnabledRef.current && transitionWasActive) {
+        advancePartyAutopilotCoordinatorEpoch();
+        autoPilotEnabledRef.current = false;
+        settleAutoPilotPreloadForPause("superseded");
+        setAutoPilotEnabled(false);
+        finalTrackRef.current = null;
+        setPartyEndingFinalTrack(false);
+        partyCheckpointPauseReasonRef.current = "audio-recovery";
+        pausePartyClockFailClosed();
+        try { void partyWakeLockRef.current?.release?.(); } catch { /* Authority is already paused. */ }
+      } else if (autoPilotEnabledRef.current) {
+        pauseAutoPilotForHostControl(
+          "Party Autopilot paused · browser audio stopped",
+          "audio-recovery"
+        );
+      }
       rehearsalGenerationRef.current += 1;
-      rehearsalCancelRef.current?.();
+      try { rehearsalCancelRef.current?.(); } catch { /* Recovery authority remains active. */ }
       rehearsalCancelRef.current = null;
       setRehearsalActive(false);
       setRehearsalStatus((current) => current
         ? { state: "stopped", message: "Preview stopped because browser audio needs attention. Nothing was saved." }
         : current);
-      cancelCurrentTransitionArm();
-      if (activeTransitionScheduleRef.current) rescueTransition();
-      if (autoPilotEnabledRef.current) pauseAutoPilotForHostControl(
-        "Party Autopilot paused · browser audio stopped",
-        "audio-recovery"
-      );
+      try { cancelCurrentTransitionArm(); } catch { /* Transition Rescue remains authoritative. */ }
+      if (transitionWasActive && activeTransitionScheduleRef.current) {
+        try {
+          rescueTransition();
+        } catch {
+          transitionCompletionUncertainRef.current = true;
+          setTransitionCompletionUncertain(true);
+          refreshPlaybackRecoveryLock();
+          if (partyTraceRecorderRef.current) {
+            partyTraceRunningRef.current = false;
+            partyTraceRecorderRef.current.markInterrupted();
+            updatePartyDiagnosticEvaluation();
+          }
+          showAutoPilotArmIntervention("transition-completion-lost");
+        }
+      }
     };
     engine.context.addEventListener("statechange", onStateChange);
     return () => engine.context.removeEventListener("statechange", onStateChange);
@@ -463,29 +519,27 @@ export default function App() {
 
   const stopRemoteLibraryPlayback = () => {
     advancePartyAutopilotCoordinatorEpoch();
-    autoPilotPreloadGenerationRef.current += 1;
-    cancelCurrentTransitionArm();
+    autoPilotEnabledRef.current = false;
+    settleAutoPilotPreloadForPause("superseded");
+    setAutoPilotEnabled(false);
+    try { cancelCurrentTransitionArm(); } catch { /* Playback remains locked if cleanup is uncertain. */ }
     transitionArmGenerationRef.current += 1;
     rehearsalGenerationRef.current += 1;
-    rehearsalCancelRef.current?.();
+    try { rehearsalCancelRef.current?.(); } catch { /* Destructive authority is already revoked. */ }
     rehearsalCancelRef.current = null;
     setRehearsalActive(false);
     setRehearsalStatus((current) => current
       ? { state: "stopped", message: "Preview stopped because local playback authority changed in another Mazzy tab." }
       : current);
     autoPilotTransitionKeyRef.current = null;
-    if (activeTransitionScheduleRef.current) rescueTransition();
-    transitionCompletionCancelRef.current?.();
+    try { if (activeTransitionScheduleRef.current) rescueTransition(); } catch { /* Continue pausing remote authority. */ }
+    try { transitionCompletionCancelRef.current?.(); } catch { /* Continue pausing remote authority. */ }
     transitionCompletionCancelRef.current = null;
     activeTransitionScheduleRef.current = null;
     transitionArmRef.current = false;
-    autoPilotEnabledRef.current = false;
     finalTrackRef.current = null;
-    const engine = getAudioEngine();
-    partySessionClockRef.current = pausePartySessionClock(partySessionClockRef.current, engine.clock.now());
-    setPartyClockDisplay(partySessionClockSnapshot(partySessionClockRef.current, engine.clock.now()));
+    pausePartyClockFailClosed();
     pausePartyDiagnostic("host-control");
-    setAutoPilotEnabled(false);
     void partyWakeLockRef.current?.release?.();
     setPartyEndingFinalTrack(false);
     setAutoPilotChoice(null);
@@ -881,6 +935,8 @@ export default function App() {
               ? "A deck stopped before Mazzy could verify the automatic song change. New playback is locked. Use Stop All Sound before continuing; use system/device mute if sound remains."
             : reason === "deck-completion-failure"
               ? "The current song stopped before Mazzy could verify its audio-clock ending. Autopilot is paused. Choose and play a song before starting Autopilot again."
+            : reason === "preload-cleanup-uncertain"
+              ? "Mazzy paused automatic planning but could not confirm that the next-song load stopped. New playback is locked. Use Stop All Sound before continuing; use system/device mute if sound remains."
             : reason === "coordinator-failure"
               ? "Mazzy stopped automatic planning after an unexpected local error. The current song was left alone. Check the decks, then start Autopilot again when ready."
         : reason === "transition-arm-timeout"
@@ -1161,9 +1217,68 @@ export default function App() {
   };
 
   const pausePartyDiagnostic = (reason) => {
+    settleAutoPilotPreloadForPause("superseded");
     if (!partyTraceRecorderRef.current || !partyTraceRunningRef.current) return;
     partyTraceRunningRef.current = false;
     recordPartyEvent({ type: "session-paused", reason });
+  };
+
+  const lockUnverifiedPreloadCleanup = () => {
+    transitionCompletionUncertainRef.current = true;
+    setTransitionCompletionUncertain(true);
+    refreshPlaybackRecoveryLock();
+    if (partyTraceRecorderRef.current) {
+      partyTraceRunningRef.current = false;
+      partyTraceRecorderRef.current.markInterrupted();
+      updatePartyDiagnosticEvaluation();
+    }
+    showAutoPilotArmIntervention("preload-cleanup-uncertain");
+  };
+
+  const settleAutoPilotPreloadForPause = (outcome = "superseded") => {
+    const lease = autoPilotPreloadLeaseRef.current;
+    if (!lease || !ownsAutoPilotPreloadLease(autoPilotPreloadLeaseRef.current, lease)) {
+      return { claimed: false, cleanupConfirmed: true };
+    }
+    const pending = partyPendingLoadByDeckRef.current[lease.deck];
+
+    // Claim/null exact ownership before any deck adapter or React update. A
+    // settling load can no longer commit, clear a successor, or escape trace
+    // settlement between a host pause and the cleanup effect.
+    autoPilotPreloadLeaseRef.current = null;
+    autoPilotPreloadGenerationRef.current += 1;
+    if (outcome !== "timed-out") consecutiveAutoPilotPreloadTimeoutsRef.current = 0;
+    if (pending?.loadOrdinal === lease.loadOrdinal) {
+      partyPendingLoadByDeckRef.current = { ...partyPendingLoadByDeckRef.current, [lease.deck]: null };
+    }
+    const leaseRef = lease.deck === "a" ? deckARef : deckBRef;
+    const handle = leaseRef.current;
+    let cleanupConfirmed = false;
+    if (handle?.getDeckSnapshot && handle?.isPlaying && handle?.cancelLoadIfOwned &&
+      handle?.stopAllSound && handle?.eject) {
+      const cleanup = runAutoPilotPreloadPauseCleanup({
+        lease,
+        pendingLoadOrdinal: pending?.loadOrdinal ?? null,
+        observe: () => ({
+          targetTrackId: handle.getDeckSnapshot()?.trackId ?? null,
+          targetLoadOrdinal: partyLoadByDeckRef.current[lease.deck]?.loadOrdinal ?? null,
+          targetPlaying: Boolean(handle.isPlaying())
+        }),
+        cancelLoadIfOwned: () => handle.cancelLoadIfOwned(autoPilotPreloadLoadAuthorityKey(lease)),
+        stopAllSound: () => handle.stopAllSound(),
+        eject: () => handle.eject()
+      });
+      cleanupConfirmed = cleanup.cleanupConfirmed;
+      if (cleanupConfirmed && !cleanup.preservedReplacement) {
+        partyLoadByDeckRef.current = { ...partyLoadByDeckRef.current, [lease.deck]: null };
+        setLoadedByDeck((current) => ({ ...current, [lease.deck]: null }));
+      }
+    }
+    if (partyTraceRunningRef.current) {
+      recordPartyEvent({ type: "preload-settled", operation: lease.operation, outcome });
+    }
+    if (!cleanupConfirmed) lockUnverifiedPreloadCleanup();
+    return { claimed: true, cleanupConfirmed };
   };
 
   const stopRehearsal = (message = "Preview stopped. Nothing was saved.") => {
@@ -1189,14 +1304,12 @@ export default function App() {
   ) => {
     advancePartyAutopilotCoordinatorEpoch();
     if (!autoPilotEnabledRef.current) return;
-    autoPilotPreloadGenerationRef.current += 1;
-    cancelCurrentTransitionArm();
-    transitionArmGenerationRef.current += 1;
-    const now = getAudioEngine().clock.now();
-    partySessionClockRef.current = pausePartySessionClock(partySessionClockRef.current, now);
-    setPartyClockDisplay(partySessionClockSnapshot(partySessionClockRef.current, now));
     autoPilotEnabledRef.current = false;
+    settleAutoPilotPreloadForPause("superseded");
     setAutoPilotEnabled(false);
+    try { cancelCurrentTransitionArm(); } catch { /* Preload and Autopilot authority are already revoked. */ }
+    transitionArmGenerationRef.current += 1;
+    pausePartyClockFailClosed();
     finalTrackRef.current = null;
     setPartyEndingFinalTrack(false);
     setAutoPilotChoice(null);
@@ -1604,20 +1717,8 @@ export default function App() {
       const traceWasRunning = partyTraceRunningRef.current;
       advancePartyAutopilotCoordinatorEpoch();
       autoPilotEnabledRef.current = false;
-      const preloadLease = autoPilotPreloadLeaseRef.current;
-      if (preloadLease && ownsAutoPilotPreloadLease(autoPilotPreloadLeaseRef.current, preloadLease)) {
-        autoPilotPreloadLeaseRef.current = null;
-        autoPilotPreloadGenerationRef.current += 1;
-        const pending = partyPendingLoadByDeckRef.current[preloadLease.deck];
-        if (pending?.loadOrdinal === preloadLease.loadOrdinal) {
-          partyPendingLoadByDeckRef.current = {
-            ...partyPendingLoadByDeckRef.current,
-            [preloadLease.deck]: null
-          };
-        }
-        recordPartyEvent({ type: "preload-settled", operation: preloadLease.operation, outcome: "failed" });
-      }
-      let armCleanupConfirmed = true;
+      const preloadCleanup = settleAutoPilotPreloadForPause("failed");
+      let armCleanupConfirmed = preloadCleanup.cleanupConfirmed;
       try {
         const armRuntime = transitionArmLeaseRef.current;
         if (armRuntime && !cancelCurrentTransitionArm()) armCleanupConfirmed = false;
@@ -1661,9 +1762,11 @@ export default function App() {
       pausePartyClockFailClosed();
       pausePartyDiagnostic("deck-completion");
       try { void partyWakeLockRef.current?.release?.(); } catch { /* Authority is already revoked. */ }
-      showAutoPilotArmIntervention(activeTransition || !armCleanupConfirmed
-        ? "deck-completion-transition"
-        : "deck-completion-failure");
+      showAutoPilotArmIntervention(!preloadCleanup.cleanupConfirmed
+        ? "preload-cleanup-uncertain"
+        : activeTransition || !armCleanupConfirmed
+          ? "deck-completion-transition"
+          : "deck-completion-failure");
       return;
     }
 
@@ -1909,7 +2012,7 @@ export default function App() {
     showToast("All imported music, saved analysis, and saved party recovery were removed");
   };
 
-  const loadTrackToDeck = async (deck, track, { autoPilotOwned = false } = {}) => {
+  const loadTrackToDeck = async (deck, track, { autoPilotOwned = false, loadAuthorityKey = null } = {}) => {
     if (playbackRecoveryLockedRef.current || partyCheckpointBusyRef.current || partyCheckpointWriterLostRef.current || audioRecoveryState || outputDeviceChanged || libraryMutationBusyRef.current || autoMixing || autoMixArming || rehearsalActive || rehearsalPreparing) return DECK_LOAD_OUTCOME.cancelled;
     if (!autoPilotOwned) pauseAutoPilotForHostControl();
     const manuallyRestoringPlayability = !autoPilotOwned && autoPilotExcludedTrackIds.includes(track.id);
@@ -1918,7 +2021,7 @@ export default function App() {
       track.file,
       track.id,
       track,
-      { isolatedAnalysis: autoPilotOwned }
+      { isolatedAnalysis: autoPilotOwned, loadAuthorityKey }
     ) ?? DECK_LOAD_OUTCOME.cancelled;
     if (outcome === DECK_LOAD_OUTCOME.loaded) {
       setLoadedByDeck((prev) => ({ ...prev, [deck]: track.id }));
@@ -3013,24 +3116,7 @@ export default function App() {
           refreshPlaybackRecoveryLock();
           break;
         case "cancel-preload": { // Exact pending target only; committed plans stay intact.
-          autoPilotPreloadGenerationRef.current += 1;
-          const lease = autoPilotPreloadLeaseRef.current;
-          if (!lease || !ownsAutoPilotPreloadLease(autoPilotPreloadLeaseRef.current, lease)) break;
-          autoPilotPreloadLeaseRef.current = null;
-          const pending = partyPendingLoadByDeckRef.current[lease.deck];
-          if (pending?.loadOrdinal === lease.loadOrdinal) {
-            partyPendingLoadByDeckRef.current = { ...partyPendingLoadByDeckRef.current, [lease.deck]: null };
-          }
-          recordPartyEvent({ type: "preload-settled", operation: lease.operation, outcome: "superseded" });
-          const leaseRef = lease.deck === "a" ? deckARef : deckBRef;
-          const leaseSnapshot = leaseRef.current?.getDeckSnapshot?.();
-          if (!leaseRef.current?.isPlaying?.() && (!leaseSnapshot?.trackId || leaseSnapshot.trackId === lease.trackId)) {
-            leaseRef.current?.eject?.();
-            partyLoadByDeckRef.current = { ...partyLoadByDeckRef.current, [lease.deck]: null };
-            setLoadedByDeck((current) => current[lease.deck] === lease.trackId
-              ? { ...current, [lease.deck]: null }
-              : current);
-          }
+          settleAutoPilotPreloadForPause("superseded");
           break;
         }
         case "cancel-transition-arm": {
@@ -3197,25 +3283,7 @@ export default function App() {
   useEffect(() => {
     if (!autoPilotEnabled) {
       if (transitionArmLeaseRef.current?.origin === "autopilot") cancelCurrentTransitionArm();
-      const lease = autoPilotPreloadLeaseRef.current;
-      if (lease && ownsAutoPilotPreloadLease(autoPilotPreloadLeaseRef.current, lease)) {
-        autoPilotPreloadLeaseRef.current = null;
-        const pending = partyPendingLoadByDeckRef.current[lease.deck];
-        if (pending?.loadOrdinal === lease.loadOrdinal) {
-          partyPendingLoadByDeckRef.current = { ...partyPendingLoadByDeckRef.current, [lease.deck]: null };
-        }
-        recordPartyEvent({ type: "preload-settled", operation: lease.operation, outcome: "superseded" });
-        const leaseRef = lease.deck === "a" ? deckARef : deckBRef;
-        const leaseSnapshot = leaseRef.current?.getDeckSnapshot?.();
-        if (!leaseRef.current?.isPlaying?.() && (!leaseSnapshot?.trackId || leaseSnapshot.trackId === lease.trackId)) {
-          leaseRef.current?.eject?.();
-          partyLoadByDeckRef.current = { ...partyLoadByDeckRef.current, [lease.deck]: null };
-          setLoadedByDeck((current) => current[lease.deck] === lease.trackId
-            ? { ...current, [lease.deck]: null }
-            : current);
-        }
-      }
-      autoPilotPreloadGenerationRef.current += 1;
+      settleAutoPilotPreloadForPause("superseded");
       autoPilotTransitionKeyRef.current = null;
       setAutoPilotChoice(null);
       return undefined;
@@ -3232,20 +3300,8 @@ export default function App() {
       autoPilotEnabledRef.current = false;
 
       const activeTransition = activeTransitionScheduleRef.current;
-      const preloadLease = autoPilotPreloadLeaseRef.current;
-      if (preloadLease && ownsAutoPilotPreloadLease(autoPilotPreloadLeaseRef.current, preloadLease)) {
-        autoPilotPreloadLeaseRef.current = null;
-        autoPilotPreloadGenerationRef.current += 1;
-        const pending = partyPendingLoadByDeckRef.current[preloadLease.deck];
-        if (pending?.loadOrdinal === preloadLease.loadOrdinal) {
-          partyPendingLoadByDeckRef.current = {
-            ...partyPendingLoadByDeckRef.current,
-            [preloadLease.deck]: null
-          };
-        }
-        recordPartyEvent({ type: "preload-settled", operation: preloadLease.operation, outcome: "failed" });
-      }
-      let armCleanupConfirmed = true;
+      const preloadCleanup = settleAutoPilotPreloadForPause("failed");
+      let armCleanupConfirmed = preloadCleanup.cleanupConfirmed;
       try {
         const armRuntime = transitionArmLeaseRef.current;
         if (armRuntime && !cancelCurrentTransitionArm()) armCleanupConfirmed = false;
@@ -3275,27 +3331,11 @@ export default function App() {
       pausePartyClockFailClosed();
       pausePartyDiagnostic("coordinator-failure");
       try { void partyWakeLockRef.current?.release?.(); } catch { /* Autopilot authority is already revoked. */ }
-      showAutoPilotArmIntervention(activeTransition || !armCleanupConfirmed
-        ? "coordinator-failure-transition"
-        : "coordinator-failure");
-
-      if (preloadLease) {
-        const preloadRef = preloadLease.deck === "a" ? deckARef : deckBRef;
-        let preloadSnapshot = null;
-        let preloadPlaying = true;
-        try { preloadSnapshot = preloadRef.current?.getDeckSnapshot?.(); } catch { /* Leave it for Stop All. */ }
-        try { preloadPlaying = Boolean(preloadRef.current?.isPlaying?.()); } catch { /* Leave it for Stop All. */ }
-        if (!preloadPlaying && (!preloadSnapshot?.trackId || preloadSnapshot.trackId === preloadLease.trackId)) {
-          try { preloadRef.current?.eject?.(); } catch { /* Mandatory pause already committed. */ }
-          partyLoadByDeckRef.current = {
-            ...partyLoadByDeckRef.current,
-            [preloadLease.deck]: null
-          };
-          setLoadedByDeck((current) => current[preloadLease.deck] === preloadLease.trackId
-            ? { ...current, [preloadLease.deck]: null }
-            : current);
-        }
-      }
+      showAutoPilotArmIntervention(!preloadCleanup.cleanupConfirmed
+        ? "preload-cleanup-uncertain"
+        : activeTransition || !armCleanupConfirmed
+          ? "coordinator-failure-transition"
+          : "coordinator-failure");
     };
     const pauseForPreloadSafety = (now, reason, message) => {
       advancePartyAutopilotCoordinatorEpoch();
@@ -3311,50 +3351,32 @@ export default function App() {
       void partyWakeLockRef.current?.release?.();
       showToast(message);
     };
-    const supersedePreloadLease = (lease) => {
+    const supersedePreloadLease = (lease, now) => {
       if (!ownsAutoPilotPreloadLease(autoPilotPreloadLeaseRef.current, lease)) return false;
-      autoPilotPreloadLeaseRef.current = null;
-      autoPilotPreloadGenerationRef.current += 1;
-      consecutiveAutoPilotPreloadTimeoutsRef.current = 0;
-      const pending = partyPendingLoadByDeckRef.current[lease.deck];
-      if (pending?.loadOrdinal === lease.loadOrdinal) {
-        partyPendingLoadByDeckRef.current = { ...partyPendingLoadByDeckRef.current, [lease.deck]: null };
+      const cleanup = settleAutoPilotPreloadForPause("superseded");
+      if (!cleanup.cleanupConfirmed) {
+        pauseForPreloadSafety(
+          now,
+          "host-control",
+          "Party paused · Mazzy could not confirm that the old next-song load stopped · use Stop All Sound before continuing"
+        );
       }
-      recordPartyEvent({ type: "preload-settled", operation: lease.operation, outcome: "superseded" });
-      const leaseRef = lease.deck === "a" ? deckARef : deckBRef;
-      const leaseSnapshot = leaseRef.current?.getDeckSnapshot?.();
-      if (!leaseRef.current?.isPlaying?.() && (!leaseSnapshot?.trackId || leaseSnapshot.trackId === lease.trackId)) {
-        leaseRef.current?.eject?.();
-        partyLoadByDeckRef.current = { ...partyLoadByDeckRef.current, [lease.deck]: null };
-        setLoadedByDeck((current) => current[lease.deck] === lease.trackId
-          ? { ...current, [lease.deck]: null }
-          : current);
-      }
-      return true;
+      return cleanup.claimed;
     };
     const expirePreloadLease = (lease, now) => {
       if (!ownsAutoPilotPreloadLease(autoPilotPreloadLeaseRef.current, lease)) return false;
-      autoPilotPreloadLeaseRef.current = null;
-      autoPilotPreloadGenerationRef.current += 1;
-      const pending = partyPendingLoadByDeckRef.current[lease.deck];
-      if (pending?.loadOrdinal === lease.loadOrdinal) {
-        partyPendingLoadByDeckRef.current = { ...partyPendingLoadByDeckRef.current, [lease.deck]: null };
-      }
-      recordPartyEvent({ type: "preload-settled", operation: lease.operation, outcome: "timed-out" });
+      const cleanup = settleAutoPilotPreloadForPause("timed-out");
       setTimedOutAutoPilotTrackIds((current) => current.includes(lease.trackId)
         ? current
         : [...current, lease.trackId]);
-      const leaseRef = lease.deck === "a" ? deckARef : deckBRef;
-      const leaseSnapshot = leaseRef.current?.getDeckSnapshot?.();
-      if (!leaseRef.current?.isPlaying?.() && (!leaseSnapshot?.trackId || leaseSnapshot.trackId === lease.trackId)) {
-        leaseRef.current?.eject?.();
-        partyLoadByDeckRef.current = { ...partyLoadByDeckRef.current, [lease.deck]: null };
-        setLoadedByDeck((current) => current[lease.deck] === lease.trackId
-          ? { ...current, [lease.deck]: null }
-          : current);
-      }
       const consecutiveTimeouts = ++consecutiveAutoPilotPreloadTimeoutsRef.current;
-      if (consecutiveTimeouts >= 2) {
+      if (!cleanup.cleanupConfirmed) {
+        pauseForPreloadSafety(
+          now,
+          "preload-timeout",
+          "Party paused · Mazzy could not confirm that the timed-out song stopped loading · use Stop All Sound before continuing"
+        );
+      } else if (consecutiveTimeouts >= 2) {
         pauseForPreloadSafety(
           now,
           "preload-timeout",
@@ -3439,10 +3461,10 @@ export default function App() {
 
       if (decision.kind === "pause-source-stopped") {
         advancePartyAutopilotCoordinatorEpoch();
-        partySessionClockRef.current = pausePartySessionClock(partySessionClockRef.current, now);
-        setPartyClockDisplay(partySessionClockSnapshot(partySessionClockRef.current, now));
         autoPilotEnabledRef.current = false;
+        settleAutoPilotPreloadForPause("superseded");
         setAutoPilotEnabled(false);
+        pausePartyClockFailClosed();
         void partyWakeLockRef.current?.release?.();
         finalTrackRef.current = null;
         setPartyEndingFinalTrack(false);
@@ -3456,7 +3478,7 @@ export default function App() {
           decision.kind === "wait-owned-transition" || decision.kind === "wait-cue") return;
 
       if (decision.kind === "cancel-preload-source-changed") {
-        supersedePreloadLease(decision.lease);
+        supersedePreloadLease(decision.lease, now);
         return;
       }
 
@@ -3557,8 +3579,23 @@ export default function App() {
             selectionSource
           });
         }
+        let preloadSettlementRecorded = false;
+        const recordPreloadSettlement = (outcome) => {
+          if (!ownsAutoPilotPreloadLease(autoPilotPreloadLeaseRef.current, preloadLease)) return false;
+          autoPilotPreloadLeaseRef.current = null;
+          const pending = partyPendingLoadByDeckRef.current[targetDeck];
+          if (pending?.loadOrdinal === preloadLoadOrdinal) {
+            partyPendingLoadByDeckRef.current = { ...partyPendingLoadByDeckRef.current, [targetDeck]: null };
+          }
+          preloadSettlementRecorded = true;
+          recordPartyEvent({ type: "preload-settled", operation: preloadOperation, outcome });
+          return true;
+        };
         try {
-          const loadOutcome = await loadTrackToDeck(targetDeck, nextTrack, { autoPilotOwned: true });
+          const loadOutcome = await loadTrackToDeck(targetDeck, nextTrack, {
+            autoPilotOwned: true,
+            loadAuthorityKey: autoPilotPreloadLoadAuthorityKey(preloadLease)
+          });
           if (!autoPilotEnabledRef.current ||
             !ownsPartyAutopilotTick(partyAutopilotTickBoundaryRef.current, ticket)) return;
           if (!ownsAutoPilotPreloadLease(autoPilotPreloadLeaseRef.current, preloadLease)) return;
@@ -3584,7 +3621,7 @@ export default function App() {
             targetPlaying: Boolean(targetRef.current?.isPlaying?.())
           };
           if (!settlement.autoPilotEnabled) {
-            supersedePreloadLease(preloadLease);
+            supersedePreloadLease(preloadLease, settledAtSeconds);
             return;
           }
           if (settlement.autoPilotEnabled &&
@@ -3602,7 +3639,7 @@ export default function App() {
                 loadOrdinal: preloadLoadOrdinal
               }
             };
-            recordPartyEvent({ type: "preload-settled", operation: preloadOperation, outcome: "committed" });
+            recordPreloadSettlement("committed");
             setQueue((current) => current[0] === nextId ? current.slice(1) : current.filter((id) => id !== nextId));
             setAutoPilotChoice({
               trackId: nextTrack.id,
@@ -3613,24 +3650,16 @@ export default function App() {
             });
             showToast(`Autopilot planned two songs ahead · ${decision.reasons[0] ?? "Queue order preserved."}`);
           } else if (shouldDiscardSettledAutoPilotPreload(settlement)) {
-            recordPartyEvent({
-              type: "preload-settled",
-              operation: preloadOperation,
-              outcome: settlement.operationCurrent ? "discarded" : "superseded"
-            });
+            recordPreloadSettlement(settlement.operationCurrent ? "discarded" : "superseded");
             targetRef.current?.eject?.();
             setLoadedByDeck((current) => ({ ...current, [targetDeck]: null }));
             partyLoadByDeckRef.current = { ...partyLoadByDeckRef.current, [targetDeck]: null };
           } else {
-            recordPartyEvent({
-              type: "preload-settled",
-              operation: preloadOperation,
-              outcome: shouldQuarantineAutoPilotLoad({
+            recordPreloadSettlement(shouldQuarantineAutoPilotLoad({
                 outcome: loadOutcome,
                 autoPilotEnabled: settlement.autoPilotEnabled,
                 operationCurrent: settlement.operationCurrent
-              }) ? "unplayable" : loaded ? "superseded" : "failed"
-            });
+              }) ? "unplayable" : loaded ? "superseded" : "failed");
             if (shouldQuarantineAutoPilotLoad({
               outcome: loadOutcome,
               autoPilotEnabled: settlement.autoPilotEnabled,
@@ -3648,14 +3677,19 @@ export default function App() {
         } catch {
           if (ownsAutoPilotPreloadLease(autoPilotPreloadLeaseRef.current, preloadLease)) {
             handleCoordinatorFailure(ticket, "preload");
+          } else if (preloadSettlementRecorded) {
+            autoPilotEnabledRef.current = false;
+            setAutoPilotEnabled(false);
+            lockUnverifiedPreloadCleanup();
+            pausePartyClockFailClosed();
+            pausePartyDiagnostic("coordinator-failure");
+            try { void partyWakeLockRef.current?.release?.(); } catch { /* Playback remains locked. */ }
           }
         } finally {
           if (ownsAutoPilotPreloadLease(autoPilotPreloadLeaseRef.current, preloadLease)) {
-            const pending = partyPendingLoadByDeckRef.current[targetDeck];
-            if (pending?.loadOrdinal === preloadLoadOrdinal) {
-              partyPendingLoadByDeckRef.current = { ...partyPendingLoadByDeckRef.current, [targetDeck]: null };
+            if (!preloadSettlementRecorded) {
+              settleAutoPilotPreloadForPause("superseded");
             }
-            autoPilotPreloadLeaseRef.current = null;
           }
         }
         return;
@@ -3743,14 +3777,12 @@ export default function App() {
   const sourcePartyPlaying = !!sourcePartyRef.current?.isPlaying?.();
   const pausePartyAutopilot = () => {
     advancePartyAutopilotCoordinatorEpoch();
-    autoPilotPreloadGenerationRef.current += 1;
-    cancelCurrentTransitionArm();
-    transitionArmGenerationRef.current += 1;
-    const now = getAudioEngine().clock.now();
-    partySessionClockRef.current = pausePartySessionClock(partySessionClockRef.current, now);
-    setPartyClockDisplay(partySessionClockSnapshot(partySessionClockRef.current, now));
     autoPilotEnabledRef.current = false;
+    settleAutoPilotPreloadForPause("superseded");
     setAutoPilotEnabled(false);
+    try { cancelCurrentTransitionArm(); } catch { /* Preload and Autopilot authority are already revoked. */ }
+    transitionArmGenerationRef.current += 1;
+    pausePartyClockFailClosed();
     finalTrackRef.current = null;
     setPartyEndingFinalTrack(false);
     setShowPartyReadiness(false);

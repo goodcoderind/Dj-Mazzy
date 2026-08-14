@@ -85,7 +85,7 @@ describe("shared Party Autopilot coordinator soak", () => {
         sessionDurationSeconds: 120,
         finalDeckCompletionSignal: signal
       });
-      expect(result.schemaVersion).toBe("party-autopilot-coordinator-soak/v9");
+      expect(result.schemaVersion).toBe("party-autopilot-coordinator-soak/v10");
       expect(result.stopReason).toBe("crate-exhausted");
       expect(result.evaluation.status).toBe("valid-terminal");
       expect(result.evaluation.counters.deckCompletionRecoveries).toBe(recoveries);
@@ -106,6 +106,25 @@ describe("shared Party Autopilot coordinator soak", () => {
     expect(result.playedTrackIds.slice(0, 2)).toEqual(["track-0", "track-2"]);
     expect(new Set(result.playedTrackIds).size).toBe(5);
     expect(result.evaluation.status).toBe("valid-terminal");
+    expect(result.errors).toEqual([]);
+  });
+
+  it("supersedes a deferred preload before pause and resumes with a fresh operation", () => {
+    const result = simulatePartyAutopilotSoak({
+      tracks: library(4, 120),
+      initialTrackId: "track-0",
+      queuedTrackIds: ["track-1", "track-2"],
+      includeRestOfLibrary: false,
+      sessionDurationSeconds: 1_200,
+      pauseDuringPreloadAttempt: 1
+    });
+
+    expect(result.schemaVersion).toBe("party-autopilot-coordinator-soak/v10");
+    expect(result.preloadPauseSupersessions).toBe(1);
+    expect(result.stalePausedPreloadSettlementsIgnored).toBe(1);
+    expect(result.playedTrackIds).toEqual(["track-0", "track-1", "track-2"]);
+    expect(result.evaluation.status).toBe("valid-terminal");
+    expect(result.evaluation.counters).toMatchObject({ preloadsCommitted: 2, pauses: 1 });
     expect(result.errors).toEqual([]);
   });
 

@@ -2371,16 +2371,46 @@ These are the active backlog, not reasons to discard the prototype.
   host recovery action. The Autopilot tick explicitly reconciles both decks at
   its already-read Web Audio time and rechecks its epoch ticket before planning.
 
-  `party-autopilot-trace/v9` allowlists only session-local deck/track/load
+  `party-autopilot-trace/v10` allowlists only session-local deck/track/load
   ordinals, `source-onended | audio-clock | reconcile`, and bounded on-time,
   recovered, late, or premature outcomes. It
   rejects duplicate completion, requires premature failure to be followed by the
   exact safety pause, and requires a declared-final deck end to be followed
-  immediately by terminal session cleanup. `party-autopilot-coordinator-soak/v9`
+  immediately by terminal session cleanup. `party-autopilot-coordinator-soak/v10`
   creates and inspects the same final-deck lease for primary and missing-primary
   recovery fixtures. These tests establish deterministic ownership and state
   liveness only; they do not claim browser callback delivery, decoded-audio
   continuity, musical quality, or speaker output.
+
+- **D-065 — Settle an exact preload synchronously before every Party pause:**
+  `auto-pilot-preload-pause/v1` observes the current preload lease, exact pending
+  load ordinal, published deck/load identity, and target activity. Host pause,
+  recovery pause, Stop All Sound, remote authority loss, and the disabled-state
+  fallback first claim and null the exact lease, increment its generation, clear
+  only the matching pending owner, and record `preload-settled: superseded`
+  before `session-paused`. Cleanup may abort/eject only the exact pending or
+  published target, including an exact target that unexpectedly began playing;
+  a different load ordinal or host replacement is never touched. A late load continuation cannot publish its
+  result, silently clear a successor, or escape as an uncommitted target.
+
+  The App lease also derives one opaque, session-only deck load-authority key.
+  Deck owns that key from load start through publication and exposes only an
+  exact `cancelLoadIfOwned` operation. This closes the preparation interval in
+  which App's last-published load ordinal can still name the predecessor: pause
+  revokes FileReader/decode/load-generation authority directly, while a newer
+  manual/successor key fails the match and is preserved.
+
+  `party-autopilot-trace/v10` and evaluation v10 reject any pause or resume while
+  a preload remains open. `party-autopilot-coordinator-soak/v10` includes a
+  deferred-preload fixture that pauses before settlement, records one exact
+  supersession, resumes with a fresh operation, preserves queue order, and
+  delivers the old settlement after that successor owns the deck to prove it
+  cannot publish, mutate the queue, or clear the fresh operation. Adapter
+  observation, cancellation, and eject failures keep the synchronous playback
+  lock and interrupt private evidence until verified Stop All Sound cleanup.
+  This is deterministic in-memory ownership
+  evidence only: it adds no persisted schema, filename, track metadata, audio,
+  wall-clock value, network path, or browser-cancellation claim.
 
 ### Open questions
 

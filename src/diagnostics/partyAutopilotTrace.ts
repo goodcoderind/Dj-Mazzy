@@ -1,5 +1,5 @@
-export const PARTY_AUTOPILOT_TRACE_SCHEMA_VERSION = "party-autopilot-trace/v9" as const;
-export const PARTY_AUTOPILOT_EVALUATION_SCHEMA_VERSION = "party-autopilot-evaluation/v9" as const;
+export const PARTY_AUTOPILOT_TRACE_SCHEMA_VERSION = "party-autopilot-trace/v10" as const;
+export const PARTY_AUTOPILOT_EVALUATION_SCHEMA_VERSION = "party-autopilot-evaluation/v10" as const;
 
 export type PartyDeck = "a" | "b";
 export type PartyTrackOrdinal = number;
@@ -54,6 +54,7 @@ export type PartyAutopilotFailureCode =
   | "queue-revision-regressed"
   | "overlapping-preload"
   | "preload-owner-mismatch"
+  | "preload-not-settled-before-pause"
   | "unplayable-track-retried"
   | "timed-out-track-retried"
   | "preload-timeout-not-paused"
@@ -366,12 +367,14 @@ export const evaluatePartyAutopilotTrace = (trace: PartyAutopilotTrace): PartyAu
         break;
       case "session-resumed":
         if (!started || running || ended || transitionCompletionRecoveryRequired) failures.add("invalid-session-lifecycle");
+        if (activePreload) failures.add("preload-not-settled-before-pause");
         running = true;
         consecutivePreloadTimeouts = 0;
         consecutiveArmFailures = 0;
         break;
       case "session-paused":
         if (!started || !running || ended) failures.add("invalid-session-lifecycle");
+        if (activePreload) failures.add("preload-not-settled-before-pause");
         if (rescuePauseRequired && event.reason !== "rescue") failures.add("rescue-not-paused");
         rescuePauseRequired = false;
         if (event.reason === "stop-all-sound") {

@@ -129,6 +129,7 @@ const Deck = forwardRef(function Deck(
   const releaseRafRef = useRef(0);
   const currentTrackIdRef = useRef(null);
   const loadGenerationRef = useRef(0);
+  const loadAuthorityKeyRef = useRef(null);
   const transportAuthorityRef = useRef(createDeckTransportAuthority());
   const loadAbortControllerRef = useRef(null);
   const isolatedAnalysisClientRef = useRef(null);
@@ -612,6 +613,7 @@ const Deck = forwardRef(function Deck(
       window.clearTimeout(metronomeUiTimerRef.current);
       clickPulseTimersRef.current.forEach((timer) => window.clearTimeout(timer));
       loadAbortControllerRef.current?.abort?.();
+      loadAuthorityKeyRef.current = null;
       isolatedAnalysisClientRef.current?.dispose?.();
       unsubscribe();
       wavesurferRef.current?.destroy();
@@ -621,7 +623,12 @@ const Deck = forwardRef(function Deck(
     };
   }, [color]);
 
-  const loadFileToDeck = async (file, trackId = null, knownAnalysis = null, { isolatedAnalysis = false } = {}) => {
+  const loadFileToDeck = async (
+    file,
+    trackId = null,
+    knownAnalysis = null,
+    { isolatedAnalysis = false, loadAuthorityKey = null } = {}
+  ) => {
     if (playbackStartLocked || playbackStartLockRef?.current) {
       return DECK_LOAD_OUTCOME.cancelled;
     }
@@ -635,6 +642,9 @@ const Deck = forwardRef(function Deck(
     loadAbortControllerRef.current = loadAbortController;
     loadGenerationRef.current += 1;
     const loadGeneration = loadGenerationRef.current;
+    loadAuthorityKeyRef.current = typeof loadAuthorityKey === "string" && loadAuthorityKey.length > 0
+      ? loadAuthorityKey
+      : null;
     let audioContext;
     try {
       audioContext = await ensureGraphReady();
@@ -935,6 +945,35 @@ const Deck = forwardRef(function Deck(
     return deckEngine.stopAt(when);
   };
 
+  const stopAllDeckSound = () => {
+    invalidateDeckTransportAuthority(transportAuthorityRef.current);
+    stopMetronomeAudition();
+    loadAbortControllerRef.current?.abort?.();
+    loadAbortControllerRef.current = null;
+    isolatedAnalysisClientRef.current?.dispose?.();
+    isolatedAnalysisClientRef.current = null;
+    loadGenerationRef.current += 1;
+    loadAuthorityKeyRef.current = null;
+    if (deckEngine.getSnapshot().status !== "preparing") {
+      return { cancelledLoad: false, paused: deckEngine.pause(), auxiliaryStopped: !metronomeCancelRef.current };
+    }
+    wavesurferRef.current?.empty?.();
+    if (lastObjectUrlRef.current) {
+      URL.revokeObjectURL(lastObjectUrlRef.current);
+      lastObjectUrlRef.current = null;
+    }
+    currentTrackIdRef.current = null;
+    setAnalysisRecord(null);
+    setFileReady(false);
+    setTrackName("NO TRACK LOADED");
+    setCurrentTimeSec(0);
+    setTimingWizard(null);
+    setTapTimes([]);
+    setTimingReviewSaveStatus("idle");
+    deckEngine.eject();
+    return { cancelledLoad: true, paused: false, auxiliaryStopped: !metronomeCancelRef.current };
+  };
+
   useImperativeHandle(
     ref,
     () => ({
@@ -966,32 +1005,18 @@ const Deck = forwardRef(function Deck(
       reconcilePlaybackCompletion: (nowSeconds) => deckEngine.reconcilePlaybackCompletion(nowSeconds),
       getDecodedBufferForRehearsal: () => deckEngine.getDecodedBufferForRehearsal(),
       pause: () => pause(),
-      stopAllSound: () => {
-        invalidateDeckTransportAuthority(transportAuthorityRef.current);
-        stopMetronomeAudition();
-        loadAbortControllerRef.current?.abort?.();
-        loadAbortControllerRef.current = null;
-        isolatedAnalysisClientRef.current?.dispose?.();
-        isolatedAnalysisClientRef.current = null;
-        loadGenerationRef.current += 1;
-        if (deckEngine.getSnapshot().status !== "preparing") {
-          return { cancelledLoad: false, paused: deckEngine.pause(), auxiliaryStopped: !metronomeCancelRef.current };
+      stopAllSound: () => stopAllDeckSound(),
+      cancelLoadIfOwned: (authorityKey) => {
+        if (typeof authorityKey !== "string" || loadAuthorityKeyRef.current !== authorityKey) {
+          return { owned: false, authorityRevoked: false };
         }
-        wavesurferRef.current?.empty?.();
-        if (lastObjectUrlRef.current) {
-          URL.revokeObjectURL(lastObjectUrlRef.current);
-          lastObjectUrlRef.current = null;
-        }
-        currentTrackIdRef.current = null;
-        setAnalysisRecord(null);
-        setFileReady(false);
-        setTrackName("NO TRACK LOADED");
-        setCurrentTimeSec(0);
-        setTimingWizard(null);
-        setTapTimes([]);
-        setTimingReviewSaveStatus("idle");
-        deckEngine.eject();
-        return { cancelledLoad: true, paused: false, auxiliaryStopped: !metronomeCancelRef.current };
+        stopAllDeckSound();
+        const snapshot = deckEngine.getSnapshot();
+        return {
+          owned: true,
+          authorityRevoked: loadAuthorityKeyRef.current == null && !deckEngine.isActive() &&
+            snapshot.status !== "preparing"
+        };
       },
       stopAt: (when) => stopAt(when),
       eject: () => {
@@ -1002,6 +1027,7 @@ const Deck = forwardRef(function Deck(
         isolatedAnalysisClientRef.current?.dispose?.();
         isolatedAnalysisClientRef.current = null;
         loadGenerationRef.current += 1;
+        loadAuthorityKeyRef.current = null;
         wavesurferRef.current?.empty?.();
         if (lastObjectUrlRef.current) {
           URL.revokeObjectURL(lastObjectUrlRef.current);

@@ -73,6 +73,39 @@ describe("Party Autopilot trace", () => {
       { type: "transition-scheduled", activeSecond: 3, transition: 1, sourceTrackOrdinal: 1, sourceLoadOrdinal: 1, targetTrackOrdinal: 2, targetLoadOrdinal: 2, ownership: "autopilot", template: "safe-fade" }
     ]);
     expect(evaluatePartyAutopilotTrace(trace).failureCodes).toContain("uncommitted-autopilot-target");
+    expect(evaluatePartyAutopilotTrace(trace).failureCodes).toContain("preload-not-settled-before-pause");
+  });
+
+  it("accepts exact preload supersession before pause and a fresh resumed operation", () => {
+    const evaluation = evaluatePartyAutopilotTrace(record([
+      { type: "session-started", activeSecond: 0 },
+      { type: "queue-committed", activeSecond: 0, revision: 1, trackOrdinals: [2] },
+      { type: "track-played", activeSecond: 0, trackOrdinal: 1, loadOrdinal: 1, cause: "host" },
+      { type: "preload-started", activeSecond: 2, operation: 1, generation: 1, deck: "b", trackOrdinal: 2, loadOrdinal: 2, selectionSource: "queue" },
+      { type: "preload-settled", activeSecond: 2, operation: 1, outcome: "superseded" },
+      { type: "session-paused", activeSecond: 2, reason: "host-request" },
+      { type: "session-resumed", activeSecond: 2 },
+      { type: "preload-started", activeSecond: 3, operation: 2, generation: 2, deck: "b", trackOrdinal: 2, loadOrdinal: 3, selectionSource: "queue" },
+      { type: "preload-settled", activeSecond: 3, operation: 2, outcome: "committed" },
+      { type: "queue-committed", activeSecond: 3, revision: 2, trackOrdinals: [] }
+    ]));
+
+    expect(evaluation.status).toBe("valid-in-progress");
+    expect(evaluation.failureCodes).toEqual([]);
+    expect(evaluation.counters).toMatchObject({ preloadsCommitted: 1, pauses: 1 });
+  });
+
+  it("requires source-stopped pause to settle its active preload first", () => {
+    const valid = evaluatePartyAutopilotTrace(record([
+      { type: "session-started", activeSecond: 0 },
+      { type: "queue-committed", activeSecond: 0, revision: 1, trackOrdinals: [2] },
+      { type: "track-played", activeSecond: 0, trackOrdinal: 1, loadOrdinal: 1, cause: "host" },
+      { type: "preload-started", activeSecond: 2, operation: 1, generation: 1, deck: "b", trackOrdinal: 2, loadOrdinal: 2, selectionSource: "queue" },
+      { type: "preload-settled", activeSecond: 2, operation: 1, outcome: "superseded" },
+      { type: "session-paused", activeSecond: 2, reason: "source-stopped" }
+    ]));
+    expect(valid.failureCodes).toEqual([]);
+    expect(valid.counters.pauses).toBe(1);
   });
 
   it("requires every arm operation to settle and rejects mismatched ownership", () => {

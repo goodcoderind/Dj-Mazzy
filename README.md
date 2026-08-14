@@ -241,7 +241,7 @@ A deterministic three-hour Party Autopilot coordinator soak now drives the same
 `party-autopilot-decision/v4` function used by the live app. It therefore exercises the real
 queue-first two-song lookahead, library continuation, transition-plan arm
 windows, target cue offsets, no-repeat history, exact final-track ownership, and
-`party-autopilot-trace/v9` evaluator. A Rescue correctly ends the unattended observation
+`party-autopilot-trace/v10` evaluator. A Rescue correctly ends the unattended observation
 in a paused state. This is state/coordinator evidence only: it does not exercise
 browser decoding, Web Audio rendering, analysis workers, musical quality, or
 speaker output, and it does not replace the visible two-hour device check.
@@ -261,6 +261,17 @@ manually or choose **New Party**. Synthetic soak coverage includes one-time
 failover, the two-timeout pause, and no retry of an excluded song. Separate
 exact-ownership tests reject late settlement at and after the deadline; the soak
 does not claim that browser decoding or late browser callbacks were exercised.
+Every Party pause now synchronously claims and settles an exact in-flight
+preload before recording the pause. A deck-owned per-load token revokes the
+matching FileReader/decode generation even when App still shows the predecessor's
+published load ordinal. The matching pending, ready, or unexpectedly playing
+target is stopped/ejected, while a different host replacement is never touched.
+Late load settlement cannot publish, clear a successor, or survive as an
+uncommitted target. If exact cancellation/ejection cannot be verified, Mazzy
+keeps new playback locked and exposes the persistent Stop All Sound recovery
+instead of claiming success. Trace/evaluation v10 rejects pause or resume with an open
+preload, and coordinator soak v10 pauses a deferred preload before its settlement,
+then resumes with a fresh operation and the queue unchanged.
 
 Automatic transition preparation is bounded too. Each arm owns the exact source
 and target loads and expires no later than eight seconds—or earlier when its cue
@@ -271,7 +282,7 @@ the queue/history unchanged. Mazzy retries once only when enough source-song
 runway remains; a second consecutive failure, or one without retry runway, pauses
 Autopilot while the current song keeps playing. Host control, recovery, or load
 replacement cancels the exact arm without consuming that budget, and late async
-settlement cannot schedule or clear a successor. The v9 synthetic coordinator
+settlement cannot schedule or clear a successor. The v10 synthetic coordinator
 soak covers fail-once/succeed, two-failure pause, timeout, and short-runway pause;
 it remains state evidence rather than browser timing or audible-output evidence.
 
@@ -284,10 +295,10 @@ the target exactly once. A missing primary callback is recovered after the
 cleanup-degraded, or ownership-lost completion pauses Autopilot or locks new
 playback with a persistent host action. Rescue, Stop All
 Sound, recovery, remote authority loss, and unmount revoke both completion
-signals before touching deck audio. The v9 trace distinguishes primary,
+signals before touching deck audio. The v10 trace distinguishes primary,
 watchdog, late, cleanup-degraded, combined late-and-degraded, and failed
 settlement; Stop also records whether the exact target remained preserved. The
-v9 soak injects missing, late, and replaced-target outcomes. This is deterministic ownership evidence, not
+v10 soak injects missing, late, and replaced-target outcomes. This is deterministic ownership evidence, not
 proof of browser callback delivery or speaker continuity.
 
 Every live coordinator observation also owns a session epoch and monotonic tick
@@ -296,8 +307,8 @@ pause, restart, restore, New Party, remote authority loss, and unmount invalidat
 older tickets. One current-epoch unexpected planning, preload, arm, or transition
 watchdog failure is claimed exactly once, settles its owned operation, pauses
 Autopilot and the Party clock, releases the wake lock, and shows a persistent
-host action while leaving the current song alone. Trace v9 requires the matching
-immediate safety pause; the v9 coordinator soak includes a decision-phase failure
+host action while leaving the current song alone. Trace v10 requires the matching
+immediate safety pause; the v10 coordinator soak includes a decision-phase failure
 fixture, while pure boundary and trace tests cover overlapping tickets and
 active-transition recovery ownership. This is fail-closed state evidence, not
 proof that every browser or file error has been reproduced.
@@ -315,10 +326,10 @@ scheduled `stopAt` becomes paused and never masquerades as natural EOF. An exact
 source that ends materially early becomes a recoverable safety failure rather
 than being relabelled later as a valid end.
 
-`party-autopilot-trace/v9` records only the deck/load ordinal plus the fixed
+`party-autopilot-trace/v10` records only the deck/load ordinal plus the fixed
 `source-onended`, `audio-clock`, or `reconcile` provenance, distinguishes a
 source callback observed after the watchdog boundary, and requires a final
-deck end to be followed immediately by terminal session cleanup. The v9 soak
+deck end to be followed immediately by terminal session cleanup. The v10 soak
 creates and inspects the same final-deck lease and models a missing source
 callback recovered by either the silent audio-clock sentinel or explicit
 audio-clock reconciliation. This is deterministic
