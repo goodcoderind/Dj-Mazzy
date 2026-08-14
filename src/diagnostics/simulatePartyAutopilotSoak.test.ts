@@ -225,6 +225,75 @@ describe("shared Party Autopilot coordinator soak", () => {
     expect(() => simulatePartyAutopilotSoak({ ...base, armSettlementDelaysSeconds: [-0.1] })).toThrow(RangeError);
   });
 
+  it("recovers a missing primary completion at the exact audio-clock watchdog boundary", () => {
+    const result = simulatePartyAutopilotSoak({
+      tracks: library(3, 120),
+      queuedTrackIds: ["track-1", "track-2"],
+      includeRestOfLibrary: false,
+      sessionDurationSeconds: 600,
+      missingPrimaryCompletionAttempts: [1, 2]
+    });
+    expect(result.stopReason).toBe("crate-exhausted");
+    expect(result.successfulHandoffs).toBe(2);
+    expect(result.evaluation.counters.transitionCompletionRecoveries).toBe(2);
+    expect(result.evaluation.counters.lateTransitionCompletions).toBe(0);
+    expect(result.errors).toEqual([]);
+  });
+
+  it("keeps the half-second grace plus callback tolerance but pauses beyond it", () => {
+    const atBoundary = simulatePartyAutopilotSoak({
+      tracks: library(2, 120),
+      queuedTrackIds: ["track-1"],
+      includeRestOfLibrary: false,
+      sessionDurationSeconds: 600,
+      transitionCompletionDelaysSeconds: [0.52]
+    });
+    expect(atBoundary.stopReason).toBe("crate-exhausted");
+    expect(atBoundary.evaluation.counters.lateTransitionCompletions).toBe(0);
+
+    const late = simulatePartyAutopilotSoak({
+      tracks: library(2, 120),
+      queuedTrackIds: ["track-1"],
+      includeRestOfLibrary: false,
+      sessionDurationSeconds: 600,
+      transitionCompletionDelaysSeconds: [0.520001]
+    });
+    expect(late.stopReason).toBe("transition-completion-paused");
+    expect(late.playedTrackIds).toEqual(["track-0", "track-1"]);
+    expect(late.evaluation.counters).toMatchObject({
+      transitionsCompleted: 1,
+      lateTransitionCompletions: 1,
+      pauses: 1
+    });
+    expect(late.errors).toEqual([]);
+  });
+
+  it("pauses without committing a superseded completion target", () => {
+    const result = simulatePartyAutopilotSoak({
+      tracks: library(2, 120),
+      queuedTrackIds: ["track-1"],
+      includeRestOfLibrary: false,
+      sessionDurationSeconds: 600,
+      supersededCompletionAttempts: [1]
+    });
+    expect(result.stopReason).toBe("transition-completion-paused");
+    expect(result.playedTrackIds).toEqual(["track-0"]);
+    expect(result.evaluation.counters).toMatchObject({
+      transitionsCompleted: 0,
+      transitionCompletionFailures: 1,
+      pauses: 1
+    });
+    expect(result.errors).toEqual([]);
+  });
+
+  it("rejects malformed completion injections", () => {
+    const base = { tracks: library(2), sessionDurationSeconds: 600 };
+    expect(() => simulatePartyAutopilotSoak({ ...base, transitionCompletionDelaysSeconds: [Number.NaN] })).toThrow(RangeError);
+    expect(() => simulatePartyAutopilotSoak({ ...base, transitionCompletionDelaysSeconds: [Number.POSITIVE_INFINITY] })).toThrow(RangeError);
+    expect(() => simulatePartyAutopilotSoak({ ...base, transitionCompletionDelaysSeconds: [-0.1] })).toThrow(RangeError);
+    expect(() => simulatePartyAutopilotSoak({ ...base, missingPrimaryCompletionAttempts: [1, 1] })).toThrow(RangeError);
+  });
+
   it("pauses after two arm failures or one failure without retry runway", () => {
     const twice = simulatePartyAutopilotSoak({
       tracks: [timedTrack("track-0", 120, false), timedTrack("track-1", 122, false)],

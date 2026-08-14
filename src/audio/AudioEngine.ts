@@ -323,16 +323,12 @@ export class AudioEngine {
     }
     requirePositiveFinite(durationSeconds, "durationSeconds");
 
-    const now = this.clock.now();
     const scheduledStart = this.clock.resolveScheduleTime(startTime);
     if (authority && !authority()) {
       throw new Error("crossfade scheduling authority expired");
     }
-    if (this.activeCrossfade && this.activeCrossfade.endTime > now) {
-      throw new Error("another crossfade is already active");
-    }
     if (this.activeCrossfade) {
-      this.activeCrossfade = null;
+      throw new Error("another crossfade is already active");
     }
 
     this.scheduleDeckGainCurve(source, curves.source, scheduledStart, durationSeconds);
@@ -356,14 +352,21 @@ export class AudioEngine {
 
   finishCrossfade(scheduleId: number) {
     if (this.activeCrossfade?.id === scheduleId) {
+      let cleanupError: unknown = null;
       const completion = this.crossfadeCompletions.get(scheduleId);
       if (completion) {
-        completion.source.onended = null;
-        try { completion.source.stop(); } catch { /* Already ended. */ }
-        completion.source.disconnect();
-        this.crossfadeCompletions.delete(scheduleId);
+        try {
+          completion.source.onended = null;
+          try { completion.source.stop(); } catch { /* Already ended. */ }
+          completion.source.disconnect();
+        } catch (error) {
+          cleanupError = error;
+        } finally {
+          this.crossfadeCompletions.delete(scheduleId);
+        }
       }
       this.activeCrossfade = null;
+      if (cleanupError) throw cleanupError;
       return true;
     }
     return false;
@@ -371,16 +374,23 @@ export class AudioEngine {
 
   cancelCrossfade(scheduleId: number, sourceGain = 1, targetGain = 0) {
     if (this.activeCrossfade?.id !== scheduleId) return false;
+    const schedule = this.activeCrossfade;
+    let cleanupError: unknown = null;
     const completion = this.crossfadeCompletions.get(scheduleId);
     if (completion) {
-      completion.source.onended = null;
-      try { completion.source.stop(); } catch { /* Already ended. */ }
-      completion.source.disconnect();
-      this.crossfadeCompletions.delete(scheduleId);
+      try {
+        completion.source.onended = null;
+        try { completion.source.stop(); } catch { /* Already ended. */ }
+        completion.source.disconnect();
+      } catch (error) {
+        cleanupError = error;
+      } finally {
+        this.crossfadeCompletions.delete(scheduleId);
+      }
     }
     const now = this.clock.now();
-    const sourceParam = this.deckGains[this.activeCrossfade.source].gain;
-    const targetParam = this.deckGains[this.activeCrossfade.target].gain;
+    const sourceParam = this.deckGains[schedule.source].gain;
+    const targetParam = this.deckGains[schedule.target].gain;
     const rescueRampSeconds = 0.03;
     const settleParam = (param: AudioParam, target: number) => {
       const current = clamp01(param.value);
@@ -392,21 +402,30 @@ export class AudioEngine {
       }
       param.linearRampToValueAtTime(clamp01(target), now + rescueRampSeconds);
     };
-    settleParam(sourceParam, sourceGain);
-    settleParam(targetParam, targetGain);
-    this.activeCrossfade = null;
+    try {
+      settleParam(sourceParam, sourceGain);
+      settleParam(targetParam, targetGain);
+    } finally {
+      this.activeCrossfade = null;
+    }
+    if (cleanupError) throw cleanupError;
     return true;
   }
 
   onCrossfadeComplete(scheduleId: number, callback: () => void) {
-    if (this.activeCrossfade?.id !== scheduleId) return () => undefined;
+    if (this.activeCrossfade?.id !== scheduleId) {
+      throw new Error("crossfade completion owner is not active");
+    }
+    if (this.crossfadeCompletions.has(scheduleId)) {
+      throw new Error("crossfade completion observer already exists");
+    }
     const schedule = this.activeCrossfade;
     const source = this.context.createOscillator();
     let completed = false;
     source.onended = () => {
       if (completed) return;
       completed = true;
-      source.disconnect();
+      try { source.disconnect(); } catch { /* Completion authority must still settle. */ }
       this.crossfadeCompletions.delete(scheduleId);
       callback();
     };
@@ -418,8 +437,11 @@ export class AudioEngine {
       completed = true;
       source.onended = null;
       try { source.stop(); } catch { /* Already ended. */ }
-      source.disconnect();
-      this.crossfadeCompletions.delete(scheduleId);
+      try {
+        source.disconnect();
+      } finally {
+        this.crossfadeCompletions.delete(scheduleId);
+      }
     };
   }
 
@@ -432,7 +454,7 @@ export class AudioEngine {
     source.onended = () => {
       if (settled) return;
       settled = true;
-      source.disconnect();
+      try { source.disconnect(); } catch { /* Deadline authority must still settle. */ }
       callback();
     };
     source.start(deadlineSeconds);

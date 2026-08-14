@@ -1,5 +1,5 @@
-export const PARTY_AUTOPILOT_TRACE_SCHEMA_VERSION = "party-autopilot-trace/v6" as const;
-export const PARTY_AUTOPILOT_EVALUATION_SCHEMA_VERSION = "party-autopilot-evaluation/v6" as const;
+export const PARTY_AUTOPILOT_TRACE_SCHEMA_VERSION = "party-autopilot-trace/v7" as const;
+export const PARTY_AUTOPILOT_EVALUATION_SCHEMA_VERSION = "party-autopilot-evaluation/v7" as const;
 
 export type PartyDeck = "a" | "b";
 export type PartyTrackOrdinal = number;
@@ -12,7 +12,7 @@ type EventBase = Readonly<{
 
 export type PartyAutopilotEvent = EventBase & (
   | Readonly<{ type: "session-started" | "session-resumed" }>
-  | Readonly<{ type: "session-paused"; reason: "host-control" | "host-request" | "stop-all-sound" | "rescue" | "source-stopped" | "preload-timeout" | "preload-runway" | "transition-arm" }>
+  | Readonly<{ type: "session-paused"; reason: "host-control" | "host-request" | "stop-all-sound" | "rescue" | "source-stopped" | "preload-timeout" | "preload-runway" | "transition-arm" | "transition-completion" }>
   | Readonly<{ type: "queue-committed"; revision: number; trackOrdinals: readonly PartyTrackOrdinal[] }>
   | Readonly<{ type: "track-played"; trackOrdinal: PartyTrackOrdinal; loadOrdinal: PartyLoadOrdinal; cause: "host" | "transition" | "rescue" }>
   | Readonly<{ type: "preload-started"; operation: number; generation: number; deck: PartyDeck; trackOrdinal: PartyTrackOrdinal; loadOrdinal: PartyLoadOrdinal; selectionSource: "queue" | "library" }>
@@ -21,9 +21,10 @@ export type PartyAutopilotEvent = EventBase & (
   | Readonly<{ type: "arm-started"; operation: number; origin: "autopilot" | "host" }>
   | Readonly<{ type: "arm-settled"; operation: number; outcome: "scheduled" | "cancelled" | "failed" | "timed-out"; pauseRequired: boolean }>
   | Readonly<{ type: "transition-scheduled"; transition: number; sourceTrackOrdinal: PartyTrackOrdinal; sourceLoadOrdinal: PartyLoadOrdinal; targetTrackOrdinal: PartyTrackOrdinal; targetLoadOrdinal: PartyLoadOrdinal; ownership: "autopilot" | "host"; template: "safe-fade" | "filtered-fade" | "downbeat-cut" | "phrase-blend" }>
-  | Readonly<{ type: "transition-completed"; transition: number; targetTrackOrdinal: PartyTrackOrdinal; targetLoadOrdinal: PartyLoadOrdinal }>
+  | Readonly<{ type: "transition-completed"; transition: number; targetTrackOrdinal: PartyTrackOrdinal; targetLoadOrdinal: PartyLoadOrdinal; settledBy: "primary" | "watchdog"; completionOutcome: "on-time" | "late" | "cleanup-degraded" | "late-cleanup-degraded"; pauseRequired: boolean }>
+  | Readonly<{ type: "transition-completion-failed"; transition: number; reason: "ownership-lost"; pauseRequired: true }>
   | Readonly<{ type: "transition-rescued"; transition: number; kept: "source" | "target" }>
-  | Readonly<{ type: "transition-cancelled"; transition: number; reason: "stop-all-sound"; targetPreserved: true }>
+  | Readonly<{ type: "transition-cancelled"; transition: number; reason: "stop-all-sound"; targetPreserved: boolean }>
   | Readonly<{ type: "final-declared"; deck: PartyDeck; trackOrdinal: PartyTrackOrdinal; loadOrdinal: PartyLoadOrdinal }>
   | Readonly<{ type: "final-revoked" }>
   | Readonly<{ type: "deck-ended"; deck: PartyDeck; trackOrdinal: PartyTrackOrdinal; loadOrdinal: PartyLoadOrdinal }>
@@ -62,6 +63,8 @@ export type PartyAutopilotFailureCode =
   | "overlapping-transition"
   | "transition-owner-mismatch"
   | "transition-source-mismatch"
+  | "transition-completion-not-paused"
+  | "transition-completion-unresolved"
   | "rescue-not-paused"
   | "stop-all-sound-not-paused"
   | "uncommitted-autopilot-target"
@@ -85,6 +88,10 @@ export type PartyAutopilotEvaluation = Readonly<{
     transitionsCompleted: number;
     transitionsRescued: number;
     transitionsCancelled: number;
+    transitionCompletionRecoveries: number;
+    lateTransitionCompletions: number;
+    transitionCompletionFailures: number;
+    transitionCompletionCleanupFailures: number;
     pauses: number;
   }>;
 }>;
@@ -107,7 +114,7 @@ const projectEvent = (event: PartyAutopilotEventInput, sequence: number): PartyA
     case "final-revoked":
       return Object.freeze({ ...base, type: event.type });
     case "session-paused":
-      if (!["host-control", "host-request", "stop-all-sound", "rescue", "source-stopped", "preload-timeout", "preload-runway", "transition-arm"].includes(event.reason)) return null;
+      if (!["host-control", "host-request", "stop-all-sound", "rescue", "source-stopped", "preload-timeout", "preload-runway", "transition-arm", "transition-completion"].includes(event.reason)) return null;
       return Object.freeze({ ...base, type: event.type, reason: event.reason });
     case "queue-committed":
       if (!isPositiveInteger(event.revision) || !Array.isArray(event.trackOrdinals) ||
@@ -144,14 +151,20 @@ const projectEvent = (event: PartyAutopilotEventInput, sequence: number): PartyA
       return Object.freeze({ ...base, type: event.type, transition: event.transition, sourceTrackOrdinal: event.sourceTrackOrdinal, sourceLoadOrdinal: event.sourceLoadOrdinal, targetTrackOrdinal: event.targetTrackOrdinal, targetLoadOrdinal: event.targetLoadOrdinal, ownership: event.ownership, template: event.template });
     case "transition-completed":
       if (!isPositiveInteger(event.transition) || !isPositiveInteger(event.targetTrackOrdinal) ||
-        !isPositiveInteger(event.targetLoadOrdinal)) return null;
-      return Object.freeze({ ...base, type: event.type, transition: event.transition, targetTrackOrdinal: event.targetTrackOrdinal, targetLoadOrdinal: event.targetLoadOrdinal });
+        !isPositiveInteger(event.targetLoadOrdinal) || !["primary", "watchdog"].includes(event.settledBy) ||
+        !["on-time", "late", "cleanup-degraded", "late-cleanup-degraded"].includes(event.completionOutcome) ||
+        typeof event.pauseRequired !== "boolean" ||
+        event.pauseRequired !== (event.completionOutcome !== "on-time")) return null;
+      return Object.freeze({ ...base, type: event.type, transition: event.transition, targetTrackOrdinal: event.targetTrackOrdinal, targetLoadOrdinal: event.targetLoadOrdinal, settledBy: event.settledBy, completionOutcome: event.completionOutcome, pauseRequired: event.pauseRequired });
+    case "transition-completion-failed":
+      if (!isPositiveInteger(event.transition) || event.reason !== "ownership-lost" || event.pauseRequired !== true) return null;
+      return Object.freeze({ ...base, type: event.type, transition: event.transition, reason: event.reason, pauseRequired: true });
     case "transition-rescued":
       if (!isPositiveInteger(event.transition) || !["source", "target"].includes(event.kept)) return null;
       return Object.freeze({ ...base, type: event.type, transition: event.transition, kept: event.kept });
     case "transition-cancelled":
-      if (!isPositiveInteger(event.transition) || event.reason !== "stop-all-sound" || event.targetPreserved !== true) return null;
-      return Object.freeze({ ...base, type: event.type, transition: event.transition, reason: event.reason, targetPreserved: true });
+      if (!isPositiveInteger(event.transition) || event.reason !== "stop-all-sound" || typeof event.targetPreserved !== "boolean") return null;
+      return Object.freeze({ ...base, type: event.type, transition: event.transition, reason: event.reason, targetPreserved: event.targetPreserved });
     case "final-declared":
       if (!["a", "b"].includes(event.deck) || !isPositiveInteger(event.trackOrdinal) ||
         !isPositiveInteger(event.loadOrdinal)) return null;
@@ -234,6 +247,8 @@ export const evaluatePartyAutopilotTrace = (trace: PartyAutopilotTrace): PartyAu
   let matchingFinalEndObserved = false;
   let rescuePauseRequired = false;
   let stopAllSoundPauseRequired = false;
+  let transitionCompletionPauseRequired = false;
+  let transitionCompletionRecoveryRequired = false;
   const playedLoads = new Set<string>();
   const playedTracks = new Set<number>();
   const unplayableTracks = new Set<number>();
@@ -250,6 +265,10 @@ export const evaluatePartyAutopilotTrace = (trace: PartyAutopilotTrace): PartyAu
   let transitionsCompleted = 0;
   let transitionsRescued = 0;
   let transitionsCancelled = 0;
+  let transitionCompletionRecoveries = 0;
+  let lateTransitionCompletions = 0;
+  let transitionCompletionFailures = 0;
+  let transitionCompletionCleanupFailures = 0;
   let pauses = 0;
 
   for (let index = 0; index < trace.events.length; index += 1) {
@@ -269,6 +288,16 @@ export const evaluatePartyAutopilotTrace = (trace: PartyAutopilotTrace): PartyAu
       failures.add("stop-all-sound-not-paused");
       stopAllSoundPauseRequired = false;
     }
+    if (transitionCompletionPauseRequired &&
+      !(event?.type === "session-paused" && event.reason === "transition-completion")) {
+      failures.add("transition-completion-not-paused");
+      transitionCompletionPauseRequired = false;
+    }
+    if (transitionCompletionRecoveryRequired && !transitionCompletionPauseRequired &&
+      event?.type !== "transition-rescued" && event?.type !== "transition-cancelled") {
+      failures.add("transition-completion-unresolved");
+      transitionCompletionRecoveryRequired = false;
+    }
     if (ended) failures.add("invalid-session-lifecycle");
     if (!event || event.sequence !== index + 1) failures.add("sequence-gap");
     if (!Number.isInteger(event?.activeSecond) || event.activeSecond < 0) failures.add("malformed-event");
@@ -286,7 +315,7 @@ export const evaluatePartyAutopilotTrace = (trace: PartyAutopilotTrace): PartyAu
         running = true;
         break;
       case "session-resumed":
-        if (!started || running || ended) failures.add("invalid-session-lifecycle");
+        if (!started || running || ended || transitionCompletionRecoveryRequired) failures.add("invalid-session-lifecycle");
         running = true;
         consecutivePreloadTimeouts = 0;
         consecutiveArmFailures = 0;
@@ -305,6 +334,10 @@ export const evaluatePartyAutopilotTrace = (trace: PartyAutopilotTrace): PartyAu
         if (event.reason === "transition-arm") {
           if (!armFailurePauseRequired) failures.add("unexpected-arm-failure-pause");
           armFailurePauseRequired = false;
+        }
+        if (event.reason === "transition-completion") {
+          if (!transitionCompletionPauseRequired) failures.add("transition-completion-not-paused");
+          transitionCompletionPauseRequired = false;
         }
         running = false;
         pauses += 1;
@@ -433,7 +466,10 @@ export const evaluatePartyAutopilotTrace = (trace: PartyAutopilotTrace): PartyAu
       case "transition-completed":
         if (!started || ended) failures.add("invalid-session-lifecycle");
         if (!isPositiveInteger(event.transition) || !isPositiveInteger(event.targetTrackOrdinal) ||
-          !isPositiveInteger(event.targetLoadOrdinal)) failures.add("malformed-event");
+          !isPositiveInteger(event.targetLoadOrdinal) || !["primary", "watchdog"].includes(event.settledBy) ||
+          !["on-time", "late", "cleanup-degraded", "late-cleanup-degraded"].includes(event.completionOutcome) ||
+          typeof event.pauseRequired !== "boolean" ||
+          event.pauseRequired !== (event.completionOutcome !== "on-time")) failures.add("malformed-event");
         if (!activeTransition || activeTransition.transition !== event.transition ||
           activeTransition.targetTrackOrdinal !== event.targetTrackOrdinal ||
           activeTransition.targetLoadOrdinal !== event.targetLoadOrdinal) {
@@ -446,10 +482,32 @@ export const evaluatePartyAutopilotTrace = (trace: PartyAutopilotTrace): PartyAu
           activeTransition = null;
           committedPreload = null;
           transitionsCompleted += 1;
+          if (event.settledBy === "watchdog") transitionCompletionRecoveries += 1;
+          if (event.pauseRequired) {
+            transitionCompletionPauseRequired = true;
+            if (event.completionOutcome === "late" || event.completionOutcome === "late-cleanup-degraded") {
+              lateTransitionCompletions += 1;
+            }
+            if (event.completionOutcome === "cleanup-degraded" || event.completionOutcome === "late-cleanup-degraded") {
+              transitionCompletionCleanupFailures += 1;
+            }
+          }
+        }
+        break;
+      case "transition-completion-failed":
+        if (!started || ended || event.reason !== "ownership-lost" || event.pauseRequired !== true) {
+          failures.add("malformed-event");
+        }
+        if (!activeTransition || activeTransition.transition !== event.transition) {
+          failures.add("transition-owner-mismatch");
+        } else {
+          transitionCompletionPauseRequired = true;
+          transitionCompletionRecoveryRequired = true;
+          transitionCompletionFailures += 1;
         }
         break;
       case "transition-rescued":
-        if (!started || !running || ended) failures.add("invalid-session-lifecycle");
+        if (!started || ended || (!running && !transitionCompletionRecoveryRequired)) failures.add("invalid-session-lifecycle");
         if (!isPositiveInteger(event.transition) || !["source", "target"].includes(event.kept)) {
           failures.add("malformed-event");
         }
@@ -468,21 +526,30 @@ export const evaluatePartyAutopilotTrace = (trace: PartyAutopilotTrace): PartyAu
           activeTransition = null;
           committedPreload = null;
           transitionsRescued += 1;
-          rescuePauseRequired = true;
+          if (transitionCompletionRecoveryRequired) {
+            transitionCompletionRecoveryRequired = false;
+          } else {
+            rescuePauseRequired = true;
+          }
         }
         break;
       case "transition-cancelled":
-        if (!started || !running || ended || event.reason !== "stop-all-sound" || event.targetPreserved !== true) {
+        if (!started || ended || (!running && !transitionCompletionRecoveryRequired) || event.reason !== "stop-all-sound" || typeof event.targetPreserved !== "boolean") {
           failures.add("invalid-session-lifecycle");
         }
         if (!activeTransition || activeTransition.transition !== event.transition) {
           failures.add("transition-owner-mismatch");
         } else {
-          // STOP ALL SOUND pauses both decks but deliberately preserves the
-          // exact committed target so the same paused plan may resume later.
+          // STOP ALL SOUND preserves the committed target only while its exact
+          // track/load identity still owns the target deck.
           activeTransition = null;
+          if (!event.targetPreserved) committedPreload = null;
           transitionsCancelled += 1;
-          stopAllSoundPauseRequired = true;
+          if (transitionCompletionRecoveryRequired) {
+            transitionCompletionRecoveryRequired = false;
+          } else {
+            stopAllSoundPauseRequired = true;
+          }
         }
         break;
       case "final-declared":
@@ -528,6 +595,8 @@ export const evaluatePartyAutopilotTrace = (trace: PartyAutopilotTrace): PartyAu
   if (!started && trace.events.length) failures.add("invalid-session-lifecycle");
   if (rescuePauseRequired) failures.add("rescue-not-paused");
   if (stopAllSoundPauseRequired) failures.add("stop-all-sound-not-paused");
+  if (transitionCompletionPauseRequired) failures.add("transition-completion-not-paused");
+  if (transitionCompletionRecoveryRequired) failures.add("transition-completion-unresolved");
   if (preloadTimeoutPauseRequired) failures.add("preload-timeout-not-paused");
   if (armFailurePauseRequired) failures.add("arm-failure-not-paused");
   const status = failures.size
@@ -548,6 +617,10 @@ export const evaluatePartyAutopilotTrace = (trace: PartyAutopilotTrace): PartyAu
       transitionsCompleted,
       transitionsRescued,
       transitionsCancelled,
+      transitionCompletionRecoveries,
+      lateTransitionCompletions,
+      transitionCompletionFailures,
+      transitionCompletionCleanupFailures,
       pauses
     })
   });

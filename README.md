@@ -241,7 +241,7 @@ A deterministic three-hour Party Autopilot coordinator soak now drives the same
 `party-autopilot-decision/v4` function used by the live app. It therefore exercises the real
 queue-first two-song lookahead, library continuation, transition-plan arm
 windows, target cue offsets, no-repeat history, exact final-track ownership, and
-`party-autopilot-trace/v6` evaluator. A Rescue correctly ends the unattended observation
+`party-autopilot-trace/v7` evaluator. A Rescue correctly ends the unattended observation
 in a paused state. This is state/coordinator evidence only: it does not exercise
 browser decoding, Web Audio rendering, analysis workers, musical quality, or
 speaker output, and it does not replace the visible two-hour device check.
@@ -271,9 +271,24 @@ the queue/history unchanged. Mazzy retries once only when enough source-song
 runway remains; a second consecutive failure, or one without retry runway, pauses
 Autopilot while the current song keeps playing. Host control, recovery, or load
 replacement cancels the exact arm without consuming that budget, and late async
-settlement cannot schedule or clear a successor. The v6 synthetic coordinator
+settlement cannot schedule or clear a successor. The v7 synthetic coordinator
 soak covers fail-once/succeed, two-failure pause, timeout, and short-runway pause;
 it remains state evidence rather than browser timing or audible-output evidence.
+
+Scheduled transitions now have a second exact completion owner. The primary
+audio-clock callback and an independent half-second watchdog both inspect the
+same immutable source/target load identities and engine schedule; wall timers
+only wake the check and never infer audio progress. Either signal can promote
+the target exactly once. A missing primary callback is recovered after the
+500 ms grace with a bounded 20 ms browser-delivery tolerance, while a later,
+cleanup-degraded, or ownership-lost completion pauses Autopilot or locks new
+playback with a persistent host action. Rescue, Stop All
+Sound, recovery, remote authority loss, and unmount revoke both completion
+signals before touching deck audio. The v7 trace distinguishes primary,
+watchdog, late, cleanup-degraded, combined late-and-degraded, and failed
+settlement; Stop also records whether the exact target remained preserved. The
+v7 soak injects missing, late, and replaced-target outcomes. This is deterministic ownership evidence, not
+proof of browser callback delivery or speaker continuity.
 
 Tempo-changing phrase blends also remain fail-closed until pitch-preserving
 playback is ready on the exact loaded decks. A developer-only Signalsmith

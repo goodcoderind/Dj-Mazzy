@@ -2204,10 +2204,10 @@ These are the active backlog, not reasons to discard the prototype.
   successfully scheduled transition resets the budget. Host/recovery cancellation
   and load replacement do not consume or reset it.
 
-  `party-autopilot-trace/v6` records timeout and whether the owned settlement
+  `party-autopilot-trace/v7` records timeout and whether the owned settlement
   requires the immediately following `transition-arm` pause, rejects a missing or
   premature pause, and exposes only aggregate failure/timeout counts. It retains
-  session-local ordinals and no metadata. `party-autopilot-coordinator-soak/v6`
+  session-local ordinals and no metadata. `party-autopilot-coordinator-soak/v7`
   uses the same runway/deadline policy for fail-once/succeed, fail-twice/pause,
   timeout, and short-runway scenarios. These are deterministic state/ownership
   checks; they do not prove browser callback timing, audio continuity, or speaker
@@ -2261,7 +2261,7 @@ These are the active backlog, not reasons to discard the prototype.
   transports, pauses the Party clock/diagnostic, and releases the wake lock. A
   failure in one independent cleanup stage cannot prevent either deck or the
   session from being stopped. Completion authority is revoked before any fallible
-  Web Audio or DSP cleanup. `party-autopilot-trace/v6` records a stop-specific
+  Web Audio or DSP cleanup. `party-autopilot-trace/v7` records a stop-specific
   transition cancellation and pause while retaining the exact committed target,
   rather than misclassifying this safety action as Rescue. The visible result
   remains persistent and becomes an alert if any stage failed.
@@ -2282,6 +2282,38 @@ These are the active backlog, not reasons to discard the prototype.
   completion, preload, arm, and rehearsal owners are confirmed inactive. Any
   unverifiable audio-critical cleanup keeps the synchronous playback-start lock
   active and tells the host to retry and use system/device mute if sound remains.
+- **D-062 — Lease post-schedule completion to two exact audio-clock owners:**
+  `auto-pilot-transition-completion-ownership/v1` binds a scheduled crossfade to
+  its arm operation and generation, exact engine schedule, source/target decks,
+  track IDs, load keys, transition key, and a deadline exactly 500 ms after the
+  scheduled end. A documented 20 ms callback-delivery tolerance absorbs audio
+  quantum and browser event dispatch delay without moving that deadline. The primary oscillator completion, a separate silent
+  audio-clock deadline, a window wake-up, and the Autopilot tick converge on one
+  idempotent settlement function. Window time never establishes progress: every
+  attempt re-reads the running Web Audio clock, active engine schedule, exact
+  loaded pair, recovery lock, and active target.
+
+  A valid primary completion promotes the target once. If that callback is
+  missing, the watchdog may perform the identical promotion at the deadline. A
+  signal observed more than 20 ms after that deadline—more than 520 ms after
+  the scheduled end—may preserve the exact audible target,
+  but it must immediately pause Autopilot, the Party clock, diagnostic, and wake
+  lock with a persistent intervention. Schedule/load/target ownership loss never
+  mutates a replacement deck; it revokes completion authority, locks new starts,
+  and requires Rescue or Stop All Sound. Authority is revoked before fallible
+  cleanup, and explicit engine finish/cancel cannot retain an old schedule.
+  Rescue, Stop All Sound, audio/output recovery, cross-tab authority loss, and
+  unmount cancel every primary/watchdog owner before deck mutation.
+
+  `party-autopilot-trace/v7` records primary versus watchdog settlement, late
+  completion and cleanup degradation independently (including when both occur),
+  exact-target preservation on Stop, ownership failure, and the immediately following
+  `transition-completion` safety pause without track metadata. The shared
+  `party-autopilot-coordinator-soak/v7` creates and inspects the same lease for
+  every scheduled handoff and injects missing-primary, exact-boundary, late, and
+  replaced-target cases. These tests establish state and ownership liveness;
+  they do not claim real-browser callback delivery, decoded-audio continuity,
+  musical quality, or speaker output.
 
 ### Open questions
 

@@ -23,14 +23,14 @@ const happyTerminalEvents: readonly PartyAutopilotEventInput[] = [
   { type: "arm-started", activeSecond: 199, operation: 1, origin: "autopilot" },
   { type: "arm-settled", activeSecond: 200, operation: 1, outcome: "scheduled", pauseRequired: false },
   { type: "transition-scheduled", activeSecond: 200, transition: 1, sourceTrackOrdinal: 1, sourceLoadOrdinal: 1, targetTrackOrdinal: 2, targetLoadOrdinal: 2, ownership: "autopilot", template: "safe-fade" },
-  { type: "transition-completed", activeSecond: 204, transition: 1, targetTrackOrdinal: 2, targetLoadOrdinal: 2 },
+  { type: "transition-completed", activeSecond: 204, transition: 1, targetTrackOrdinal: 2, targetLoadOrdinal: 2, settledBy: "primary", completionOutcome: "on-time", pauseRequired: false },
   { type: "preload-started", activeSecond: 206, operation: 2, generation: 2, deck: "a", trackOrdinal: 3, loadOrdinal: 3, selectionSource: "queue" },
   { type: "preload-settled", activeSecond: 208, operation: 2, outcome: "committed" },
   { type: "queue-committed", activeSecond: 208, revision: 3, trackOrdinals: [] },
   { type: "arm-started", activeSecond: 409, operation: 2, origin: "autopilot" },
   { type: "arm-settled", activeSecond: 410, operation: 2, outcome: "scheduled", pauseRequired: false },
   { type: "transition-scheduled", activeSecond: 410, transition: 2, sourceTrackOrdinal: 2, sourceLoadOrdinal: 2, targetTrackOrdinal: 3, targetLoadOrdinal: 3, ownership: "autopilot", template: "downbeat-cut" },
-  { type: "transition-completed", activeSecond: 411, transition: 2, targetTrackOrdinal: 3, targetLoadOrdinal: 3 },
+  { type: "transition-completed", activeSecond: 411, transition: 2, targetTrackOrdinal: 3, targetLoadOrdinal: 3, settledBy: "primary", completionOutcome: "on-time", pauseRequired: false },
   { type: "final-declared", activeSecond: 412, deck: "a", trackOrdinal: 3, loadOrdinal: 3 },
   { type: "deck-ended", activeSecond: 620, deck: "a", trackOrdinal: 3, loadOrdinal: 3 },
   { type: "session-ended", activeSecond: 620, reason: "final-track-ended" }
@@ -50,6 +50,10 @@ describe("Party Autopilot trace", () => {
       transitionsCompleted: 2,
       transitionsRescued: 0,
       transitionsCancelled: 0,
+      transitionCompletionRecoveries: 0,
+      lateTransitionCompletions: 0,
+      transitionCompletionFailures: 0,
+      transitionCompletionCleanupFailures: 0,
       pauses: 0
     });
   });
@@ -134,7 +138,7 @@ describe("Party Autopilot trace", () => {
       { type: "arm-started", activeSecond: 1, operation: 1, origin: "host" },
       { type: "arm-settled", activeSecond: 2, operation: 1, outcome: "scheduled", pauseRequired: false },
       { type: "transition-scheduled", activeSecond: 2, transition: 1, sourceTrackOrdinal: 1, sourceLoadOrdinal: 1, targetTrackOrdinal: 2, targetLoadOrdinal: 3, ownership: "host", template: "safe-fade" },
-      { type: "transition-completed", activeSecond: 3, transition: 1, targetTrackOrdinal: 3, targetLoadOrdinal: 4 }
+      { type: "transition-completed", activeSecond: 3, transition: 1, targetTrackOrdinal: 3, targetLoadOrdinal: 4, settledBy: "primary", completionOutcome: "on-time", pauseRequired: false }
     ]);
     expect(evaluatePartyAutopilotTrace(trace).failureCodes).toEqual(expect.arrayContaining([
       "track-repeated",
@@ -184,7 +188,7 @@ describe("Party Autopilot trace", () => {
       { type: "arm-started", activeSecond: 12, operation: 2, origin: "autopilot" },
       { type: "arm-settled", activeSecond: 12, operation: 2, outcome: "scheduled", pauseRequired: false },
       { type: "transition-scheduled", activeSecond: 12, transition: 2, sourceTrackOrdinal: 1, sourceLoadOrdinal: 1, targetTrackOrdinal: 2, targetLoadOrdinal: 2, ownership: "autopilot", template: "safe-fade" },
-      { type: "transition-completed", activeSecond: 16, transition: 2, targetTrackOrdinal: 2, targetLoadOrdinal: 2 }
+      { type: "transition-completed", activeSecond: 16, transition: 2, targetTrackOrdinal: 2, targetLoadOrdinal: 2, settledBy: "primary", completionOutcome: "on-time", pauseRequired: false }
     ]));
 
     expect(evaluation.status).toBe("valid-in-progress");
@@ -358,6 +362,98 @@ describe("Party Autopilot trace", () => {
       { type: "session-paused", activeSecond: 1, reason: "preload-runway" }
     ]));
     expect(runwayPause.status).toBe("valid-in-progress");
+  });
+
+  it("requires an immediate completion-safety pause after a late owned handoff", () => {
+    const prefix: PartyAutopilotEventInput[] = [
+      { type: "session-started", activeSecond: 0 },
+      { type: "queue-committed", activeSecond: 0, revision: 1, trackOrdinals: [2] },
+      { type: "track-played", activeSecond: 0, trackOrdinal: 1, loadOrdinal: 1, cause: "host" },
+      { type: "preload-started", activeSecond: 1, operation: 1, generation: 1, deck: "b", trackOrdinal: 2, loadOrdinal: 2, selectionSource: "queue" },
+      { type: "preload-settled", activeSecond: 2, operation: 1, outcome: "committed" },
+      { type: "queue-committed", activeSecond: 2, revision: 2, trackOrdinals: [] },
+      { type: "arm-started", activeSecond: 3, operation: 1, origin: "autopilot" },
+      { type: "arm-settled", activeSecond: 3, operation: 1, outcome: "scheduled", pauseRequired: false },
+      { type: "transition-scheduled", activeSecond: 3, transition: 1, sourceTrackOrdinal: 1, sourceLoadOrdinal: 1, targetTrackOrdinal: 2, targetLoadOrdinal: 2, ownership: "autopilot", template: "safe-fade" },
+      { type: "transition-completed", activeSecond: 8, transition: 1, targetTrackOrdinal: 2, targetLoadOrdinal: 2, settledBy: "watchdog", completionOutcome: "late", pauseRequired: true }
+    ];
+    const valid = evaluatePartyAutopilotTrace(record([
+      ...prefix,
+      { type: "session-paused", activeSecond: 8, reason: "transition-completion" }
+    ]));
+    expect(valid.failureCodes).not.toContain("transition-completion-not-paused");
+    expect(valid.counters.transitionCompletionRecoveries).toBe(1);
+    expect(valid.counters.lateTransitionCompletions).toBe(1);
+
+    expect(evaluatePartyAutopilotTrace(record(prefix)).failureCodes)
+      .toContain("transition-completion-not-paused");
+    expect(evaluatePartyAutopilotTrace(record([
+      ...prefix,
+      { type: "session-paused", activeSecond: 8, reason: "host-control" }
+    ])).failureCodes).toContain("transition-completion-not-paused");
+    expect(evaluatePartyAutopilotTrace(record([
+      ...prefix,
+      { type: "queue-committed", activeSecond: 8, revision: 2, trackOrdinals: [] },
+      { type: "session-paused", activeSecond: 8, reason: "transition-completion" }
+    ])).failureCodes).toContain("transition-completion-not-paused");
+  });
+
+  it("keeps failed completion ownership until a paused Rescue or Stop resolves it", () => {
+    const failedPrefix: PartyAutopilotEventInput[] = [
+      { type: "session-started", activeSecond: 0 },
+      { type: "queue-committed", activeSecond: 0, revision: 1, trackOrdinals: [2] },
+      { type: "track-played", activeSecond: 0, trackOrdinal: 1, loadOrdinal: 1, cause: "host" },
+      { type: "preload-started", activeSecond: 1, operation: 1, generation: 1, deck: "b", trackOrdinal: 2, loadOrdinal: 2, selectionSource: "queue" },
+      { type: "preload-settled", activeSecond: 2, operation: 1, outcome: "committed" },
+      { type: "queue-committed", activeSecond: 2, revision: 2, trackOrdinals: [] },
+      { type: "arm-started", activeSecond: 3, operation: 1, origin: "autopilot" },
+      { type: "arm-settled", activeSecond: 3, operation: 1, outcome: "scheduled", pauseRequired: false },
+      { type: "transition-scheduled", activeSecond: 3, transition: 1, sourceTrackOrdinal: 1, sourceLoadOrdinal: 1, targetTrackOrdinal: 2, targetLoadOrdinal: 2, ownership: "autopilot", template: "safe-fade" },
+      { type: "transition-completion-failed", activeSecond: 8, transition: 1, reason: "ownership-lost", pauseRequired: true },
+      { type: "session-paused", activeSecond: 8, reason: "transition-completion" }
+    ];
+    expect(evaluatePartyAutopilotTrace(record(failedPrefix)).failureCodes)
+      .toContain("transition-completion-unresolved");
+
+    for (const resolution of [
+      { type: "transition-rescued", activeSecond: 8, transition: 1, kept: "source" },
+      { type: "transition-rescued", activeSecond: 8, transition: 1, kept: "target" },
+      { type: "transition-cancelled", activeSecond: 8, transition: 1, reason: "stop-all-sound", targetPreserved: true },
+      { type: "transition-cancelled", activeSecond: 8, transition: 1, reason: "stop-all-sound", targetPreserved: false }
+    ] as const) {
+      const evaluation = evaluatePartyAutopilotTrace(record([...failedPrefix, resolution]));
+      expect(evaluation.failureCodes).toEqual([]);
+      expect(evaluation.status).toBe("valid-in-progress");
+    }
+  });
+
+  it("distinguishes late completion from cleanup degradation", () => {
+    const cleanupEvents = happyTerminalEvents.map((event) => event.type === "transition-completed"
+      ? { ...event, completionOutcome: "cleanup-degraded" as const, pauseRequired: true }
+      : event);
+    const firstCompletion = cleanupEvents.findIndex((event) => event.type === "transition-completed");
+    cleanupEvents.splice(firstCompletion + 1, 0, {
+      type: "session-paused",
+      activeSecond: cleanupEvents[firstCompletion].activeSecond,
+      reason: "transition-completion"
+    });
+    const evaluation = evaluatePartyAutopilotTrace(record(cleanupEvents.slice(0, firstCompletion + 2)));
+    expect(evaluation.counters.lateTransitionCompletions).toBe(0);
+    expect(evaluation.counters.transitionCompletionCleanupFailures).toBe(1);
+
+    const lateAndDegradedEvents = happyTerminalEvents.map((event) => event.type === "transition-completed"
+      ? { ...event, settledBy: "watchdog" as const, completionOutcome: "late-cleanup-degraded" as const, pauseRequired: true }
+      : event);
+    const combinedCompletion = lateAndDegradedEvents.findIndex((event) => event.type === "transition-completed");
+    lateAndDegradedEvents.splice(combinedCompletion + 1, 0, {
+      type: "session-paused",
+      activeSecond: lateAndDegradedEvents[combinedCompletion].activeSecond,
+      reason: "transition-completion"
+    });
+    const combined = evaluatePartyAutopilotTrace(record(lateAndDegradedEvents.slice(0, combinedCompletion + 2)));
+    expect(combined.counters.transitionCompletionRecoveries).toBe(1);
+    expect(combined.counters.lateTransitionCompletions).toBe(1);
+    expect(combined.counters.transitionCompletionCleanupFailures).toBe(1);
   });
 
   it("records only bounded allowlisted fields", () => {

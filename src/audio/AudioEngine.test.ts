@@ -259,6 +259,16 @@ describe("AudioEngine", () => {
     );
   });
 
+  it("does not replace an overdue crossfade until its owner explicitly settles", () => {
+    const { context, engine } = createEngine();
+    const schedule = engine.scheduleCrossfade("a", "b", 12, 8);
+    context.currentTime = 30;
+    expect(() => engine.scheduleCrossfade("b", "a", 31, 4)).toThrow(
+      "another crossfade is already active"
+    );
+    expect(engine.getActiveCrossfade()).toBe(schedule);
+  });
+
   it("cancels a half-armed crossfade and restores stable source ownership", () => {
     const { context, engine } = createEngine();
     const schedule = engine.scheduleCrossfade("a", "b", 12, 8);
@@ -325,6 +335,37 @@ describe("AudioEngine", () => {
     completionSource.onended?.();
     expect(completions).toBe(1);
     cancel();
+  });
+
+  it("rejects missing or duplicate crossfade completion observers", () => {
+    const { engine } = createEngine();
+    expect(() => engine.onCrossfadeComplete(99, () => undefined)).toThrow("not active");
+    const schedule = engine.scheduleCrossfade("a", "b", 11, 2);
+    engine.onCrossfadeComplete(schedule.id, () => undefined);
+    expect(() => engine.onCrossfadeComplete(schedule.id, () => undefined)).toThrow("already exists");
+  });
+
+  it("releases crossfade ownership even when completion-node cleanup throws", () => {
+    const { context, engine } = createEngine();
+    const schedule = engine.scheduleCrossfade("a", "b", 11, 2);
+    engine.onCrossfadeComplete(schedule.id, () => undefined);
+    const completionSource = context.oscillators.at(-1)!;
+    completionSource.disconnect = () => { throw new Error("disconnect failed"); };
+    expect(() => engine.finishCrossfade(schedule.id)).toThrow("disconnect failed");
+    expect(engine.getActiveCrossfade()).toBeNull();
+    expect(() => engine.onCrossfadeComplete(schedule.id, () => undefined)).toThrow("not active");
+  });
+
+  it("delivers the owned completion even when sentinel disconnect throws", () => {
+    const { context, engine } = createEngine();
+    const schedule = engine.scheduleCrossfade("a", "b", 11, 2);
+    let completions = 0;
+    engine.onCrossfadeComplete(schedule.id, () => { completions += 1; });
+    const completionSource = context.oscillators.at(-1)!;
+    completionSource.disconnect = () => { throw new Error("disconnect failed"); };
+    expect(() => completionSource.onended?.()).not.toThrow();
+    expect(completions).toBe(1);
+    expect(engine.finishCrossfade(schedule.id)).toBe(true);
   });
 
   it("cancels a pending audio-clock completion during Rescue", () => {

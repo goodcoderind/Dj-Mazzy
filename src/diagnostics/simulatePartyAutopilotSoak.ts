@@ -16,8 +16,12 @@ import {
   deriveAutoPilotArmDeadline,
   inspectAutoPilotArmLease
 } from "../planning/autoPilotArmOwnership";
+import {
+  createAutoPilotTransitionCompletionLease,
+  inspectAutoPilotTransitionCompletion
+} from "../planning/autoPilotTransitionCompletionOwnership";
 
-export const PARTY_AUTOPILOT_SOAK_SCHEMA_VERSION = "party-autopilot-coordinator-soak/v6" as const;
+export const PARTY_AUTOPILOT_SOAK_SCHEMA_VERSION = "party-autopilot-coordinator-soak/v7" as const;
 
 export type SimulatedPartyTrack = Readonly<{
   id: string;
@@ -57,6 +61,12 @@ export type PartyAutopilotSoakOptions = Readonly<{
   armSettlementDelaysSeconds?: readonly number[];
   /** Synthetic pair replacements before settlement, consumed by attempt ordinal. */
   supersededArmAttempts?: readonly number[];
+  /** Transition attempts whose primary completion signal is deliberately dropped. */
+  missingPrimaryCompletionAttempts?: readonly number[];
+  /** Audio-clock delay after the scheduled end before a primary completion signal. */
+  transitionCompletionDelaysSeconds?: readonly number[];
+  /** Transition attempts whose exact target load is replaced before completion settles. */
+  supersededCompletionAttempts?: readonly number[];
 }>;
 
 export type SimulatedPartyRescueEvent = Readonly<{
@@ -68,7 +78,7 @@ export type SimulatedPartyRescueEvent = Readonly<{
 export type PartyAutopilotSoakResult = Readonly<{
   schemaVersion: typeof PARTY_AUTOPILOT_SOAK_SCHEMA_VERSION;
   completed: boolean;
-  stopReason: "observation-horizon" | "crate-exhausted" | "rescue-paused" | "preload-timeout-paused" | "preload-runway-paused" | "transition-arm-paused" | "invalid";
+  stopReason: "observation-horizon" | "crate-exhausted" | "rescue-paused" | "preload-timeout-paused" | "preload-runway-paused" | "transition-arm-paused" | "transition-completion-paused" | "invalid";
   evidenceScope: "shared Autopilot coordinator and state invariants only; not audio continuity, musical quality, decode, or speaker output";
   observationHorizonSeconds: number;
   elapsedActiveSeconds: number;
@@ -125,6 +135,23 @@ const validate = (options: PartyAutopilotSoakOptions) => {
       throw new RangeError("supersededArmAttempts must contain unique positive integers");
     }
     supersededAttempts.add(attempt);
+  }
+  for (const delay of options.transitionCompletionDelaysSeconds ?? []) {
+    if (!Number.isFinite(delay) || delay < 0) {
+      throw new RangeError("transitionCompletionDelaysSeconds must be finite and non-negative");
+    }
+  }
+  for (const [name, attempts] of [
+    ["missingPrimaryCompletionAttempts", options.missingPrimaryCompletionAttempts ?? []],
+    ["supersededCompletionAttempts", options.supersededCompletionAttempts ?? []]
+  ] as const) {
+    const seen = new Set<number>();
+    for (const attempt of attempts) {
+      if (!Number.isSafeInteger(attempt) || attempt < 1 || seen.has(attempt)) {
+        throw new RangeError(`${name} must contain unique positive integers`);
+      }
+      seen.add(attempt);
+    }
   }
   return { start, initial };
 };
@@ -195,6 +222,8 @@ export const simulatePartyAutopilotSoak = (options: PartyAutopilotSoakOptions): 
   const syntheticUnplayableIds = new Set(options.unplayableTrackIds ?? []);
   const syntheticNeverSettlingIds = new Set(options.neverSettlingPreloadTrackIds ?? []);
   const syntheticSupersededArmAttempts = new Set(options.supersededArmAttempts ?? []);
+  const syntheticMissingPrimaryCompletionAttempts = new Set(options.missingPrimaryCompletionAttempts ?? []);
+  const syntheticSupersededCompletionAttempts = new Set(options.supersededCompletionAttempts ?? []);
   let consecutivePreloadTimeouts = 0;
   let stopReason: PartyAutopilotSoakResult["stopReason"] = "invalid";
 
@@ -406,10 +435,26 @@ export const simulatePartyAutopilotSoak = (options: PartyAutopilotSoakOptions): 
       append({ type: "transition-scheduled", activeSecond: 0, transition, sourceTrackOrdinal: ordinals.get(sourceId)!, sourceLoadOrdinal: sourceLoad, targetTrackOrdinal: ordinals.get(targetId)!, targetLoadOrdinal: targetLoad, ownership: "autopilot", template: decision.plan.template as keyof typeof transitionTemplates });
       transitionTemplates[decision.plan.template as keyof typeof transitionTemplates] += 1;
       activeTransitionKey = decision.transitionKey;
+      const completionStartTime = decision.plan.schedule.startTime;
+      const transitionDuration = decision.plan.schedule.durationSeconds;
+      const completionLease = createAutoPilotTransitionCompletionLease({
+        operation,
+        generation: operation,
+        scheduleId: transition,
+        transitionKey: `${sourceLoadKey}->${targetLoadKey}`,
+        sourceDeck,
+        targetDeck,
+        sourceTrackId: sourceId,
+        targetTrackId: targetId,
+        sourceLoadKey,
+        targetLoadKey,
+        registeredAtSeconds: now,
+        startTimeSeconds: completionStartTime,
+        endTimeSeconds: completionStartTime + transitionDuration
+      });
       const lead = Math.max(0, decision.plan.schedule.startTime - now);
       advance(lead);
       const rescue = rescueByAttempt.get(transition);
-      const transitionDuration = decision.plan.schedule.durationSeconds;
       if (rescue) {
         advance(transitionDuration * rescue.progress);
         const rescueDecision = decideRescueTransition({ id: transition, source: sourceDeck, target: targetDeck, startTime: now - transitionDuration * rescue.progress, endTime: now - transitionDuration * rescue.progress + transitionDuration }, now);
@@ -437,16 +482,82 @@ export const simulatePartyAutopilotSoak = (options: PartyAutopilotSoakOptions): 
         stopReason = "observation-horizon";
         break;
       }
-      append({ type: "transition-completed", activeSecond: 0, transition, targetTrackOrdinal: ordinals.get(targetId)!, targetLoadOrdinal: targetLoad });
+      const missingPrimary = syntheticMissingPrimaryCompletionAttempts.delete(transition);
+      const completionDelay = missingPrimary
+        ? 0.5
+        : options.transitionCompletionDelaysSeconds?.[transition - 1] ?? 0;
+      if (completionDelay) {
+        const delayed = advance(completionDelay);
+        if (delayed + 1e-9 < completionDelay) {
+          stopReason = "observation-horizon";
+          break;
+        }
+      }
+      const completionState = inspectAutoPilotTransitionCompletion({
+        current: completionLease,
+        expected: completionLease,
+        nowSeconds: now,
+        engineSchedule: {
+          id: transition,
+          source: sourceDeck,
+          target: targetDeck,
+          startTime: completionStartTime,
+          endTime: completionStartTime + transitionDuration
+        },
+        pair: {
+          sourceDeck,
+          targetDeck,
+          sourceTrackId: sourceId,
+          targetTrackId: targetId,
+          sourceLoadKey,
+          targetLoadKey: syntheticSupersededCompletionAttempts.delete(transition)
+            ? `${targetLoadKey}:replacement`
+            : targetLoadKey,
+          targetPlaying: true
+        },
+        signal: missingPrimary ? "watchdog" : "primary",
+        contextRunning: true,
+        playbackLocked: false
+      });
+      if (completionState === "ownership-lost" || completionState === "superseded") {
+        append({ type: "transition-completion-failed", activeSecond: 0, transition, reason: "ownership-lost", pauseRequired: true });
+        append({ type: "session-paused", activeSecond: 0, reason: "transition-completion" });
+        append({ type: "transition-cancelled", activeSecond: 0, transition, reason: "stop-all-sound", targetPreserved: false });
+        clock = pausePartySessionClock(clock, now);
+        activeTransitionKey = null;
+        stopReason = "transition-completion-paused";
+        break;
+      }
+      if (completionState === "waiting") {
+        errors.push("transition completion settled before its owned audio-clock boundary");
+        break;
+      }
+      const completionPauseRequired = completionState === "late-ready";
+      append({
+        type: "transition-completed",
+        activeSecond: 0,
+        transition,
+        targetTrackOrdinal: ordinals.get(targetId)!,
+        targetLoadOrdinal: targetLoad,
+        settledBy: missingPrimary ? "watchdog" : "primary",
+        completionOutcome: completionPauseRequired ? "late" : "on-time",
+        pauseRequired: completionPauseRequired
+      });
       sourceDeck = targetDeck;
       sourceId = targetId;
       sourceLoad = targetLoad;
       sourcePlaybackRate = decision.plan.targetPlaybackRate;
-      sourcePosition = decision.plan.schedule.targetCueSeconds + transitionDuration * sourcePlaybackRate;
+      sourcePosition = decision.plan.schedule.targetCueSeconds + (transitionDuration + completionDelay) * sourcePlaybackRate;
       playedTrackIds.push(sourceId);
       targetId = null;
       targetLoad = null;
       activeTransitionKey = null;
+      if (completionPauseRequired) {
+        append({ type: "session-paused", activeSecond: 0, reason: "transition-completion" });
+        clock = pausePartySessionClock(clock, now);
+        stopReason = "transition-completion-paused";
+        break;
+      }
       continue;
     }
     if (decision.kind === "declare-final") {
