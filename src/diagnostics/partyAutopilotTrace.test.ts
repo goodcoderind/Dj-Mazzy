@@ -54,6 +54,7 @@ describe("Party Autopilot trace", () => {
       lateTransitionCompletions: 0,
       transitionCompletionFailures: 0,
       transitionCompletionCleanupFailures: 0,
+      coordinatorFailures: 0,
       pauses: 0
     });
   });
@@ -456,6 +457,71 @@ describe("Party Autopilot trace", () => {
     expect(combined.counters.transitionCompletionCleanupFailures).toBe(1);
   });
 
+  it("requires exactly one immediate safety pause after a coordinator failure", () => {
+    const prefix: PartyAutopilotEventInput[] = [
+      { type: "session-started", activeSecond: 0 },
+      { type: "track-played", activeSecond: 0, trackOrdinal: 1, loadOrdinal: 1, cause: "host" },
+      { type: "coordinator-failed", activeSecond: 4, operation: 7, phase: "decision", pauseRequired: true }
+    ];
+    const valid = evaluatePartyAutopilotTrace(record([
+      ...prefix,
+      { type: "session-paused", activeSecond: 4, reason: "coordinator-failure" }
+    ]));
+    expect(valid.failureCodes).toEqual([]);
+    expect(valid.counters.coordinatorFailures).toBe(1);
+    expect(valid.status).toBe("valid-in-progress");
+
+    expect(evaluatePartyAutopilotTrace(record(prefix)).failureCodes)
+      .toContain("coordinator-failure-not-paused");
+    expect(evaluatePartyAutopilotTrace(record([
+      ...prefix,
+      { type: "session-paused", activeSecond: 4, reason: "host-request" }
+    ])).failureCodes).toContain("coordinator-failure-not-paused");
+    expect(evaluatePartyAutopilotTrace(record([
+      ...prefix,
+      { type: "queue-committed", activeSecond: 4, revision: 1, trackOrdinals: [] },
+      { type: "session-paused", activeSecond: 4, reason: "coordinator-failure" }
+    ])).failureCodes).toContain("coordinator-failure-not-paused");
+
+    const openPreload = evaluatePartyAutopilotTrace(record([
+      { type: "session-started", activeSecond: 0 },
+      { type: "track-played", activeSecond: 0, trackOrdinal: 1, loadOrdinal: 1, cause: "host" },
+      { type: "preload-started", activeSecond: 1, operation: 2, generation: 2, deck: "b", trackOrdinal: 2, loadOrdinal: 2, selectionSource: "library" },
+      { type: "coordinator-failed", activeSecond: 1, operation: 8, phase: "preload", pauseRequired: true },
+      { type: "session-paused", activeSecond: 1, reason: "coordinator-failure" }
+    ]));
+    expect(openPreload.failureCodes).toContain("preload-owner-mismatch");
+  });
+
+  it("keeps an active transition owned until paused coordinator recovery is resolved", () => {
+    const prefix: PartyAutopilotEventInput[] = [
+      { type: "session-started", activeSecond: 0 },
+      { type: "track-played", activeSecond: 0, trackOrdinal: 1, loadOrdinal: 1, cause: "host" },
+      { type: "arm-started", activeSecond: 1, operation: 1, origin: "host" },
+      { type: "arm-settled", activeSecond: 1, operation: 1, outcome: "scheduled", pauseRequired: false },
+      { type: "transition-scheduled", activeSecond: 1, transition: 1, sourceTrackOrdinal: 1, sourceLoadOrdinal: 1, targetTrackOrdinal: 2, targetLoadOrdinal: 2, ownership: "host", template: "safe-fade" },
+      { type: "coordinator-failed", activeSecond: 2, operation: 9, phase: "transition-watchdog", pauseRequired: true },
+      { type: "session-paused", activeSecond: 2, reason: "coordinator-failure" }
+    ];
+
+    const rescued = evaluatePartyAutopilotTrace(record([
+      ...prefix,
+      { type: "transition-rescued", activeSecond: 2, transition: 1, kept: "source" }
+    ]));
+    expect(rescued.failureCodes).toEqual([]);
+    expect(rescued.counters.transitionsRescued).toBe(1);
+
+    const stopped = evaluatePartyAutopilotTrace(record([
+      ...prefix,
+      { type: "transition-cancelled", activeSecond: 2, transition: 1, reason: "stop-all-sound", targetPreserved: true }
+    ]));
+    expect(stopped.failureCodes).toEqual([]);
+    expect(stopped.counters.transitionsCancelled).toBe(1);
+
+    expect(evaluatePartyAutopilotTrace(record(prefix)).failureCodes)
+      .toContain("transition-completion-unresolved");
+  });
+
   it("records only bounded allowlisted fields", () => {
     const recorder = createPartyAutopilotTraceRecorder();
     recorder.append({ type: "session-started", activeSecond: 0, filename: "private.mp3", trackId: "secret" } as never);
@@ -472,6 +538,7 @@ describe("Party Autopilot trace", () => {
     expect(hostile.append({ type: "transition-scheduled", activeSecond: 0, transition: 1, sourceTrackOrdinal: 1, sourceLoadOrdinal: 1, targetTrackOrdinal: 2, targetLoadOrdinal: 2, ownership: "host", template: "private filename.mp3" } as never)).toBe(false);
     expect(hostile.append({ type: "final-declared", activeSecond: 0, deck: "private filename.mp3", trackOrdinal: 1, loadOrdinal: 1 } as never)).toBe(false);
     expect(hostile.append({ type: "queue-committed", activeSecond: 0, revision: "private filename.mp3", trackOrdinals: [1] } as never)).toBe(false);
+    expect(hostile.append({ type: "coordinator-failed", activeSecond: 0, operation: 1, phase: "private filename.mp3", pauseRequired: true } as never)).toBe(false);
     const hostileJson = JSON.stringify(hostile.snapshot());
     expect(hostileJson).not.toContain("private filename.mp3");
     expect(hostile.snapshot().interrupted).toBe(true);

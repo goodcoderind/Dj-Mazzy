@@ -21,7 +21,7 @@ import {
   inspectAutoPilotTransitionCompletion
 } from "../planning/autoPilotTransitionCompletionOwnership";
 
-export const PARTY_AUTOPILOT_SOAK_SCHEMA_VERSION = "party-autopilot-coordinator-soak/v7" as const;
+export const PARTY_AUTOPILOT_SOAK_SCHEMA_VERSION = "party-autopilot-coordinator-soak/v8" as const;
 
 export type SimulatedPartyTrack = Readonly<{
   id: string;
@@ -67,6 +67,8 @@ export type PartyAutopilotSoakOptions = Readonly<{
   transitionCompletionDelaysSeconds?: readonly number[];
   /** Transition attempts whose exact target load is replaced before completion settles. */
   supersededCompletionAttempts?: readonly number[];
+  /** One synthetic coordinator tick that fails before mutating its decision. */
+  coordinatorFailureIteration?: number;
 }>;
 
 export type SimulatedPartyRescueEvent = Readonly<{
@@ -78,7 +80,7 @@ export type SimulatedPartyRescueEvent = Readonly<{
 export type PartyAutopilotSoakResult = Readonly<{
   schemaVersion: typeof PARTY_AUTOPILOT_SOAK_SCHEMA_VERSION;
   completed: boolean;
-  stopReason: "observation-horizon" | "crate-exhausted" | "rescue-paused" | "preload-timeout-paused" | "preload-runway-paused" | "transition-arm-paused" | "transition-completion-paused" | "invalid";
+  stopReason: "observation-horizon" | "crate-exhausted" | "rescue-paused" | "preload-timeout-paused" | "preload-runway-paused" | "transition-arm-paused" | "transition-completion-paused" | "coordinator-failure-paused" | "invalid";
   evidenceScope: "shared Autopilot coordinator and state invariants only; not audio continuity, musical quality, decode, or speaker output";
   observationHorizonSeconds: number;
   elapsedActiveSeconds: number;
@@ -109,6 +111,10 @@ const validate = (options: PartyAutopilotSoakOptions) => {
   }
   const initial = options.initialTrackId ?? options.tracks[0].id;
   if (!ids.has(initial)) throw new RangeError("initialTrackId must identify a supplied track");
+  if (options.coordinatorFailureIteration != null &&
+    (!Number.isSafeInteger(options.coordinatorFailureIteration) || options.coordinatorFailureIteration < 1)) {
+    throw new RangeError("coordinatorFailureIteration must be a positive safe integer");
+  }
   const rescueAttempts = new Set<number>();
   for (const rescue of options.rescues ?? []) {
     if (!Number.isInteger(rescue.transitionAttempt) || rescue.transitionAttempt < 1 || rescueAttempts.has(rescue.transitionAttempt)) {
@@ -245,6 +251,19 @@ export const simulatePartyAutopilotSoak = (options: PartyAutopilotSoakOptions): 
 
   const maximumIterations = Math.max(100, options.tracks.length * 20);
   for (let iteration = 0; iteration < maximumIterations; iteration += 1) {
+    if (iteration + 1 === options.coordinatorFailureIteration) {
+      append({
+        type: "coordinator-failed",
+        activeSecond: 0,
+        operation: iteration + 1,
+        phase: "decision",
+        pauseRequired: true
+      });
+      append({ type: "session-paused", activeSecond: 0, reason: "coordinator-failure" });
+      clock = pausePartySessionClock(clock, now);
+      stopReason = "coordinator-failure-paused";
+      break;
+    }
     if (clockSnapshot().elapsedActiveSeconds >= options.sessionDurationSeconds - 1e-9) {
       stopReason = "observation-horizon";
       break;

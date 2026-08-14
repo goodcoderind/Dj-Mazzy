@@ -286,12 +286,29 @@ describe("shared Party Autopilot coordinator soak", () => {
     expect(result.errors).toEqual([]);
   });
 
+  it("records one fatal coordinator claim and its immediate safety pause", () => {
+    const result = simulatePartyAutopilotSoak({
+      tracks: library(4, 120),
+      queuedTrackIds: ["track-1", "track-2"],
+      includeRestOfLibrary: false,
+      sessionDurationSeconds: 600,
+      coordinatorFailureIteration: 2
+    });
+    expect(result.stopReason).toBe("coordinator-failure-paused");
+    expect(result.playedTrackIds).toEqual(["track-0"]);
+    expect(result.evaluation.counters.coordinatorFailures).toBe(1);
+    expect(result.evaluation.counters.pauses).toBe(1);
+    expect(result.errors).toEqual([]);
+  });
+
   it("rejects malformed completion injections", () => {
     const base = { tracks: library(2), sessionDurationSeconds: 600 };
     expect(() => simulatePartyAutopilotSoak({ ...base, transitionCompletionDelaysSeconds: [Number.NaN] })).toThrow(RangeError);
     expect(() => simulatePartyAutopilotSoak({ ...base, transitionCompletionDelaysSeconds: [Number.POSITIVE_INFINITY] })).toThrow(RangeError);
     expect(() => simulatePartyAutopilotSoak({ ...base, transitionCompletionDelaysSeconds: [-0.1] })).toThrow(RangeError);
     expect(() => simulatePartyAutopilotSoak({ ...base, missingPrimaryCompletionAttempts: [1, 1] })).toThrow(RangeError);
+    expect(() => simulatePartyAutopilotSoak({ ...base, coordinatorFailureIteration: 0 })).toThrow(RangeError);
+    expect(() => simulatePartyAutopilotSoak({ ...base, coordinatorFailureIteration: 1.5 })).toThrow(RangeError);
   });
 
   it("pauses after two arm failures or one failure without retry runway", () => {

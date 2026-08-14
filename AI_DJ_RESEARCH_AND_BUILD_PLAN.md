@@ -2204,10 +2204,10 @@ These are the active backlog, not reasons to discard the prototype.
   successfully scheduled transition resets the budget. Host/recovery cancellation
   and load replacement do not consume or reset it.
 
-  `party-autopilot-trace/v7` records timeout and whether the owned settlement
+  `party-autopilot-trace/v8` records timeout and whether the owned settlement
   requires the immediately following `transition-arm` pause, rejects a missing or
   premature pause, and exposes only aggregate failure/timeout counts. It retains
-  session-local ordinals and no metadata. `party-autopilot-coordinator-soak/v7`
+  session-local ordinals and no metadata. `party-autopilot-coordinator-soak/v8`
   uses the same runway/deadline policy for fail-once/succeed, fail-twice/pause,
   timeout, and short-runway scenarios. These are deterministic state/ownership
   checks; they do not prove browser callback timing, audio continuity, or speaker
@@ -2261,7 +2261,7 @@ These are the active backlog, not reasons to discard the prototype.
   transports, pauses the Party clock/diagnostic, and releases the wake lock. A
   failure in one independent cleanup stage cannot prevent either deck or the
   session from being stopped. Completion authority is revoked before any fallible
-  Web Audio or DSP cleanup. `party-autopilot-trace/v7` records a stop-specific
+  Web Audio or DSP cleanup. `party-autopilot-trace/v8` records a stop-specific
   transition cancellation and pause while retaining the exact committed target,
   rather than misclassifying this safety action as Rescue. The visible result
   remains persistent and becomes an alert if any stage failed.
@@ -2305,15 +2305,40 @@ These are the active backlog, not reasons to discard the prototype.
   Rescue, Stop All Sound, audio/output recovery, cross-tab authority loss, and
   unmount cancel every primary/watchdog owner before deck mutation.
 
-  `party-autopilot-trace/v7` records primary versus watchdog settlement, late
+  `party-autopilot-trace/v8` records primary versus watchdog settlement, late
   completion and cleanup degradation independently (including when both occur),
   exact-target preservation on Stop, ownership failure, and the immediately following
   `transition-completion` safety pause without track metadata. The shared
-  `party-autopilot-coordinator-soak/v7` creates and inspects the same lease for
+  `party-autopilot-coordinator-soak/v8` creates and inspects the same lease for
   every scheduled handoff and injects missing-primary, exact-boundary, late, and
   replaced-target cases. These tests establish state and ownership liveness;
   they do not claim real-browser callback delivery, decoded-audio continuity,
   musical quality, or speaker output.
+- **D-063 — Give every Autopilot tick an epoch-owned fatal boundary:**
+  `party-autopilot-tick-boundary/v1` issues monotonic observation tickets inside
+  a session epoch without serializing overlapping ticks. This preserves the
+  independent 500 ms observer that can expire a stalled preload while another
+  tick awaits browser work. Pause, restart, New Party, paused-plan restore,
+  cross-tab authority loss, Stop All Sound, final completion, and unmount advance
+  the epoch or make playback authority false, so late settlement cannot mutate a
+  successor session.
+
+  One unexpected current-epoch failure in decision, preload, transition arm, or
+  transition-completion observation is claimed exactly once. The exact pending
+  preload and arm are settled before `coordinator-failed`; then Autopilot, the
+  Party clock, diagnostic, and wake lock pause with a persistent host-facing
+  intervention while the current source is left alone. If a transition already
+  owns audio, no deck is mutated and the existing completion uncertainty lock
+  remains until verified Rescue or Stop. Stale resolve/reject callbacks and
+  sibling failures cannot claim the fatal boundary.
+
+  `party-autopilot-trace/v8` accepts only an operation ordinal, fixed phase, and
+  mandatory immediate `coordinator-failure` pause; it adds no song metadata or
+  error text. `party-autopilot-coordinator-soak/v8` includes one decision-phase
+  failure/pause fixture. Pure ownership tests cover overlapping/stale tickets,
+  while trace tests cover preload/arm settlement and paused Rescue/Stop ownership
+  for an active transition. These establish state semantics; browser adapter
+  exceptions and audible continuity remain separate live acceptance work.
 
 ### Open questions
 

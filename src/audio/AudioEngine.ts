@@ -464,7 +464,7 @@ export class AudioEngine {
       settled = true;
       source.onended = null;
       try { source.stop(); } catch { /* Already ended. */ }
-      source.disconnect();
+      try { source.disconnect(); } catch { /* Exact deadline authority is already revoked. */ }
     };
   }
 

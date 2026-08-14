@@ -957,6 +957,7 @@ const Deck = forwardRef(function Deck(
       }),
       getOwnedArmAudioHandle: () => Object.freeze({
         getTrackId: () => deckEngine.getSnapshot().trackId,
+        isActive: () => deckEngine.isActive(),
         setGain: (value) => getAudioEngine().setDeckGain(channel, value),
         setEqBandGain: (band, db) => deckEngine.setEqBandGain(band, db),
         setFilterCutoff: (hz) => deckEngine.setFilterCutoff(hz),

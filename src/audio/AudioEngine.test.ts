@@ -406,7 +406,8 @@ describe("AudioEngine", () => {
 
     const cancelSecond = engine.onAudioClockDeadline(13, () => { deadlines += 1; });
     const second = context.oscillators.at(-1)!;
-    cancelSecond();
+    second.disconnect = () => { throw new Error("browser disconnect failed"); };
+    expect(() => cancelSecond()).not.toThrow();
     second.onended?.();
     expect(deadlines).toBe(1);
   });

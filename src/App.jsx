@@ -61,6 +61,14 @@ import {
   inspectAutoPilotTransitionCompletion,
   ownsAutoPilotTransitionCompletionLease
 } from "./planning/autoPilotTransitionCompletionOwnership";
+import {
+  advancePartyAutopilotTickEpoch,
+  claimPartyAutopilotTickFailure,
+  createPartyAutopilotTickBoundary,
+  issuePartyAutopilotTick,
+  ownsPartyAutopilotTick,
+  runPartyAutopilotTickTask
+} from "./planning/partyAutopilotTickBoundary";
 import { compileTransitionDsp } from "./audio/transitionDsp";
 import {
   createPartySessionClock,
@@ -329,6 +337,8 @@ export default function App() {
   const partyTrackOrdinalCounterRef = useRef(0);
   const partyLoadOrdinalCounterRef = useRef(0);
   const partyPreloadOperationRef = useRef(0);
+  const partyAutopilotTickBoundaryRef = useRef(createPartyAutopilotTickBoundary());
+  const partyAutopilotLastObservedNowRef = useRef(0);
   const partyQueueRevisionRef = useRef(0);
   const partyPlayedLoadsRef = useRef(new Set());
   const contextMenuRef = useRef(null);
@@ -350,6 +360,11 @@ export default function App() {
       partyCheckpointWriterLostRef.current ||
       partySoundStopInProgressRef.current ||
       transitionCompletionUncertainRef.current;
+  };
+  const advancePartyAutopilotCoordinatorEpoch = () => {
+    partyAutopilotTickBoundaryRef.current = advancePartyAutopilotTickEpoch(
+      partyAutopilotTickBoundaryRef.current
+    );
   };
   const partyWakeLockRef = useRef(null);
   if (!partyCheckpointWriterTokenRef.current) {
@@ -447,6 +462,7 @@ export default function App() {
   }, []);
 
   const stopRemoteLibraryPlayback = () => {
+    advancePartyAutopilotCoordinatorEpoch();
     autoPilotPreloadGenerationRef.current += 1;
     cancelCurrentTransitionArm();
     transitionArmGenerationRef.current += 1;
@@ -859,6 +875,10 @@ export default function App() {
           ? "The next song was kept, but Mazzy could not confirm every transition cleanup step. Autopilot is paused so the host can check playback."
           : reason === "transition-completion-lost"
             ? "Mazzy could not confirm that the song change finished. Autopilot is paused and new playback is locked. Use Stop All Sound; use system/device mute if sound remains."
+            : reason === "coordinator-failure-transition"
+              ? "Mazzy could not confirm the automatic song change after an unexpected local error. New playback is locked. Use Stop All Sound before continuing; use system/device mute if sound remains."
+            : reason === "coordinator-failure"
+              ? "Mazzy stopped automatic planning after an unexpected local error. The current song was left alone. Check the decks, then start Autopilot again when ready."
         : reason === "transition-arm-timeout"
           ? "The next transition took too long to prepare. The current song is still playing and Autopilot is paused."
           : "The next transition could not be prepared safely. The current song is still playing and Autopilot is paused."
@@ -885,6 +905,7 @@ export default function App() {
     !rehearsalCancelRef.current;
 
   const pauseForCheckpointOwnershipLoss = () => {
+    advancePartyAutopilotCoordinatorEpoch();
     if (partyCheckpointWriterLostRef.current) return;
     partyCheckpointWriterLostRef.current = true;
     setPartyCheckpointWriterLost(true);
@@ -1137,6 +1158,7 @@ export default function App() {
     message = "Party Autopilot paused · you took control",
     checkpointReason = "host-control"
   ) => {
+    advancePartyAutopilotCoordinatorEpoch();
     if (!autoPilotEnabledRef.current) return;
     autoPilotPreloadGenerationRef.current += 1;
     cancelCurrentTransitionArm();
@@ -1544,6 +1566,7 @@ export default function App() {
     }
     if (finalTrackRef.current?.deck !== deck || finalTrackRef.current?.trackId !== trackId ||
       finalTrackRef.current?.loadOrdinal !== endedIdentity?.loadOrdinal) return;
+    advancePartyAutopilotCoordinatorEpoch();
     const now = getAudioEngine().clock.now();
     partySessionClockRef.current = pausePartySessionClock(partySessionClockRef.current, now);
     setPartyClockDisplay(partySessionClockSnapshot(partySessionClockRef.current, now));
@@ -2027,61 +2050,99 @@ export default function App() {
   };
 
   const cleanupTransitionArmAudio = (runtime) => {
-    const pair = currentArmPairIdentity(runtime);
+    let cleanupConfirmed = true;
+    let pair;
+    try {
+      pair = currentArmPairIdentity(runtime);
+    } catch {
+      cleanupConfirmed = false;
+      pair = {
+        sourceTrackId: null,
+        targetTrackId: null,
+        sourceLoadKey: null,
+        targetLoadKey: null
+      };
+    }
     const sourceStillOwned = pair.sourceTrackId === runtime.lease.sourceTrackId &&
       pair.sourceLoadKey === runtime.lease.sourceLoadKey;
     const targetStillOwned = pair.targetTrackId === runtime.lease.targetTrackId &&
       pair.targetLoadKey === runtime.lease.targetLoadKey;
     if (runtime.crossfadeSchedule &&
       (!activeTransitionScheduleRef.current || activeTransitionScheduleRef.current.id === runtime.crossfadeSchedule.id)) {
-      transitionCompletionCancelRef.current?.();
+      const cancelCompletion = transitionCompletionCancelRef.current;
       transitionCompletionCancelRef.current = null;
-      getAudioEngine().cancelCrossfade(
-        runtime.crossfadeSchedule.id,
-        runtime.eqSnapshot.sourceGain,
-        runtime.eqSnapshot.targetGain
-      );
       activeTransitionScheduleRef.current = null;
+      try { cancelCompletion?.(); } catch { cleanupConfirmed = false; }
+      try {
+        if (!getAudioEngine().cancelCrossfade(
+          runtime.crossfadeSchedule.id,
+          runtime.eqSnapshot.sourceGain,
+          runtime.eqSnapshot.targetGain
+        )) cleanupConfirmed = false;
+      } catch { cleanupConfirmed = false; }
     }
     if (sourceStillOwned) {
-      runtime.sourceAudio.setGain(runtime.eqSnapshot.sourceGain);
-      runtime.sourceAudio.setEqBandGain("low", runtime.eqSnapshot.sourceLow);
-      runtime.sourceAudio.setFilterCutoff(runtime.eqSnapshot.sourceFilter);
-      runtime.sourceRef.current?.setEqBandGain?.("low", runtime.eqSnapshot.sourceLow);
-      runtime.sourceRef.current?.setFilterCutoff?.(runtime.eqSnapshot.sourceFilter);
+      try { runtime.sourceAudio.setGain(runtime.eqSnapshot.sourceGain); } catch { cleanupConfirmed = false; }
+      try { runtime.sourceAudio.setEqBandGain("low", runtime.eqSnapshot.sourceLow); } catch { cleanupConfirmed = false; }
+      try { runtime.sourceAudio.setFilterCutoff(runtime.eqSnapshot.sourceFilter); } catch { cleanupConfirmed = false; }
+      try { runtime.sourceRef.current?.setEqBandGain?.("low", runtime.eqSnapshot.sourceLow); } catch { /* UI sync is optional. */ }
+      try { runtime.sourceRef.current?.setFilterCutoff?.(runtime.eqSnapshot.sourceFilter); } catch { /* UI sync is optional. */ }
     }
     if (targetStillOwned) {
-      runtime.targetAudio.setGain(runtime.eqSnapshot.targetGain);
-      runtime.targetAudio.setEqBandGain("low", runtime.eqSnapshot.targetLow);
-      runtime.targetAudio.setFilterCutoff(runtime.eqSnapshot.targetFilter);
-      runtime.targetAudio.pause();
-      runtime.targetRef.current?.setEqBandGain?.("low", runtime.eqSnapshot.targetLow);
-      runtime.targetRef.current?.setFilterCutoff?.(runtime.eqSnapshot.targetFilter);
+      try { runtime.targetAudio.setGain(runtime.eqSnapshot.targetGain); } catch { cleanupConfirmed = false; }
+      try { runtime.targetAudio.setEqBandGain("low", runtime.eqSnapshot.targetLow); } catch { cleanupConfirmed = false; }
+      try { runtime.targetAudio.setFilterCutoff(runtime.eqSnapshot.targetFilter); } catch { cleanupConfirmed = false; }
+      try { runtime.targetAudio.pause(); } catch { cleanupConfirmed = false; }
+      try { runtime.targetRef.current?.setEqBandGain?.("low", runtime.eqSnapshot.targetLow); } catch { /* UI sync is optional. */ }
+      try { runtime.targetRef.current?.setFilterCutoff?.(runtime.eqSnapshot.targetFilter); } catch { /* UI sync is optional. */ }
     }
-    return { sourceStillOwned, targetStillOwned };
+    if (!sourceStillOwned || !targetStillOwned) cleanupConfirmed = false;
+    try {
+      if (runtime.crossfadeSchedule && getAudioEngine().getActiveCrossfade() != null) cleanupConfirmed = false;
+    } catch { cleanupConfirmed = false; }
+    try {
+      if (targetStillOwned && runtime.targetAudio.isActive()) cleanupConfirmed = false;
+    } catch { cleanupConfirmed = false; }
+    return { sourceStillOwned, targetStillOwned, cleanupConfirmed };
   };
 
   const settleTransitionArmRuntime = (runtime, outcome) => {
     if (!runtime || runtime.settled || !ownsAutoPilotArmLease(transitionArmLeaseRef.current?.lease, runtime.lease)) {
       return false;
     }
+    // Revoke exact arm authority before any timer, node-disconnect, DSP, or
+    // adapter cleanup that may throw. Failed cleanup can lock recovery, but it
+    // must never leave an un-clearable settled lease behind.
     runtime.settled = true;
-    if (runtime.timeoutId) window.clearTimeout(runtime.timeoutId);
-    runtime.clockDeadlineCancel?.();
-    runtime.clockDeadlineCancel = null;
     transitionArmLeaseRef.current = null;
     transitionArmGenerationRef.current += 1;
     transitionArmRef.current = false;
     setAutoMixArming(false);
+    let cleanupConfirmed = true;
+    try { if (runtime.timeoutId) window.clearTimeout(runtime.timeoutId); }
+    catch { cleanupConfirmed = false; }
+    const cancelClockDeadline = runtime.clockDeadlineCancel;
+    runtime.timeoutId = 0;
+    runtime.clockDeadlineCancel = null;
+    try { cancelClockDeadline?.(); } catch { cleanupConfirmed = false; }
 
-    let sourceStillOwned = currentArmPairIdentity(runtime).sourceTrackId === runtime.lease.sourceTrackId;
+    let sourceStillOwned = false;
+    try { sourceStillOwned = currentArmPairIdentity(runtime).sourceTrackId === runtime.lease.sourceTrackId; }
+    catch { /* Failure below becomes an explicit recovery lock. */ }
     if (outcome !== "scheduled") {
-      ({ sourceStillOwned } = cleanupTransitionArmAudio(runtime));
+      const audioCleanup = cleanupTransitionArmAudio(runtime);
+      sourceStillOwned = audioCleanup.sourceStillOwned;
+      cleanupConfirmed = cleanupConfirmed && audioCleanup.cleanupConfirmed;
       if (autoPilotTransitionKeyRef.current === runtime.lease.transitionKey) {
         autoPilotTransitionKeyRef.current = null;
       }
       setAutoMixing(false);
       setAutoMixBeats(0);
+      if (!cleanupConfirmed) {
+        transitionCompletionUncertainRef.current = true;
+        setTransitionCompletionUncertain(true);
+        refreshPlaybackRecoveryLock();
+      }
     }
 
     const countsAsFailure = runtime.origin === "autopilot" &&
@@ -2091,12 +2152,15 @@ export default function App() {
       consecutiveAutoPilotArmFailuresRef.current = 0;
       setAutoPilotIntervention(null);
     } else if (countsAsFailure) {
-      const sourceSnapshot = runtime.sourceRef.current?.getDeckSnapshot?.();
+      let sourceSnapshot = null;
+      try { sourceSnapshot = runtime.sourceRef.current?.getDeckSnapshot?.(); }
+      catch { cleanupConfirmed = false; }
       const remainingSeconds = Math.max(0, (
         Number(sourceSnapshot?.durationSeconds ?? 0) - Number(sourceSnapshot?.positionSeconds ?? 0)
       ) / Math.max(Number(sourceSnapshot?.playbackRate ?? 1), 0.001));
       const failures = ++consecutiveAutoPilotArmFailuresRef.current;
-      pauseRequired = decideAutoPilotArmFailure({ consecutiveFailures: failures, sourceRemainingSeconds: remainingSeconds }) === "pause";
+      pauseRequired = !cleanupConfirmed ||
+        decideAutoPilotArmFailure({ consecutiveFailures: failures, sourceRemainingSeconds: remainingSeconds }) === "pause";
     }
 
     if (runtime.traceStarted) {
@@ -2832,6 +2896,7 @@ export default function App() {
     const result = runPartyStopAllSound((step) => {
       switch (step) {
         case "lock-new-starts":
+          advancePartyAutopilotCoordinatorEpoch();
           partySoundStopInProgressRef.current = true;
           autoPilotEnabledRef.current = false;
           refreshPlaybackRecoveryLock();
@@ -3045,7 +3110,105 @@ export default function App() {
       return undefined;
     }
     let cancelled = false;
+    const handleCoordinatorFailure = (ticket, phase) => {
+      if (!autoPilotEnabledRef.current) return;
+      const claim = claimPartyAutopilotTickFailure(
+        partyAutopilotTickBoundaryRef.current,
+        ticket
+      );
+      partyAutopilotTickBoundaryRef.current = claim.boundary;
+      if (!claim.claimed) return;
+      autoPilotEnabledRef.current = false;
+
+      const activeTransition = activeTransitionScheduleRef.current;
+      const preloadLease = autoPilotPreloadLeaseRef.current;
+      if (preloadLease && ownsAutoPilotPreloadLease(autoPilotPreloadLeaseRef.current, preloadLease)) {
+        autoPilotPreloadLeaseRef.current = null;
+        autoPilotPreloadGenerationRef.current += 1;
+        const pending = partyPendingLoadByDeckRef.current[preloadLease.deck];
+        if (pending?.loadOrdinal === preloadLease.loadOrdinal) {
+          partyPendingLoadByDeckRef.current = {
+            ...partyPendingLoadByDeckRef.current,
+            [preloadLease.deck]: null
+          };
+        }
+        recordPartyEvent({ type: "preload-settled", operation: preloadLease.operation, outcome: "failed" });
+      }
+      let armCleanupConfirmed = true;
+      try {
+        const armRuntime = transitionArmLeaseRef.current;
+        if (armRuntime && !cancelCurrentTransitionArm()) armCleanupConfirmed = false;
+      } catch { armCleanupConfirmed = false; }
+      if (transitionCompletionUncertainRef.current) armCleanupConfirmed = false;
+      if (activeTransition) {
+        const cancelCompletion = transitionCompletionCancelRef.current;
+        transitionCompletionCancelRef.current = null;
+        try { cancelCompletion?.(); } catch { /* The uncertainty lock below remains authoritative. */ }
+      }
+      recordPartyEvent({
+        type: "coordinator-failed",
+        operation: ticket.operation,
+        phase,
+        pauseRequired: true
+      });
+      setAutoPilotEnabled(false);
+      finalTrackRef.current = null;
+      setPartyEndingFinalTrack(false);
+      setAutoPilotChoice(null);
+      partyCheckpointPauseReasonRef.current = "safety";
+      if (activeTransition || !armCleanupConfirmed) {
+        transitionCompletionUncertainRef.current = true;
+        setTransitionCompletionUncertain(true);
+        refreshPlaybackRecoveryLock();
+      }
+      try {
+        const engine = getAudioEngine();
+        const now = engine.clock.now();
+        partySessionClockRef.current = pausePartySessionClock(partySessionClockRef.current, now);
+        setPartyClockDisplay(partySessionClockSnapshot(partySessionClockRef.current, now));
+      } catch {
+        const clock = partySessionClockRef.current;
+        const fallbackNow = Math.max(
+          Number(clock.runningSinceSeconds ?? 0),
+          partyAutopilotLastObservedNowRef.current
+        );
+        try {
+          partySessionClockRef.current = pausePartySessionClock(clock, fallbackNow);
+          setPartyClockDisplay(partySessionClockSnapshot(partySessionClockRef.current, fallbackNow));
+        } catch {
+          partySessionClockRef.current = restorePausedPartySessionClock(
+            clock.plannedDurationSeconds,
+            clock.accumulatedActiveSeconds
+          );
+          setPartyClockDisplay(partySessionClockSnapshot(partySessionClockRef.current, 0));
+        }
+      }
+      pausePartyDiagnostic("coordinator-failure");
+      try { void partyWakeLockRef.current?.release?.(); } catch { /* Autopilot authority is already revoked. */ }
+      showAutoPilotArmIntervention(activeTransition || !armCleanupConfirmed
+        ? "coordinator-failure-transition"
+        : "coordinator-failure");
+
+      if (preloadLease) {
+        const preloadRef = preloadLease.deck === "a" ? deckARef : deckBRef;
+        let preloadSnapshot = null;
+        let preloadPlaying = true;
+        try { preloadSnapshot = preloadRef.current?.getDeckSnapshot?.(); } catch { /* Leave it for Stop All. */ }
+        try { preloadPlaying = Boolean(preloadRef.current?.isPlaying?.()); } catch { /* Leave it for Stop All. */ }
+        if (!preloadPlaying && (!preloadSnapshot?.trackId || preloadSnapshot.trackId === preloadLease.trackId)) {
+          try { preloadRef.current?.eject?.(); } catch { /* Mandatory pause already committed. */ }
+          partyLoadByDeckRef.current = {
+            ...partyLoadByDeckRef.current,
+            [preloadLease.deck]: null
+          };
+          setLoadedByDeck((current) => current[preloadLease.deck] === preloadLease.trackId
+            ? { ...current, [preloadLease.deck]: null }
+            : current);
+        }
+      }
+    };
     const pauseForPreloadSafety = (now, reason, message) => {
+      advancePartyAutopilotCoordinatorEpoch();
       partySessionClockRef.current = pausePartySessionClock(partySessionClockRef.current, now);
       setPartyClockDisplay(partySessionClockSnapshot(partySessionClockRef.current, now));
       autoPilotEnabledRef.current = false;
@@ -3112,18 +3275,22 @@ export default function App() {
       }
       return true;
     };
-    const tick = async () => {
-      if (cancelled) return;
+    const tick = async (ticket, setPhase) => {
+      if (cancelled || !autoPilotEnabledRef.current ||
+        !ownsPartyAutopilotTick(partyAutopilotTickBoundaryRef.current, ticket)) return;
       if (autoMixing) {
+        setPhase("transition-watchdog");
         transitionCompletionRuntimeRef.current?.attempt?.("watchdog");
         return;
       }
+      setPhase("decision");
       const sourceDeck = masterDeck;
       const targetDeck = sourceDeck === "a" ? "b" : "a";
       const sourceRef = sourceDeck === "a" ? deckARef : deckBRef;
       const targetRef = targetDeck === "a" ? deckARef : deckBRef;
       const engine = getAudioEngine();
       const now = engine.clock.now();
+      partyAutopilotLastObservedNowRef.current = now;
       const sourceSnapshot = sourceRef.current?.getDeckSnapshot?.() ?? null;
       const targetSnapshot = targetRef.current?.getDeckSnapshot?.() ?? null;
       const sourceLoad = partyLoadByDeckRef.current[sourceDeck];
@@ -3176,6 +3343,7 @@ export default function App() {
       });
 
       if (decision.kind === "pause-source-stopped") {
+        advancePartyAutopilotCoordinatorEpoch();
         partySessionClockRef.current = pausePartySessionClock(partySessionClockRef.current, now);
         setPartyClockDisplay(partySessionClockSnapshot(partySessionClockRef.current, now));
         autoPilotEnabledRef.current = false;
@@ -3254,6 +3422,7 @@ export default function App() {
       }
 
       if (decision.kind === "preload") {
+        setPhase("preload");
         const nextTrack = library.find((track) => track.id === decision.trackId);
         if (!nextTrack) return;
         const nextId = nextTrack.id;
@@ -3295,6 +3464,8 @@ export default function App() {
         }
         try {
           const loadOutcome = await loadTrackToDeck(targetDeck, nextTrack, { autoPilotOwned: true });
+          if (!autoPilotEnabledRef.current ||
+            !ownsPartyAutopilotTick(partyAutopilotTickBoundaryRef.current, ticket)) return;
           if (!ownsAutoPilotPreloadLease(autoPilotPreloadLeaseRef.current, preloadLease)) return;
           const settledAtSeconds = engine.clock.now();
           const loaded = loadOutcome === DECK_LOAD_OUTCOME.loaded;
@@ -3379,6 +3550,10 @@ export default function App() {
               showToast(`${nextTrack.name} couldn't be opened · skipped for this party`);
             }
           }
+        } catch {
+          if (ownsAutoPilotPreloadLease(autoPilotPreloadLeaseRef.current, preloadLease)) {
+            handleCoordinatorFailure(ticket, "preload");
+          }
         } finally {
           if (ownsAutoPilotPreloadLease(autoPilotPreloadLeaseRef.current, preloadLease)) {
             const pending = partyPendingLoadByDeckRef.current[targetDeck];
@@ -3392,6 +3567,7 @@ export default function App() {
       }
 
       if (decision.kind !== "arm" || !sourceSnapshot || !targetSnapshot) return;
+      setPhase("arm");
       const actualTargetId = targetSnapshot.trackId ?? `session-${targetDeck}`;
       setAutoPilotChoice((current) => {
         if (current?.trackId === actualTargetId) return current;
@@ -3406,8 +3582,17 @@ export default function App() {
       });
       await startAutoMix("autopilot");
     };
-    void tick();
-    const timer = window.setInterval(() => void tick(), 500);
+    const runTick = () => {
+      if (cancelled || !autoPilotEnabledRef.current) return;
+      const issued = issuePartyAutopilotTick(partyAutopilotTickBoundaryRef.current);
+      partyAutopilotTickBoundaryRef.current = issued.boundary;
+      void runPartyAutopilotTickTask({
+        task: (setPhase) => tick(issued.ticket, setPhase),
+        onFailure: (phase) => handleCoordinatorFailure(issued.ticket, phase)
+      });
+    };
+    runTick();
+    const timer = window.setInterval(runTick, 500);
     return () => {
       cancelled = true;
       window.clearInterval(timer);
@@ -3417,6 +3602,7 @@ export default function App() {
   useEffect(() => {
     return () => {
       cancelAnimationFrame(autoMixCountdownFrameRef.current);
+      advancePartyAutopilotCoordinatorEpoch();
       transitionCompletionCancelRef.current?.();
       rehearsalGenerationRef.current += 1;
       rehearsalCancelRef.current?.();
@@ -3440,6 +3626,7 @@ export default function App() {
   const sourcePartyReady = !!sourcePartyRef.current?.isReady?.();
   const sourcePartyPlaying = !!sourcePartyRef.current?.isPlaying?.();
   const pausePartyAutopilot = () => {
+    advancePartyAutopilotCoordinatorEpoch();
     autoPilotPreloadGenerationRef.current += 1;
     cancelCurrentTransitionArm();
     transitionArmGenerationRef.current += 1;
@@ -3467,6 +3654,7 @@ export default function App() {
       setPartyCheckpointError("This party's recovery copy moved to another tab. Reload this tab to review the current saved plan, or continue in the other Mazzy tab.");
       return;
     }
+    advancePartyAutopilotCoordinatorEpoch();
     if (partyCheckpointTerminalRef.current || !partyCheckpointSessionIdRef.current) {
       partyCheckpointSessionIdRef.current = crypto.randomUUID();
       partyCheckpointTerminalRef.current = false;
@@ -3488,6 +3676,7 @@ export default function App() {
       window.requestAnimationFrame(() => partyCheckpointAlertRef.current?.focus?.());
       return;
     }
+    advancePartyAutopilotCoordinatorEpoch();
     if (!await clearOwnedPartyCheckpoint("cleared")) return;
     cancelCurrentTransitionArm();
     if (partyTraceRecorderRef.current && !partyDiagnosticEvaluation?.status?.startsWith("valid-terminal")) {
@@ -3533,6 +3722,7 @@ export default function App() {
       return;
     }
     partyCheckpointBusyRef.current = true;
+    advancePartyAutopilotCoordinatorEpoch();
     refreshPlaybackRecoveryLock();
     setPartyCheckpointBusy(true);
     setPartyCheckpointError("");

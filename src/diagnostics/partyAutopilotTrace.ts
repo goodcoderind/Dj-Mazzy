@@ -1,5 +1,5 @@
-export const PARTY_AUTOPILOT_TRACE_SCHEMA_VERSION = "party-autopilot-trace/v7" as const;
-export const PARTY_AUTOPILOT_EVALUATION_SCHEMA_VERSION = "party-autopilot-evaluation/v7" as const;
+export const PARTY_AUTOPILOT_TRACE_SCHEMA_VERSION = "party-autopilot-trace/v8" as const;
+export const PARTY_AUTOPILOT_EVALUATION_SCHEMA_VERSION = "party-autopilot-evaluation/v8" as const;
 
 export type PartyDeck = "a" | "b";
 export type PartyTrackOrdinal = number;
@@ -12,7 +12,7 @@ type EventBase = Readonly<{
 
 export type PartyAutopilotEvent = EventBase & (
   | Readonly<{ type: "session-started" | "session-resumed" }>
-  | Readonly<{ type: "session-paused"; reason: "host-control" | "host-request" | "stop-all-sound" | "rescue" | "source-stopped" | "preload-timeout" | "preload-runway" | "transition-arm" | "transition-completion" }>
+  | Readonly<{ type: "session-paused"; reason: "host-control" | "host-request" | "stop-all-sound" | "rescue" | "source-stopped" | "preload-timeout" | "preload-runway" | "transition-arm" | "transition-completion" | "coordinator-failure" }>
   | Readonly<{ type: "queue-committed"; revision: number; trackOrdinals: readonly PartyTrackOrdinal[] }>
   | Readonly<{ type: "track-played"; trackOrdinal: PartyTrackOrdinal; loadOrdinal: PartyLoadOrdinal; cause: "host" | "transition" | "rescue" }>
   | Readonly<{ type: "preload-started"; operation: number; generation: number; deck: PartyDeck; trackOrdinal: PartyTrackOrdinal; loadOrdinal: PartyLoadOrdinal; selectionSource: "queue" | "library" }>
@@ -25,6 +25,7 @@ export type PartyAutopilotEvent = EventBase & (
   | Readonly<{ type: "transition-completion-failed"; transition: number; reason: "ownership-lost"; pauseRequired: true }>
   | Readonly<{ type: "transition-rescued"; transition: number; kept: "source" | "target" }>
   | Readonly<{ type: "transition-cancelled"; transition: number; reason: "stop-all-sound"; targetPreserved: boolean }>
+  | Readonly<{ type: "coordinator-failed"; operation: number; phase: "decision" | "preload" | "arm" | "transition-watchdog"; pauseRequired: true }>
   | Readonly<{ type: "final-declared"; deck: PartyDeck; trackOrdinal: PartyTrackOrdinal; loadOrdinal: PartyLoadOrdinal }>
   | Readonly<{ type: "final-revoked" }>
   | Readonly<{ type: "deck-ended"; deck: PartyDeck; trackOrdinal: PartyTrackOrdinal; loadOrdinal: PartyLoadOrdinal }>
@@ -65,6 +66,7 @@ export type PartyAutopilotFailureCode =
   | "transition-source-mismatch"
   | "transition-completion-not-paused"
   | "transition-completion-unresolved"
+  | "coordinator-failure-not-paused"
   | "rescue-not-paused"
   | "stop-all-sound-not-paused"
   | "uncommitted-autopilot-target"
@@ -92,6 +94,7 @@ export type PartyAutopilotEvaluation = Readonly<{
     lateTransitionCompletions: number;
     transitionCompletionFailures: number;
     transitionCompletionCleanupFailures: number;
+    coordinatorFailures: number;
     pauses: number;
   }>;
 }>;
@@ -114,7 +117,7 @@ const projectEvent = (event: PartyAutopilotEventInput, sequence: number): PartyA
     case "final-revoked":
       return Object.freeze({ ...base, type: event.type });
     case "session-paused":
-      if (!["host-control", "host-request", "stop-all-sound", "rescue", "source-stopped", "preload-timeout", "preload-runway", "transition-arm", "transition-completion"].includes(event.reason)) return null;
+      if (!["host-control", "host-request", "stop-all-sound", "rescue", "source-stopped", "preload-timeout", "preload-runway", "transition-arm", "transition-completion", "coordinator-failure"].includes(event.reason)) return null;
       return Object.freeze({ ...base, type: event.type, reason: event.reason });
     case "queue-committed":
       if (!isPositiveInteger(event.revision) || !Array.isArray(event.trackOrdinals) ||
@@ -165,6 +168,11 @@ const projectEvent = (event: PartyAutopilotEventInput, sequence: number): PartyA
     case "transition-cancelled":
       if (!isPositiveInteger(event.transition) || event.reason !== "stop-all-sound" || typeof event.targetPreserved !== "boolean") return null;
       return Object.freeze({ ...base, type: event.type, transition: event.transition, reason: event.reason, targetPreserved: event.targetPreserved });
+    case "coordinator-failed":
+      if (!isPositiveInteger(event.operation) ||
+        !["decision", "preload", "arm", "transition-watchdog"].includes(event.phase) ||
+        event.pauseRequired !== true) return null;
+      return Object.freeze({ ...base, type: event.type, operation: event.operation, phase: event.phase, pauseRequired: true });
     case "final-declared":
       if (!["a", "b"].includes(event.deck) || !isPositiveInteger(event.trackOrdinal) ||
         !isPositiveInteger(event.loadOrdinal)) return null;
@@ -249,6 +257,7 @@ export const evaluatePartyAutopilotTrace = (trace: PartyAutopilotTrace): PartyAu
   let stopAllSoundPauseRequired = false;
   let transitionCompletionPauseRequired = false;
   let transitionCompletionRecoveryRequired = false;
+  let coordinatorFailurePauseRequired = false;
   const playedLoads = new Set<string>();
   const playedTracks = new Set<number>();
   const unplayableTracks = new Set<number>();
@@ -269,6 +278,7 @@ export const evaluatePartyAutopilotTrace = (trace: PartyAutopilotTrace): PartyAu
   let lateTransitionCompletions = 0;
   let transitionCompletionFailures = 0;
   let transitionCompletionCleanupFailures = 0;
+  let coordinatorFailures = 0;
   let pauses = 0;
 
   for (let index = 0; index < trace.events.length; index += 1) {
@@ -293,10 +303,17 @@ export const evaluatePartyAutopilotTrace = (trace: PartyAutopilotTrace): PartyAu
       failures.add("transition-completion-not-paused");
       transitionCompletionPauseRequired = false;
     }
+    const coordinatorRecoveryPause = coordinatorFailurePauseRequired &&
+      event?.type === "session-paused" && event.reason === "coordinator-failure";
     if (transitionCompletionRecoveryRequired && !transitionCompletionPauseRequired &&
-      event?.type !== "transition-rescued" && event?.type !== "transition-cancelled") {
+      !coordinatorRecoveryPause && event?.type !== "transition-rescued" && event?.type !== "transition-cancelled") {
       failures.add("transition-completion-unresolved");
       transitionCompletionRecoveryRequired = false;
+    }
+    if (coordinatorFailurePauseRequired &&
+      !(event?.type === "session-paused" && event.reason === "coordinator-failure")) {
+      failures.add("coordinator-failure-not-paused");
+      coordinatorFailurePauseRequired = false;
     }
     if (ended) failures.add("invalid-session-lifecycle");
     if (!event || event.sequence !== index + 1) failures.add("sequence-gap");
@@ -338,6 +355,10 @@ export const evaluatePartyAutopilotTrace = (trace: PartyAutopilotTrace): PartyAu
         if (event.reason === "transition-completion") {
           if (!transitionCompletionPauseRequired) failures.add("transition-completion-not-paused");
           transitionCompletionPauseRequired = false;
+        }
+        if (event.reason === "coordinator-failure") {
+          if (!coordinatorFailurePauseRequired) failures.add("coordinator-failure-not-paused");
+          coordinatorFailurePauseRequired = false;
         }
         running = false;
         pauses += 1;
@@ -552,6 +573,19 @@ export const evaluatePartyAutopilotTrace = (trace: PartyAutopilotTrace): PartyAu
           }
         }
         break;
+      case "coordinator-failed":
+        if (!started || !running || ended || !isPositiveInteger(event.operation) ||
+          !["decision", "preload", "arm", "transition-watchdog"].includes(event.phase) ||
+          event.pauseRequired !== true) {
+          failures.add("malformed-event");
+        } else {
+          if (activePreload) failures.add("preload-owner-mismatch");
+          if (activeArm || scheduledArmOrigin) failures.add("arm-owner-mismatch");
+          if (activeTransition) transitionCompletionRecoveryRequired = true;
+          coordinatorFailurePauseRequired = true;
+          coordinatorFailures += 1;
+        }
+        break;
       case "final-declared":
         if (!started || !running || ended) failures.add("invalid-session-lifecycle");
         if (!["a", "b"].includes(event.deck) || !isPositiveInteger(event.trackOrdinal) ||
@@ -597,6 +631,7 @@ export const evaluatePartyAutopilotTrace = (trace: PartyAutopilotTrace): PartyAu
   if (stopAllSoundPauseRequired) failures.add("stop-all-sound-not-paused");
   if (transitionCompletionPauseRequired) failures.add("transition-completion-not-paused");
   if (transitionCompletionRecoveryRequired) failures.add("transition-completion-unresolved");
+  if (coordinatorFailurePauseRequired) failures.add("coordinator-failure-not-paused");
   if (preloadTimeoutPauseRequired) failures.add("preload-timeout-not-paused");
   if (armFailurePauseRequired) failures.add("arm-failure-not-paused");
   const status = failures.size
@@ -621,6 +656,7 @@ export const evaluatePartyAutopilotTrace = (trace: PartyAutopilotTrace): PartyAu
       lateTransitionCompletions,
       transitionCompletionFailures,
       transitionCompletionCleanupFailures,
+      coordinatorFailures,
       pauses
     })
   });
