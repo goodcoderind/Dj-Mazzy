@@ -3138,6 +3138,65 @@ These are the active backlog, not reasons to discard the prototype.
   without reload. Audio, storage, analysis, transition, checkpoint, Party trace,
   and production report schemas remain unchanged.
 
+- **D-084 — Bound optional timing-model removal and make its cache proof
+  origin-wide:** `enhanced-timing-removal/v1` owns one exact host removal with a
+  10-second absolute `performance.now()` deadline. It rechecks the deadline when
+  the CacheStorage task settles, so delayed timers cannot promote a late result;
+  duplicate actions are refused and cancelled, timed-out, rejected, and late
+  settlements cannot re-enable enhanced analysis or escape into the D-083 fatal
+  page boundary. The synchronous App gate advances an exact enhanced-admission
+  generation before disposing clients or filtering work. Both Decks capture and
+  recheck that generation before scheduling and before publishing local enhanced
+  results. The mount-time asset probe is separately generation-owned. Basic and
+  program-level jobs survive while enhanced pending, queued, deferred, active,
+  and failure state is removed.
+
+  `mazzy-enhanced-timing-model-storage/v1` serializes every model-cache read,
+  write, delete, result acceptance, and removal behind an origin Web Lock. The
+  fixed `enhanced-timing-model-control/v1` CacheStorage record contains only a
+  monotonic non-user admission epoch, random non-user authority token, and
+  revocation bit. Removal advances that
+  epoch to revoked in `mazzy-timing-model-control-v1`, then deletes
+  `mazzy-timing-model-v1` and verifies absence while still holding the lock.
+  Beat This requests capture the exact allowed epoch/token pair; workers and their
+  main-thread result receivers recheck it before publishing or accepting
+  inference. Therefore an older writer/result cannot become authorized again
+  after removal plus a later explicit download, and an active or queued foreign
+  writer cannot resurrect the cache after success. A
+  fixed `enhanced-timing-removal-channel/v1` BroadcastChannel notice carries
+  only its fixed type/version and a tab-memory non-user sender ID, so a tab
+  cannot consume its own advisory post. Foreign notices make open Mazzy tabs
+  synchronously gate and dispose current enhanced work. Window focus,
+  pageshow, and visible-tab return perform full control-authority reconciliation
+  for a missed advisory notice; exact local prepare/removal authority is the only
+  authority allowed to suppress its own observation. Publication, listeners,
+  and cleanup are failure-contained. Without Web Lock
+  support Mazzy may still revoke/delete locally, but it never claims origin-wide
+  success.
+
+  Exact verified completion keeps music and Safe Fade available, focuses a
+  polite fixed result, and truthfully says only the model files were removed.
+  Enhanced timing already stored in track records is retained and may continue
+  to guide transitions until those tracks or the library are removed. Rejection,
+  timeout, missing lock, malformed proof, page hide, or authority loss keeps new
+  enhanced analysis off for the tab and focuses persistent **Reload Mazzy**
+  guidance without claiming whether bytes remain. Reload/close is guarded while
+  the exact operation is live; a later model download must be another explicit
+  host action and advances the allowed epoch under the same lock. Deterministic
+  tests cover strict/throttled deadlines, duplicate/cancel/late settlement,
+  mixed-queue projection, Deck admission generations, stale probes, fixed
+  channel validation/failure containment, active-writer serialization,
+  post-removal resurrection refusal, stale-probe/result ABA rejection, explicit
+  re-enable, and the no-lock unconfirmed result. Operation, track, and tab-local
+  admission generations, deadlines, Cache API errors, URLs,
+  track identity, and model bytes are not projected, persisted, traced, exported,
+  logged, or sent. The fixed control record contains no user data. IndexedDB,
+  stored analysis, transition, checkpoint, Party trace, and report schemas are
+  unchanged. The non-user authority pair is structured-cloned only to the
+  same-origin timing worker and is never projected to UI, IndexedDB, reports,
+  logs, exports, or network. The new fixed CacheStorage control schema is
+  `enhanced-timing-model-control/v1`; the advisory sender ID is never persisted.
+
 ### Open questions
 
 - **Q-001:** Remain browser/PWA-first through launch, or package a desktop app

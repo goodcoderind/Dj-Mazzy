@@ -1,11 +1,22 @@
 import { BeatThisDiagnosticClient } from "../experimental/BeatThisDiagnosticClient";
 import { ResettableSerialQueue } from "./resettableSerialQueue";
+import {
+  allowEnhancedTimingModelAssetsAfterHostAction,
+  currentEnhancedTimingModelAllowedAuthority,
+  enhancedTimingModelCacheHasEntriesForRemoval,
+  enhancedTimingModelAssetsRevoked,
+  matchEnhancedTimingModelAsset,
+  runIfEnhancedTimingModelAllowed,
+  type EnhancedTimingModelAuthority,
+  revokeAndRemoveEnhancedTimingModelAssets
+} from "./enhancedTimingModelStorage";
 
 const ANALYSIS_SAMPLE_RATE = 22_050;
 let sharedClient: BeatThisDiagnosticClient | null = null;
 let clientGeneration = 0;
 const analysisQueue = new ResettableSerialQueue();
 let inferenceTail: Promise<void> = Promise.resolve();
+let activeStorageAuthority: EnhancedTimingModelAuthority | null = null;
 
 const scheduleEnhancedInference = <T>(task: () => Promise<T>) => {
   const run = inferenceTail.catch(() => undefined).then(task);
@@ -13,20 +24,20 @@ const scheduleEnhancedInference = <T>(task: () => Promise<T>) => {
   return run;
 };
 
-export type EnhancedRhythmAssetState = "stored" | "stored-unavailable" | "downloadable" | "not-included" | "unavailable";
+export type EnhancedRhythmAssetState = "stored" | "stored-unavailable" | "removal-needed" | "downloadable" | "not-included" | "unavailable";
 
 const packBaseUrl = `${import.meta.env.BASE_URL}models/beat-this-final0/v1/`;
 const packManifestUrl = `${packBaseUrl}config.json`;
-const timingCacheName = "mazzy-timing-model-v1";
 const requiredPackUrls = [
   `${packBaseUrl}config.json`,
   `${packBaseUrl}beat_this.onnx`,
   `${packBaseUrl}mel-filterbank.bin`
 ];
 
-const hasStoredPack = async () => {
-  const cache = await caches.open(timingCacheName);
-  return (await Promise.all(requiredPackUrls.map((url) => cache.match(url)))).every(Boolean);
+const hasStoredPack = async (storageAuthority: EnhancedTimingModelAuthority) => {
+  return (await Promise.all(
+    requiredPackUrls.map((url) => matchEnhancedTimingModelAsset(url, storageAuthority))
+  )).every(Boolean);
 };
 
 const originTimingRuntimeReachable = async () => {
@@ -41,15 +52,26 @@ const originTimingRuntimeReachable = async () => {
 
 export const getEnhancedRhythmAssetState = async (): Promise<EnhancedRhythmAssetState> => {
   try {
-    const stored = await hasStoredPack();
-    if (stored && !(await originTimingRuntimeReachable())) return "stored-unavailable";
-    if (stored) return "stored";
-    if (!__MAZZY_ENHANCED_TIMING_INCLUDED__) return "not-included";
-    if (!navigator.onLine) return "unavailable";
+    if (await enhancedTimingModelAssetsRevoked()) {
+      if (await enhancedTimingModelCacheHasEntriesForRemoval()) return "removal-needed";
+      return __MAZZY_ENHANCED_TIMING_INCLUDED__ && navigator.onLine ? "downloadable" : "not-included";
+    }
+    const storageAuthority = await currentEnhancedTimingModelAllowedAuthority();
+    const finish = <T extends EnhancedRhythmAssetState>(state: T) =>
+      runIfEnhancedTimingModelAllowed(storageAuthority, async () => state);
+    const stored = await hasStoredPack(storageAuthority);
+    if (stored && !(await originTimingRuntimeReachable())) return finish("stored-unavailable");
+    if (stored) {
+      const result = await finish("stored");
+      activeStorageAuthority = storageAuthority;
+      return result;
+    }
+    if (!__MAZZY_ENHANCED_TIMING_INCLUDED__) return finish("not-included");
+    if (!navigator.onLine) return finish("unavailable");
     const manifest = await fetch(packManifestUrl, { cache: "no-store" });
-    return manifest.ok && manifest.headers.get("content-type")?.includes("application/json")
+    return finish(manifest.ok && manifest.headers.get("content-type")?.includes("application/json")
       ? "downloadable"
-      : "not-included";
+      : "not-included");
   } catch {
     return "unavailable";
   }
@@ -58,16 +80,32 @@ export const getEnhancedRhythmAssetState = async (): Promise<EnhancedRhythmAsset
 export const hasEnhancedRhythmAssets = async () =>
   (await getEnhancedRhythmAssetState()) === "stored";
 
-export const prepareEnhancedRhythm = async (onProgress?: (stage: string) => void) => {
+export const enhancedRhythmAssetAdmissionIsCurrent = async () => {
+  if (!activeStorageAuthority) return false;
+  try {
+    return await runIfEnhancedTimingModelAllowed(activeStorageAuthority, async () => true);
+  } catch {
+    return false;
+  }
+};
+
+export const prepareEnhancedRhythm = async (
+  onProgress?: (stage: string) => void,
+  onAuthority?: (authority: EnhancedTimingModelAuthority) => void
+) => {
+  const storageAuthority = await allowEnhancedTimingModelAssetsAfterHostAction();
+  onAuthority?.(storageAuthority);
   const generation = clientGeneration;
   const result = await scheduleEnhancedInference(() => {
     if (generation !== clientGeneration) throw new Error("enhanced analysis cancelled");
     if (!sharedClient) sharedClient = new BeatThisDiagnosticClient();
-    return sharedClient.diagnose({ onProgress });
+    return sharedClient.diagnose({ onProgress, storageAuthority });
   });
   if (generation !== clientGeneration) throw new Error("enhanced analysis cancelled");
-  if (!(await hasStoredPack())) throw new Error("Enhanced timing assets were not stored in the timing cache.");
-  return result;
+  if (!(await hasStoredPack(storageAuthority))) throw new Error("Enhanced timing assets were not stored in the timing cache.");
+  await runIfEnhancedTimingModelAllowed(storageAuthority, async () => undefined);
+  activeStorageAuthority = storageAuthority;
+  return Object.freeze({ result, storageAuthority });
 };
 
 export const removeEnhancedRhythmModel = async () => {
@@ -75,7 +113,7 @@ export const removeEnhancedRhythmModel = async () => {
   analysisQueue.reset("enhanced analysis cancelled");
   sharedClient?.dispose();
   sharedClient = null;
-  return caches.delete(timingCacheName);
+  return revokeAndRemoveEnhancedTimingModelAssets();
 };
 
 export const disposeEnhancedRhythmClient = () => {
@@ -109,6 +147,8 @@ export const analyzeEnhancedRhythm = async (
   dedupeKey?: string | null
 ) => {
   const generation = clientGeneration;
+  const storageAuthority = activeStorageAuthority;
+  if (!storageAuthority) throw new Error("enhanced timing model admission unavailable");
   return analysisQueue.enqueue(async () => {
     if (generation !== clientGeneration) throw new Error("enhanced analysis cancelled");
     const pcm = await canonicalizeForEnhancedRhythm(decoded);
@@ -120,7 +160,7 @@ export const analyzeEnhancedRhythm = async (
         pcm,
         decoded.sampleRate,
         decoded.duration,
-        { onProgress }
+        { onProgress, storageAuthority }
       );
     });
   }, dedupeKey);
@@ -134,6 +174,8 @@ export const analyzeEnhancedRhythmPcm = async (
   dedupeKey?: string | null
 ) => {
   const generation = clientGeneration;
+  const storageAuthority = activeStorageAuthority;
+  if (!storageAuthority) throw new Error("enhanced timing model admission unavailable");
   return analysisQueue.enqueue(async () => {
     if (generation !== clientGeneration) throw new Error("enhanced analysis cancelled");
     return scheduleEnhancedInference(() => {
@@ -143,7 +185,7 @@ export const analyzeEnhancedRhythmPcm = async (
         pcm,
         sourceSampleRate,
         durationSeconds,
-        { onProgress }
+        { onProgress, storageAuthority }
       );
     });
   }, dedupeKey);
@@ -153,6 +195,7 @@ export const createEnhancedRhythmAnalysisSession = () => {
   const queue = new ResettableSerialQueue();
   let client: BeatThisDiagnosticClient | null = null;
   let disposed = false;
+  const storageAuthority = activeStorageAuthority;
   return {
     analyzePcm: (
       pcm: Float32Array,
@@ -162,6 +205,7 @@ export const createEnhancedRhythmAnalysisSession = () => {
       dedupeKey?: string | null
     ) => queue.enqueue(async () => {
       if (disposed) throw new Error("enhanced analysis session disposed");
+      if (!storageAuthority) throw new Error("enhanced timing model admission unavailable");
       return scheduleEnhancedInference(async () => {
         if (disposed) throw new Error("enhanced analysis session disposed");
         if (!client) {
@@ -171,7 +215,10 @@ export const createEnhancedRhythmAnalysisSession = () => {
           sharedClient = null;
           client = new BeatThisDiagnosticClient();
         }
-        return client.analyzePcm(pcm, sourceSampleRate, durationSeconds, { onProgress });
+        return client.analyzePcm(pcm, sourceSampleRate, durationSeconds, {
+          onProgress,
+          storageAuthority
+        });
       });
     }, dedupeKey),
     dispose: () => {

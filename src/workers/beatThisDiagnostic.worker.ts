@@ -23,8 +23,20 @@ import {
   splitBeatThisSpectrogram
 } from "../experimental/beatThisPostprocessing";
 import { analyzeBeatSynchronousFeatures } from "../analysis/analyzeMusicalFeatures";
+import {
+  deleteEnhancedTimingModelAsset,
+  matchEnhancedTimingModelAsset,
+  putEnhancedTimingModelAsset,
+  runIfEnhancedTimingModelAllowed,
+  type EnhancedTimingModelAuthority
+} from "../analysis/enhancedTimingModelStorage";
 
-type StartupRequest = { type: "diagnose"; requestId: number; preferWebGpu?: boolean };
+type StartupRequest = {
+  type: "diagnose";
+  requestId: number;
+  preferWebGpu?: boolean;
+  storageAuthority: EnhancedTimingModelAuthority;
+};
 type TrackRequest = {
   type: "analyze-track";
   requestId: number;
@@ -33,6 +45,7 @@ type TrackRequest = {
   sampleRate: number;
   sourceSampleRate: number;
   durationSeconds: number;
+  storageAuthority: EnhancedTimingModelAuthority;
 };
 type DiagnosticRequest = StartupRequest | TrackRequest;
 
@@ -42,7 +55,6 @@ let cachedContract: Awaited<ReturnType<typeof fetchContract>> | null = null;
 let cachedSession: Awaited<ReturnType<typeof createSession>> | null = null;
 let sessionIdleTimer: ReturnType<typeof setTimeout> | null = null;
 const SESSION_IDLE_MS = 60_000;
-const MODEL_CACHE = "mazzy-timing-model-v1";
 
 ort.env.wasm.numThreads = 1;
 ort.env.wasm.wasmPaths = {
@@ -56,12 +68,11 @@ const postProgress = (requestId: number, stage: string) => {
   workerScope.postMessage({ type: "progress", requestId, stage });
 };
 
-const fetchCached = async (url: string) => {
-  const cache = await caches.open(MODEL_CACHE);
-  const cached = await cache.match(url);
+const fetchCached = async (url: string, storageAuthority: EnhancedTimingModelAuthority) => {
+  const cached = await matchEnhancedTimingModelAsset(url, storageAuthority);
   if (cached) return cached;
   const response = await fetch(url, { cache: "no-store" });
-  if (response.ok) await cache.put(url, response.clone());
+  if (response.ok) await putEnhancedTimingModelAsset(url, response.clone(), storageAuthority);
   return response;
 };
 
@@ -69,25 +80,28 @@ const sha256 = async (buffer: ArrayBuffer) => Array.from(
   new Uint8Array(await crypto.subtle.digest("SHA-256", buffer))
 ).map((byte) => byte.toString(16).padStart(2, "0")).join("");
 
-const loadVerifiedAsset = async (url: string, expectedSha256: string) => {
-  let response = await fetchCached(url);
+const loadVerifiedAsset = async (
+  url: string,
+  expectedSha256: string,
+  storageAuthority: EnhancedTimingModelAuthority
+) => {
+  let response = await fetchCached(url, storageAuthority);
   if (!response.ok) return response;
   let buffer = await response.clone().arrayBuffer();
   if (await sha256(buffer) === expectedSha256) return response;
-  const cache = await caches.open(MODEL_CACHE);
-  await cache.delete(url);
+  await deleteEnhancedTimingModelAsset(url, storageAuthority);
   response = await fetch(url, { cache: "reload" });
   if (!response.ok) return response;
   buffer = await response.clone().arrayBuffer();
   if (await sha256(buffer) !== expectedSha256) throw new Error("Beat This asset checksum mismatch.");
-  await cache.put(url, response.clone());
+  await putEnhancedTimingModelAsset(url, response.clone(), storageAuthority);
   return response;
 };
 
-const fetchContract = async () => {
+const fetchContract = async (storageAuthority: EnhancedTimingModelAuthority) => {
   const [configResponse, filterbankResponse] = await Promise.all([
-    loadVerifiedAsset(BEAT_THIS_CONFIG_URL, BEAT_THIS_CONFIG_SHA256),
-    loadVerifiedAsset(BEAT_THIS_MEL_FILTERBANK_URL, BEAT_THIS_MEL_FILTERBANK_SHA256)
+    loadVerifiedAsset(BEAT_THIS_CONFIG_URL, BEAT_THIS_CONFIG_SHA256, storageAuthority),
+    loadVerifiedAsset(BEAT_THIS_MEL_FILTERBANK_URL, BEAT_THIS_MEL_FILTERBANK_SHA256, storageAuthority)
   ]);
   if (!configResponse.ok) throw new Error(`Beat This config unavailable (${configResponse.status}).`);
   if (!filterbankResponse.ok) {
@@ -104,8 +118,8 @@ const fetchContract = async () => {
   return { config, filterbank: new Float32Array(filterbankBuffer) };
 };
 
-const loadVerifiedModel = async () => {
-  const response = await loadVerifiedAsset(BEAT_THIS_MODEL_URL, BEAT_THIS_MODEL_SHA256);
+const loadVerifiedModel = async (storageAuthority: EnhancedTimingModelAuthority) => {
+  const response = await loadVerifiedAsset(BEAT_THIS_MODEL_URL, BEAT_THIS_MODEL_SHA256, storageAuthority);
   if (!response.ok) throw new Error(`Beat This model unavailable (${response.status}).`);
   const buffer = await response.arrayBuffer();
   if (buffer.byteLength !== BEAT_THIS_MODEL_BYTES) throw new Error("Beat This model byte length mismatch.");
@@ -114,17 +128,21 @@ const loadVerifiedModel = async () => {
   return new Uint8Array(buffer);
 };
 
-const loadContract = async () => {
-  if (!cachedContract) cachedContract = await fetchContract();
+const loadContract = async (storageAuthority: EnhancedTimingModelAuthority) => {
+  if (!cachedContract) cachedContract = await fetchContract(storageAuthority);
   return cachedContract;
 };
 
-const createSession = async (preferWebGpu: boolean | undefined, webGpuAvailable: boolean) => {
+const createSession = async (
+  preferWebGpu: boolean | undefined,
+  webGpuAvailable: boolean,
+  storageAuthority: EnhancedTimingModelAuthority
+) => {
   const candidates: BeatThisBackend[] = preferWebGpu !== false && webGpuAvailable
     ? ["webgpu", "wasm"]
     : ["wasm"];
   const backendFailures: string[] = [];
-  const model = await loadVerifiedModel();
+  const model = await loadVerifiedModel(storageAuthority);
   for (const backend of candidates) {
     try {
       const startedAt = performance.now();
@@ -156,8 +174,12 @@ const releaseCachedSession = async () => {
   if (current) await current.session.release();
 };
 
-const getSession = async (preferWebGpu: boolean | undefined, webGpuAvailable: boolean) => {
-  if (!cachedSession) cachedSession = await createSession(preferWebGpu, webGpuAvailable);
+const getSession = async (
+  preferWebGpu: boolean | undefined,
+  webGpuAvailable: boolean,
+  storageAuthority: EnhancedTimingModelAuthority
+) => {
+  if (!cachedSession) cachedSession = await createSession(preferWebGpu, webGpuAvailable, storageAuthority);
   if (sessionIdleTimer) clearTimeout(sessionIdleTimer);
   return cachedSession;
 };
@@ -185,30 +207,32 @@ const runWindow = async (session: ort.InferenceSession, data: Float32Array, fram
 const diagnoseStartup = async (request: StartupRequest) => {
   postProgress(request.requestId, "checking-capabilities");
   const webGpuAvailable = "gpu" in navigator;
-  await loadContract();
+  await loadContract(request.storageAuthority);
   postProgress(request.requestId, "loading-83mb-model");
-  const created = await getSession(request.preferWebGpu, webGpuAvailable);
+  const created = await getSession(request.preferWebGpu, webGpuAvailable, request.storageAuthority);
     postProgress(request.requestId, "running-zero-window");
     const inferenceStartedAt = performance.now();
     const outputs = await runWindow(created.session, new Float32Array(BEAT_THIS_ZERO_WINDOW_FLOATS), 1_500);
     const zeroWindowInferenceMs = performance.now() - inferenceStartedAt;
-    workerScope.postMessage({
-      type: "result",
-      requestId: request.requestId,
-      result: {
-        experimentVersion: BEAT_THIS_EXPERIMENT_VERSION,
-        backend: created.backend,
-        webGpuAvailable,
-        modelBytes: BEAT_THIS_MODEL_BYTES,
-        sessionLoadMs: created.sessionLoadMs,
-        zeroWindowInferenceMs,
-        beatOutputShape: [1, outputs.beat.length],
-        downbeatOutputShape: [1, outputs.downbeat.length],
-        finiteOutput: true,
-        backendFailures: created.backendFailures,
-        experimentalOnly: true,
-        eligibilityConfidence: 0
-      }
+    await runIfEnhancedTimingModelAllowed(request.storageAuthority, async () => {
+      workerScope.postMessage({
+        type: "result",
+        requestId: request.requestId,
+        result: {
+          experimentVersion: BEAT_THIS_EXPERIMENT_VERSION,
+          backend: created.backend,
+          webGpuAvailable,
+          modelBytes: BEAT_THIS_MODEL_BYTES,
+          sessionLoadMs: created.sessionLoadMs,
+          zeroWindowInferenceMs,
+          beatOutputShape: [1, outputs.beat.length],
+          downbeatOutputShape: [1, outputs.downbeat.length],
+          finiteOutput: true,
+          backendFailures: created.backendFailures,
+          experimentalOnly: true,
+          eligibilityConfidence: 0
+        }
+      });
     });
 };
 
@@ -220,7 +244,7 @@ const analyzeTrack = async (request: TrackRequest) => {
   }
   postProgress(request.requestId, "loading-contract");
   const webGpuAvailable = "gpu" in navigator;
-  const { filterbank } = await loadContract();
+  const { filterbank } = await loadContract(request.storageAuthority);
   postProgress(request.requestId, "computing-log-mel");
   const preprocessingStartedAt = performance.now();
   const pcm = new Float32Array(request.pcmBuffer);
@@ -228,7 +252,7 @@ const analyzeTrack = async (request: TrackRequest) => {
   const chunks = splitBeatThisSpectrogram(spectrogram.data, spectrogram.frames, spectrogram.melBins);
   const preprocessingMs = performance.now() - preprocessingStartedAt;
   postProgress(request.requestId, "loading-83mb-model");
-  const created = await getSession(request.preferWebGpu, webGpuAvailable);
+  const created = await getSession(request.preferWebGpu, webGpuAvailable, request.storageAuthority);
     const predictions: Array<{ startFrame: number; beat: Float32Array; downbeat: Float32Array }> = [];
     const inferenceStartedAt = performance.now();
     for (let index = 0; index < chunks.length; index += 1) {
@@ -240,10 +264,11 @@ const analyzeTrack = async (request: TrackRequest) => {
     const logits = aggregateBeatThisLogits(predictions, spectrogram.frames);
     const events = postprocessBeatThisLogits(logits.beat, logits.downbeat);
     const features = analyzeBeatSynchronousFeatures(pcm, BEAT_THIS_SAMPLE_RATE, events.beatsSeconds);
-    workerScope.postMessage({
-      type: "track-result",
-      requestId: request.requestId,
-      result: {
+    await runIfEnhancedTimingModelAllowed(request.storageAuthority, async () => {
+      workerScope.postMessage({
+        type: "track-result",
+        requestId: request.requestId,
+        result: {
         experimentVersion: BEAT_THIS_EXPERIMENT_VERSION,
         backend: created.backend,
         webGpuAvailable,
@@ -261,7 +286,8 @@ const analyzeTrack = async (request: TrackRequest) => {
         backendFailures: created.backendFailures,
         experimentalOnly: true,
         eligibilityConfidence: 0
-      }
+        }
+      });
     });
 };
 

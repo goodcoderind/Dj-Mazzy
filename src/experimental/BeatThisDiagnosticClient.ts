@@ -1,4 +1,9 @@
 import type { BeatThisDiagnosticResult, BeatThisTrackDiagnosticResult } from "./beatThisContract";
+import {
+  currentEnhancedTimingModelAllowedAuthority,
+  type EnhancedTimingModelAuthority,
+  runIfEnhancedTimingModelAllowed
+} from "../analysis/enhancedTimingModelStorage";
 
 type DiagnosticWorkerMessage =
   | { type: "progress"; requestId: number; stage: string }
@@ -10,6 +15,7 @@ type PendingDiagnostic = {
   resolve: (result: BeatThisDiagnosticResult | BeatThisTrackDiagnosticResult) => void;
   reject: (error: Error) => void;
   onProgress?: (stage: string) => void;
+  storageAuthority: EnhancedTimingModelAuthority;
 };
 
 type DiagnosticWorker = Pick<Worker, "postMessage" | "terminate" | "onmessage" | "onerror">;
@@ -33,9 +39,23 @@ export class BeatThisDiagnosticClient {
         request.onProgress?.(message.stage);
         return;
       }
-      this.pending.delete(message.requestId);
-      if (message.type === "result" || message.type === "track-result") request.resolve(message.result);
-      else request.reject(new Error(message.error));
+      if (message.type === "result" || message.type === "track-result") {
+        void runIfEnhancedTimingModelAllowed(request.storageAuthority, async () => {
+          if (this.disposed || this.pending.get(message.requestId) !== request) {
+            throw new Error("Beat This diagnostic client disposed");
+          }
+          this.pending.delete(message.requestId);
+          request.resolve(message.result);
+        }).catch((error) => {
+          if (this.pending.get(message.requestId) === request) {
+            this.pending.delete(message.requestId);
+            request.reject(error instanceof Error ? error : new Error("Beat This diagnostic result unavailable"));
+          }
+        });
+      } else {
+        this.pending.delete(message.requestId);
+        request.reject(new Error(message.error));
+      }
     };
     worker.onerror = (event) => {
       const error = new Error(event.message || "Beat This diagnostic worker failed");
@@ -44,13 +64,24 @@ export class BeatThisDiagnosticClient {
     };
   }
 
-  diagnose(options: { preferWebGpu?: boolean; onProgress?: (stage: string) => void } = {}) {
+  async diagnose(options: {
+    preferWebGpu?: boolean;
+    onProgress?: (stage: string) => void;
+    storageAuthority?: EnhancedTimingModelAuthority;
+  } = {}) {
+    if (this.disposed) return Promise.reject(new Error("Beat This diagnostic client disposed"));
+    const storageAuthority = options.storageAuthority ?? await currentEnhancedTimingModelAllowedAuthority();
     if (this.disposed) return Promise.reject(new Error("Beat This diagnostic client disposed"));
     const requestId = this.nextRequestId;
     this.nextRequestId += 1;
     return new Promise<BeatThisDiagnosticResult>((resolve, reject) => {
-      this.pending.set(requestId, { resolve: resolve as PendingDiagnostic["resolve"], reject, onProgress: options.onProgress });
-      this.worker.postMessage({ type: "diagnose", requestId, preferWebGpu: options.preferWebGpu });
+      this.pending.set(requestId, {
+        resolve: resolve as PendingDiagnostic["resolve"],
+        reject,
+        onProgress: options.onProgress,
+        storageAuthority
+      });
+      this.worker.postMessage({ type: "diagnose", requestId, preferWebGpu: options.preferWebGpu, storageAuthority });
     });
   }
 
@@ -58,26 +89,40 @@ export class BeatThisDiagnosticClient {
     pcm: Float32Array,
     sourceSampleRate: number,
     durationSeconds: number,
-    options: { preferWebGpu?: boolean; onProgress?: (stage: string) => void } = {}
+    options: {
+      preferWebGpu?: boolean;
+      onProgress?: (stage: string) => void;
+      storageAuthority?: EnhancedTimingModelAuthority;
+    } = {}
   ) {
-    if (this.disposed) return Promise.reject(new Error("Beat This diagnostic client disposed"));
-    const requestId = this.nextRequestId;
-    this.nextRequestId += 1;
-    return new Promise<BeatThisTrackDiagnosticResult>((resolve, reject) => {
-      this.pending.set(requestId, { resolve: resolve as PendingDiagnostic["resolve"], reject, onProgress: options.onProgress });
-      this.worker.postMessage(
-        {
-          type: "analyze-track",
-          requestId,
-          preferWebGpu: options.preferWebGpu,
-          pcmBuffer: pcm.buffer,
-          sampleRate: 22_050,
-          sourceSampleRate,
-          durationSeconds
-        },
-        [pcm.buffer]
-      );
-    });
+    return (async () => {
+      if (this.disposed) throw new Error("Beat This diagnostic client disposed");
+      const storageAuthority = options.storageAuthority ?? await currentEnhancedTimingModelAllowedAuthority();
+      if (this.disposed) throw new Error("Beat This diagnostic client disposed");
+      const requestId = this.nextRequestId;
+      this.nextRequestId += 1;
+      return new Promise<BeatThisTrackDiagnosticResult>((resolve, reject) => {
+        this.pending.set(requestId, {
+          resolve: resolve as PendingDiagnostic["resolve"],
+          reject,
+          onProgress: options.onProgress,
+          storageAuthority
+        });
+        this.worker.postMessage(
+          {
+            type: "analyze-track",
+            requestId,
+            preferWebGpu: options.preferWebGpu,
+            pcmBuffer: pcm.buffer,
+            sampleRate: 22_050,
+            sourceSampleRate,
+            durationSeconds,
+            storageAuthority
+          },
+          [pcm.buffer]
+        );
+      });
+    })();
   }
 
   dispose() {

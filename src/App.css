@@ -552,7 +552,7 @@ body {
 
 .enhanced-timing-banner.ready { color: #9fd0ad; background: #101813; }
 .enhanced-timing-banner button {
-  min-height: 36px;
+  min-height: 44px;
   flex: 0 0 auto;
   border: 1px solid #4a4233;
   background: #18150f;
@@ -561,6 +561,8 @@ body {
   font-size: 9px;
   letter-spacing: 0.06em;
 }
+
+.enhanced-timing-removal-alert button { min-height: 44px; }
 
 .mix-readiness-cell { color: #9dbca5; font-size: 10px; }
 

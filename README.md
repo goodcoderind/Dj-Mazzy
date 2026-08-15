@@ -639,7 +639,32 @@ Imported music files, filenames, and analysis are stored in this browser
 profile until removed; they are not uploaded. Tracks can be removed one at a
 time or with **Remove All Local Music**. The optional timing model is fetched
 from the app's server only after the host chooses the download action, then
-cached for later reuse; browser storage may evict it.
+cached for later reuse; browser storage may evict it. **Remove Timing Model**
+uses the profile-wide Web Lock plus a versioned CacheStorage control record
+containing only a monotonic non-user admission epoch, a random non-user
+authority token, and a revocation bit to
+stop new model-cache writes in every Mazzy tab before deleting and verifying
+the cache. Open tabs receive a fixed BroadcastChannel notice with a tab-memory
+non-user sender ID so a tab cannot consume its own notice, dispose current
+enhanced work, and reconcile the exact control authority again on window focus,
+page show, and visible-tab return before a worker may publish or the main thread
+may accept a result. A
+10-second monotonic deadline bounds the host action. If the browser cannot
+provide the cross-tab lock, deletion, or absence proof, Mazzy does not claim
+success: new enhanced analysis stays off in that tab and a focused **Reload
+Mazzy** alert remains. A later download requires a new explicit host action.
+Removing model files does not erase enhanced timing already saved in imported
+track records; that saved timing may continue to guide transitions until the
+track or whole local library is removed. Music, conservative Safe Fade, and
+**Stop All Sound** remain available throughout. Only that fixed, versioned
+control-state record is persisted in CacheStorage; its epoch/token pair is
+structured-cloned to the same-origin timing worker for exact admission checks.
+It is never sent over the network or placed in IndexedDB, UI, logs, or reports.
+The advisory sender ID is never persisted.
+No user-derived removal state is shared or stored; no filename, track identity,
+model URL, raw error,
+deadline, or model bytes are added to UI, reports, logs, IndexedDB, or network
+requests.
 Mazzy uses a local system monospace font stack and makes no third-party font
 request when the app opens.
 

@@ -1,4 +1,5 @@
 import { forwardRef, useEffect, useId, useImperativeHandle, useMemo, useRef, useState } from "react";
+import { ownsEnhancedTimingAdmission } from "../analysis/enhancedTimingAdmission";
 import WaveSurfer from "wavesurfer.js";
 import { getAudioEngine } from "../audioContext";
 import { DECK_LOAD_OUTCOME } from "../audio/deckLoadOutcome";
@@ -118,6 +119,7 @@ const Deck = forwardRef(function Deck(
     onEnhancedRhythmDetected,
     onProgramLevelDetected,
     enhancedTimingAvailable,
+    enhancedTimingAdmissionRef,
     onAnalysisOverrideChange,
     onTimingReviewSave,
     onTimingReviewRemove,
@@ -769,6 +771,11 @@ const Deck = forwardRef(function Deck(
     loadAbortControllerRef.current = loadAbortController;
     loadGenerationRef.current += 1;
     const loadGeneration = loadGenerationRef.current;
+    const enhancedTimingAdmission = enhancedTimingAdmissionRef?.current ?? null;
+    const ownsCurrentEnhancedTimingAdmission = () => ownsEnhancedTimingAdmission(
+      enhancedTimingAdmissionRef?.current,
+      enhancedTimingAdmission
+    );
     const expectedLoadAuthorityKey = typeof loadAuthorityKey === "string" && loadAuthorityKey.length > 0
       ? loadAuthorityKey
       : null;
@@ -947,10 +954,12 @@ const Deck = forwardRef(function Deck(
       }
       if (
         enhancedTimingAvailable &&
+        ownsCurrentEnhancedTimingAdmission() &&
         !hasCurrentEnhancedRhythm(knownAnalysis)
       ) {
         void analyzeEnhancedRhythm(decoded, undefined, trackId).then((enhanced) => {
-          if (loadGenerationRef.current !== loadGeneration || currentTrackIdRef.current !== trackId) return;
+          if (loadGenerationRef.current !== loadGeneration || currentTrackIdRef.current !== trackId ||
+            !ownsCurrentEnhancedTimingAdmission()) return;
           setAnalysisRecord((current) => {
             if (!current) return current;
             const next = mergeEnhancedRhythm(current, enhanced);
