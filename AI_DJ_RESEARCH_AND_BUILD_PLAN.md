@@ -6,7 +6,7 @@
 >
 > Version: 1.1
 >
-> Last updated: 2026-08-13
+> Last updated: 2026-08-15
 >
 > Scope: House-party automation for roughly 20–50 people using locally supplied music
 
@@ -1480,11 +1480,13 @@ These are the active backlog, not reasons to discard the prototype.
   queue coverage, and distinguishes full enhanced timing from protected-fade
   operation. Enhanced timing is never required for basic party continuity.
 - **Priority/background analysis:** Background work remains single-flight for
-  audio and memory safety, but the waiting list is dynamically reordered so
-  loaded decks are analyzed first, queued tracks follow, and the rest of the
-  crate completes afterward. Conservative program-level analysis now runs in
-  the analysis worker and is versioned under `basic-worker/v5`, avoiding a
-  full-song UI-thread scan on deck load.
+  audio and memory safety. Missing basic/program facts form the high-priority
+  lane, ordered as loaded decks, queued tracks, then the rest of the crate;
+  optional enhanced timing is a separate lower-priority lane. Each read,
+  decode, worker, render, and inference stage now has D-071's exact runtime
+  lease and bounded settlement policy. Conservative program-level analysis
+  remains in `basic-worker/v5`, avoiding a full-song UI-thread scan on deck
+  load.
 - **Role-aware musical cue selection:** Enhanced Beat This contract v2 computes
   beat-synchronous energy, band balance, vocal-likelihood proxy, and structure
   against the exact final0 event grid in the worker. Timing trust remains the
@@ -2572,6 +2574,52 @@ These are the active backlog, not reasons to discard the prototype.
   never-resolving inline-analysis factory trap, and manual-branch invariance.
   Browser codec breadth, large-file timing, background-analysis liveness, and
   physical-device behavior remain separate gates.
+
+- **D-071 — Bound background-analysis liveness without changing playback authority:**
+  `background-analysis-runtime/v1` splits missing basic/program facts from
+  optional enhanced timing and assigns each in-memory job an exact generation,
+  operation, track, content/File binding, stage, and deadline. All basic/program
+  jobs run before queued enhanced jobs while preserving loaded, Party-queue,
+  and library order inside each lane. Timeouts are session-only deferrals: they
+  never persist `analysisStatus: failed`, quarantine a file, mutate a loaded
+  Deck, or remove Safe Fade/neutral-loudness playback.
+
+  File reads are abortable. A timed-out basic worker is terminated through a
+  background-only `AnalysisClient`; it cannot interrupt Advanced Deck inline
+  analysis. Background enhanced requests keep exact session cancellation, while
+  a module-global inference arbiter serializes them with manual Deck inference
+  and model preparation. The background owner releases an idle manual client
+  before loading the same model and disposes its own client after settlement, so
+  Mazzy does not retain two enhanced model workers. Session reset rejects every
+  old background owner without rejecting a queued manual owner; dedupe cleanup
+  is token-bound, so a late old same-key `finally` cannot delete a successor.
+  Browser decode and enhanced offline
+  rendering are not falsely described as cancelable: when either exceeds its
+  hard liveness boundary or is abandoned during destructive cancellation, the
+  corresponding background lane opens a tab-session circuit rather than
+  starting overlapping background zombie work. Reload is required to retry
+  that lane. An enhanced inference timeout also pauses further background
+  enhanced work for the tab: this bounds decoded PCM retained behind an
+  unresponsive manual/model owner while the global arbiter preserves one heavy
+  inference at a time. Explicit manual Deck analysis remains host-owned but
+  shares that inference arbiter.
+
+  Removal, library clear, model removal, remote destructive reconciliation,
+  and unmount revoke the exact active owner before abort/reset. Every result
+  still revalidates generation, deletion, current track ID, normalized content
+  identity, and—only for identity-less legacy rows—the identical File object
+  before changing library state. The UI announces one polite, fixed-text
+  session deferral while keeping playback available; a single explicit retry is
+  offered only for safely resettable stages and only while Party/preview/load
+  authority is idle. Runtime leases, stages, deadlines, errors, PCM, and File
+  references are not persisted, traced, exported, uploaded, or restored.
+
+  The exported deadlines are conservative liveness ceilings, not performance
+  or device claims. Deterministic tests cover stage priority, exact lease loss,
+  timeout/late-settlement idempotence, FileReader abort, fresh enhanced work
+  after a hung epoch reset, and same-key successor safety. Real browser decode,
+  long-file/model performance, analysis accuracy, and sustained physical-device
+  behavior remain separate release gates.
 
 ### Open questions
 

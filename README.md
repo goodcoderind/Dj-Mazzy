@@ -160,6 +160,22 @@ notice explains that the host may keep waiting or use Cancel instead of treating
 a large valid file as broken.
 Advanced Mixer and direct manual Deck loads retain their existing inline-analysis
 contract in this bounded slice.
+
+Background enrichment can no longer hold the whole library queue forever.
+Missing basic timing/loudness facts are analyzed before optional enhanced
+timing, and each local read, decode, worker, render, and inference stage has a
+conservative liveness boundary. A safely resettable file/basic timeout defers
+only that exact song/stage for the tab and lets later work continue. If a
+browser decode or offline render cannot be cancelled, Mazzy pauses that background-analysis
+lane instead of piling up more background work and asks the host to reload
+before retrying. Enhanced inference is globally serialized with explicit
+Advanced Mixer analysis; if that owner stops responding, Mazzy likewise pauses
+further background enhanced work so decoded payloads cannot accumulate.
+Playback
+remains available: missing timing uses Safe Fade and missing loudness uses a
+neutral 0 dB trim. These timeout/deferred states stay in tab memory and are not
+saved as broken files or added to party recovery, diagnostics, exports, or a
+network request.
 An always-enabled **Stop All Sound** action is kept in the ordinary Party Mode
 surface and inside the advanced timing dialog. It immediately revokes pending preload and transition starts, cancels
 automatic gain/EQ/filter automation, transition rehearsal, and timing clicks,

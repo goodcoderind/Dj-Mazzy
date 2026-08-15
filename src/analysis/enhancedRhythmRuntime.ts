@@ -1,10 +1,17 @@
 import { BeatThisDiagnosticClient } from "../experimental/BeatThisDiagnosticClient";
+import { ResettableSerialQueue } from "./resettableSerialQueue";
 
 const ANALYSIS_SAMPLE_RATE = 22_050;
 let sharedClient: BeatThisDiagnosticClient | null = null;
-let analysisQueue: Promise<void> = Promise.resolve();
 let clientGeneration = 0;
-const pendingByKey = new Map<string, Promise<Awaited<ReturnType<BeatThisDiagnosticClient["analyzePcm"]>>>>();
+const analysisQueue = new ResettableSerialQueue();
+let inferenceTail: Promise<void> = Promise.resolve();
+
+const scheduleEnhancedInference = <T>(task: () => Promise<T>) => {
+  const run = inferenceTail.catch(() => undefined).then(task);
+  inferenceTail = run.then(() => undefined, () => undefined);
+  return run;
+};
 
 export type EnhancedRhythmAssetState = "stored" | "stored-unavailable" | "downloadable" | "not-included" | "unavailable";
 
@@ -52,25 +59,30 @@ export const hasEnhancedRhythmAssets = async () =>
   (await getEnhancedRhythmAssetState()) === "stored";
 
 export const prepareEnhancedRhythm = async (onProgress?: (stage: string) => void) => {
-  if (!sharedClient) sharedClient = new BeatThisDiagnosticClient();
-  const result = await sharedClient.diagnose({ onProgress });
+  const generation = clientGeneration;
+  const result = await scheduleEnhancedInference(() => {
+    if (generation !== clientGeneration) throw new Error("enhanced analysis cancelled");
+    if (!sharedClient) sharedClient = new BeatThisDiagnosticClient();
+    return sharedClient.diagnose({ onProgress });
+  });
+  if (generation !== clientGeneration) throw new Error("enhanced analysis cancelled");
   if (!(await hasStoredPack())) throw new Error("Enhanced timing assets were not stored in the timing cache.");
   return result;
 };
 
 export const removeEnhancedRhythmModel = async () => {
   clientGeneration += 1;
+  analysisQueue.reset("enhanced analysis cancelled");
   sharedClient?.dispose();
   sharedClient = null;
-  pendingByKey.clear();
   return caches.delete(timingCacheName);
 };
 
 export const disposeEnhancedRhythmClient = () => {
   clientGeneration += 1;
+  analysisQueue.reset("enhanced analysis cancelled");
   sharedClient?.dispose();
   sharedClient = null;
-  pendingByKey.clear();
 };
 
 export const canonicalizeForEnhancedRhythm = async (decoded: AudioBuffer) => {
@@ -96,27 +108,78 @@ export const analyzeEnhancedRhythm = async (
   onProgress?: (stage: string) => void,
   dedupeKey?: string | null
 ) => {
-  const key = dedupeKey || null;
-  if (key && pendingByKey.has(key)) return pendingByKey.get(key)!;
   const generation = clientGeneration;
-  const run = new Promise<Awaited<ReturnType<BeatThisDiagnosticClient["analyzePcm"]>>>((resolve, reject) => {
-    analysisQueue = analysisQueue
-      .catch(() => undefined)
-      .then(async () => {
-        try {
-          if (generation !== clientGeneration) throw new Error("enhanced analysis cancelled");
-          if (!sharedClient) sharedClient = new BeatThisDiagnosticClient();
-          const pcm = await canonicalizeForEnhancedRhythm(decoded);
-          if (generation !== clientGeneration) throw new Error("enhanced analysis cancelled");
-          resolve(await sharedClient.analyzePcm(pcm, decoded.sampleRate, decoded.duration, { onProgress }));
-        } catch (error) {
-          reject(error);
+  return analysisQueue.enqueue(async () => {
+    if (generation !== clientGeneration) throw new Error("enhanced analysis cancelled");
+    const pcm = await canonicalizeForEnhancedRhythm(decoded);
+    if (generation !== clientGeneration) throw new Error("enhanced analysis cancelled");
+    return scheduleEnhancedInference(() => {
+      if (generation !== clientGeneration) throw new Error("enhanced analysis cancelled");
+      if (!sharedClient) sharedClient = new BeatThisDiagnosticClient();
+      return sharedClient.analyzePcm(
+        pcm,
+        decoded.sampleRate,
+        decoded.duration,
+        { onProgress }
+      );
+    });
+  }, dedupeKey);
+};
+
+export const analyzeEnhancedRhythmPcm = async (
+  pcm: Float32Array,
+  sourceSampleRate: number,
+  durationSeconds: number,
+  onProgress?: (stage: string) => void,
+  dedupeKey?: string | null
+) => {
+  const generation = clientGeneration;
+  return analysisQueue.enqueue(async () => {
+    if (generation !== clientGeneration) throw new Error("enhanced analysis cancelled");
+    return scheduleEnhancedInference(() => {
+      if (generation !== clientGeneration) throw new Error("enhanced analysis cancelled");
+      if (!sharedClient) sharedClient = new BeatThisDiagnosticClient();
+      return sharedClient.analyzePcm(
+        pcm,
+        sourceSampleRate,
+        durationSeconds,
+        { onProgress }
+      );
+    });
+  }, dedupeKey);
+};
+
+export const createEnhancedRhythmAnalysisSession = () => {
+  const queue = new ResettableSerialQueue();
+  let client: BeatThisDiagnosticClient | null = null;
+  let disposed = false;
+  return {
+    analyzePcm: (
+      pcm: Float32Array,
+      sourceSampleRate: number,
+      durationSeconds: number,
+      onProgress?: (stage: string) => void,
+      dedupeKey?: string | null
+    ) => queue.enqueue(async () => {
+      if (disposed) throw new Error("enhanced analysis session disposed");
+      return scheduleEnhancedInference(async () => {
+        if (disposed) throw new Error("enhanced analysis session disposed");
+        if (!client) {
+          // Inference is globally serialized, so an idle manual client can be
+          // released before the background owner loads the same model.
+          sharedClient?.dispose();
+          sharedClient = null;
+          client = new BeatThisDiagnosticClient();
         }
+        return client.analyzePcm(pcm, sourceSampleRate, durationSeconds, { onProgress });
       });
-  });
-  if (key) {
-    pendingByKey.set(key, run);
-    void run.finally(() => pendingByKey.delete(key)).catch(() => undefined);
-  }
-  return run;
+    }, dedupeKey),
+    dispose: () => {
+      if (disposed) return;
+      disposed = true;
+      queue.reset("enhanced analysis session disposed");
+      client?.dispose();
+      client = null;
+    }
+  };
 };

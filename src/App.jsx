@@ -14,7 +14,7 @@ import {
   subscribeToLibraryMutations
 } from "./libraryDb";
 import { equalPowerGains } from "./planning/transitionMath";
-import { disposeAnalysisClient, getAnalysisClient } from "./analysis/AnalysisClient";
+import { AnalysisClient, disposeAnalysisClient } from "./analysis/AnalysisClient";
 import { hasCurrentBasicAnalysis } from "./analysis/analysisVersion";
 import {
   emptyBeatGridOverrides,
@@ -31,7 +31,8 @@ import { decidePartyCommittedTargetContinuation } from "./planning/partyCommitte
 import { runPartyCommittedTargetAudioTransaction } from "./audio/partyCommittedTargetContinuationAudio";
 import { isTimingReviewCurrent, normalizeTimingReview } from "./domain/timingReview";
 import {
-  analyzeEnhancedRhythm,
+  canonicalizeForEnhancedRhythm,
+  createEnhancedRhythmAnalysisSession,
   disposeEnhancedRhythmClient,
   getEnhancedRhythmAssetState,
   prepareEnhancedRhythm,
@@ -39,7 +40,22 @@ import {
 } from "@mazzy/enhanced-rhythm";
 import { mergeEnhancedRhythm } from "./analysis/mergeEnhancedRhythm";
 import { hasCurrentEnhancedRhythm } from "./analysis/enhancedRhythmVersion";
-import { sortAnalysisQueue } from "./analysis/analysisQueuePriority";
+import {
+  BACKGROUND_ANALYSIS_STAGE_TIMEOUT_MS,
+  backgroundAnalysisRowsAfterMutationRollback,
+  backgroundAnalysisJobKey,
+  createBackgroundAnalysisLease,
+  createBackgroundAnalysisStageLease,
+  decideBackgroundDecodeFailure,
+  deriveBackgroundAnalysisNotice,
+  ownsBackgroundAnalysisLease,
+  ownsBackgroundAnalysisStageLease,
+  readBlobForBackgroundAnalysis,
+  isRetryableBackgroundAnalysisDeferral,
+  shouldRetainBackgroundAnalysisDeferral,
+  sortBackgroundAnalysisJobs,
+  startBoundedBackgroundStage
+} from "./analysis/backgroundAnalysisRuntime";
 import { deriveRehearsalSourceCueSeconds, renderTransitionRehearsal } from "./diagnostics/transitionRehearsal";
 import { partyEnergyCurve, shiftEnergyCurve } from "./planning/energyProfiles";
 import { buildAutoPilotCandidateIds, buildAutoPilotPlanningIds } from "./planning/autoPilotCrate";
@@ -290,6 +306,7 @@ export default function App() {
   const [libraryMutationBusy, setLibraryMutationBusy] = useState(true);
   const [libraryStorageError, setLibraryStorageError] = useState("");
   const [libraryAnalysisSaveError, setLibraryAnalysisSaveError] = useState("");
+  const [backgroundAnalysisNotice, setBackgroundAnalysisNotice] = useState(null);
   const [libraryTimingSaveErrors, setLibraryTimingSaveErrors] = useState({});
   const [libraryRestoreAttempt, setLibraryRestoreAttempt] = useState(0);
   const [importStorageStatus, setImportStorageStatus] = useState(null);
@@ -315,6 +332,15 @@ export default function App() {
   const analysisPriorityRef = useRef({ loaded: [], queued: [] });
   const analysisQueueBusyRef = useRef(false);
   const analysisGenerationRef = useRef(0);
+  const backgroundAnalysisOperationRef = useRef(0);
+  const activeBackgroundAnalysisRef = useRef(null);
+  const activeBackgroundStageRef = useRef(null);
+  const activeBackgroundStageCancelRef = useRef(null);
+  const backgroundAnalysisClientRef = useRef(null);
+  const backgroundEnhancedAnalysisRef = useRef(null);
+  const backgroundAnalysisDeferredRef = useRef(new Map());
+  const backgroundAnalysisCircuitRef = useRef({ decode: false, enhancedRender: false });
+  const backgroundAnalysisRetryUsedRef = useRef(false);
   const removedTrackIdsRef = useRef(new Set());
   const autoPilotPreloadLeaseRef = useRef(null);
   const consecutiveAutoPilotPreloadTimeoutsRef = useRef(0);
@@ -624,7 +650,7 @@ export default function App() {
         stopRemoteLibraryPlayback();
         for (const trackId of removedIds) {
           removedTrackIdsRef.current.add(trackId);
-          queuedAnalysisIdsRef.current.delete(trackId);
+          cancelBackgroundAnalysisForTrack(trackId);
         }
         pendingAnalysisQueueRef.current = pendingAnalysisQueueRef.current
           .filter((track) => storedIds.has(track.id));
@@ -672,6 +698,7 @@ export default function App() {
         stopRemoteLibraryPlayback();
         autoPilotPreloadGenerationRef.current += 1;
         removedTrackIdsRef.current.add(message.trackId);
+        cancelBackgroundAnalysisForTrack(message.trackId);
         playedTrackIdsRef.current = playedTrackIdsRef.current.filter((trackId) => trackId !== message.trackId);
         setLibrary((current) => current.filter((track) => track.id !== message.trackId));
         setQueue((current) => current.filter((trackId) => trackId !== message.trackId));
@@ -680,6 +707,11 @@ export default function App() {
         stopRemoteLibraryPlayback();
         libraryImportGenerationRef.current += 1;
         analysisGenerationRef.current += 1;
+        cancelActiveBackgroundAnalysis({ resetEnhanced: true });
+        queuedAnalysisIdsRef.current.clear();
+        pendingAnalysisQueueRef.current = [];
+        backgroundAnalysisDeferredRef.current.clear();
+        setBackgroundAnalysisNotice(null);
         disposeAnalysisClient();
         disposeEnhancedRhythmClient();
       }
@@ -797,7 +829,7 @@ export default function App() {
       loaded: [loadedByDeck.a, loadedByDeck.b],
       queued: queue
     };
-    pendingAnalysisQueueRef.current = sortAnalysisQueue(
+    pendingAnalysisQueueRef.current = sortBackgroundAnalysisJobs(
       pendingAnalysisQueueRef.current,
       analysisPriorityRef.current.loaded,
       analysisPriorityRef.current.queued
@@ -840,6 +872,20 @@ export default function App() {
   };
 
   const removeTimingModel = async () => {
+    if (activeBackgroundAnalysisRef.current?.kind === "enhanced") {
+      cancelActiveBackgroundAnalysis({ resetEnhanced: true });
+    }
+    try { backgroundEnhancedAnalysisRef.current?.dispose?.(); } catch { /* Cache removal continues. */ }
+    backgroundEnhancedAnalysisRef.current = null;
+    pendingAnalysisQueueRef.current = pendingAnalysisQueueRef.current.filter((job) => job.kind !== "enhanced");
+    for (const key of queuedAnalysisIdsRef.current) {
+      if (key.startsWith("enhanced:")) queuedAnalysisIdsRef.current.delete(key);
+    }
+    for (const key of backgroundAnalysisDeferredRef.current.keys()) {
+      if (key.startsWith("enhanced:")) backgroundAnalysisDeferredRef.current.delete(key);
+    }
+    setEnhancedFailureByTrack({});
+    refreshBackgroundAnalysisNotice({ enhancedEnabled: false });
     await removeEnhancedRhythmModel();
     setEnhancedTimingAvailable(false);
     setEnhancedTimingState(__MAZZY_ENHANCED_TIMING_INCLUDED__
@@ -1398,13 +1444,121 @@ export default function App() {
     }));
   };
 
-  const decodeForAnalysis = async (file) => {
-    const arrayBuffer = await file.arrayBuffer();
-    const analysisCtx = new OfflineAudioContext(1, 1, 44100);
-    return analysisCtx.decodeAudioData(arrayBuffer.slice(0));
+  const analysisJobKindForTrack = (track) => {
+    if (!hasCurrentBasicAnalysis(track) ||
+      (!normalizeProgramLevel(track.programLevel) && track.programLevelStatus !== "failed")) return "basic-program";
+    if (enhancedTimingAvailable === true && !hasCurrentEnhancedRhythm(track)) return "enhanced";
+    return null;
   };
 
-  const analyzeQueuedTrack = async (track, generation) => {
+  const refreshBackgroundAnalysisNotice = ({ enhancedEnabled = enhancedTimingAvailable === true } = {}) => {
+    setBackgroundAnalysisNotice(deriveBackgroundAnalysisNotice({
+      deferrals: [...backgroundAnalysisDeferredRef.current.values()].map(({ kind, stage }) => ({ kind, stage })),
+      decodeCircuitOpen: backgroundAnalysisCircuitRef.current.decode,
+      enhancedRenderCircuitOpen: backgroundAnalysisCircuitRef.current.enhancedRender,
+      retryUsed: backgroundAnalysisRetryUsedRef.current,
+      enhancedEnabled
+    }));
+  };
+
+  const restoreBackgroundAnalysisDeferrals = (snapshot) => {
+    for (const [key, deferred] of snapshot) {
+      const current = libraryRef.current.find((track) => track.id === deferred.trackId);
+      if (current && ownsQueuedAnalysisLibraryRow({
+        expectedTrackId: deferred.trackId,
+        expectedContentIdentity: deferred.contentIdentity,
+        currentTrackId: current.id,
+        currentContentIdentity: current.contentIdentity,
+        expectedFile: deferred.file,
+        currentFile: current.file,
+        removed: removedTrackIdsRef.current.has(deferred.trackId)
+      })) backgroundAnalysisDeferredRef.current.set(key, deferred);
+    }
+    refreshBackgroundAnalysisNotice();
+  };
+
+  const cancelActiveBackgroundAnalysis = ({ resetEnhanced = false, announceUnabortable = true } = {}) => {
+    const activeStage = activeBackgroundStageRef.current?.stage ?? null;
+    activeBackgroundAnalysisRef.current = null;
+    activeBackgroundStageRef.current = null;
+    if (activeStage === "decode") backgroundAnalysisCircuitRef.current.decode = true;
+    if (activeStage === "enhanced-render") backgroundAnalysisCircuitRef.current.enhancedRender = true;
+    if (announceUnabortable && (activeStage === "decode" || activeStage === "enhanced-render")) {
+      setBackgroundAnalysisNotice({
+        type: "circuit-open",
+        retryable: false,
+        message: "Local analysis paused for this tab because a browser audio step could not be cancelled. Mazzy can still try to open songs with conservative fallbacks; reload before retrying local analysis."
+      });
+    }
+    try { activeBackgroundStageCancelRef.current?.(); } catch { /* Ownership is already revoked. */ }
+    activeBackgroundStageCancelRef.current = null;
+    try { backgroundAnalysisClientRef.current?.dispose?.(); } catch { /* The client is no longer authoritative. */ }
+    backgroundAnalysisClientRef.current = null;
+    if (resetEnhanced) {
+      try { backgroundEnhancedAnalysisRef.current?.dispose?.(); } catch { /* The queue epoch is already obsolete. */ }
+      backgroundEnhancedAnalysisRef.current = null;
+    }
+  };
+
+  const cancelBackgroundAnalysisForTrack = (trackId) => {
+    const active = activeBackgroundAnalysisRef.current;
+    if (active?.trackId === trackId) {
+      cancelActiveBackgroundAnalysis({ resetEnhanced: active.kind === "enhanced" });
+    }
+    queuedAnalysisIdsRef.current.delete(backgroundAnalysisJobKey(trackId, "basic-program"));
+    queuedAnalysisIdsRef.current.delete(backgroundAnalysisJobKey(trackId, "enhanced"));
+    pendingAnalysisQueueRef.current = pendingAnalysisQueueRef.current.filter((job) => job.id !== trackId);
+    backgroundAnalysisDeferredRef.current.delete(backgroundAnalysisJobKey(trackId, "basic-program"));
+    backgroundAnalysisDeferredRef.current.delete(backgroundAnalysisJobKey(trackId, "enhanced"));
+    refreshBackgroundAnalysisNotice();
+    setAnalyzingIds((current) => ({ ...current, [trackId]: false }));
+  };
+
+  const runBackgroundStage = async ({ lease, stage, task, onTimeout, onCancel = onTimeout }) => {
+    const ownsAuthority = () => ownsBackgroundAnalysisLease(activeBackgroundAnalysisRef.current, lease) &&
+      lease.epoch === analysisGenerationRef.current;
+    const stageLease = createBackgroundAnalysisStageLease({
+      job: lease,
+      stage,
+      startedAtMilliseconds: performance.now()
+    });
+    if (!stageLease) return { outcome: "cancelled" };
+    const run = startBoundedBackgroundStage({
+      task,
+      timeoutMs: BACKGROUND_ANALYSIS_STAGE_TIMEOUT_MS[stage],
+      deadlineMilliseconds: stageLease.deadlineMilliseconds,
+      ownsAuthority,
+      onTimeout,
+      onCancel
+    });
+    activeBackgroundStageRef.current = stageLease;
+    activeBackgroundStageCancelRef.current = run.cancel;
+    const settlement = await run.settlement;
+    if (ownsBackgroundAnalysisLease(activeBackgroundAnalysisRef.current, lease) &&
+      ownsBackgroundAnalysisStageLease(activeBackgroundStageRef.current, stageLease)) {
+      activeBackgroundStageRef.current = null;
+      activeBackgroundStageCancelRef.current = null;
+    }
+    return settlement;
+  };
+
+  const deferBackgroundAnalysis = (track, kind, stage, unabortable) => {
+    backgroundAnalysisDeferredRef.current.set(backgroundAnalysisJobKey(track.id, kind), {
+      trackId: track.id,
+      kind,
+      file: track.file,
+      contentIdentity: track.contentIdentity,
+      stage
+    });
+    if (stage === "decode") backgroundAnalysisCircuitRef.current.decode = true;
+    if (stage === "enhanced-render" || (stage === "enhanced-inference" && unabortable)) {
+      backgroundAnalysisCircuitRef.current.enhancedRender = true;
+    }
+    refreshBackgroundAnalysisNotice();
+  };
+
+  const analyzeQueuedTrack = async (job, generation) => {
+    const { track, kind } = job;
     const needsBasicAnalysis = !hasCurrentBasicAnalysis(track);
     const needsProgramLevel = !normalizeProgramLevel(track.programLevel);
     const expectedContentIdentity = normalizeContentIdentity(track.contentIdentity);
@@ -1418,72 +1572,202 @@ export default function App() {
         currentFile: item.file,
         removed: removedTrackIdsRef.current.has(track.id)
       });
+    const lease = createBackgroundAnalysisLease({
+      epoch: generation,
+      operation: ++backgroundAnalysisOperationRef.current,
+      trackId: track.id,
+      contentIdentity: expectedContentIdentity,
+      fileToken: track.file,
+      kind
+    });
+    if (!lease) return;
+    activeBackgroundAnalysisRef.current = lease;
     setAnalyzingIds((prev) => ({ ...prev, [track.id]: true }));
+    let terminal = "cancelled";
     try {
-      const decoded = await decodeForAnalysis(track.file);
-      if (generation !== analysisGenerationRef.current) return;
-      let basicResult = null;
-      let programLevel = null;
-      let enhancedResult = null;
-      if (needsBasicAnalysis) {
-        basicResult = await getAnalysisClient().analyzeAudioBuffer(decoded);
-        if (generation !== analysisGenerationRef.current) return;
-      } else if (needsProgramLevel && track.programLevelStatus !== "failed") {
-        const result = await getAnalysisClient().analyzeAudioBuffer(decoded);
-        if (generation !== analysisGenerationRef.current) return;
-        programLevel = result.programLevel;
+      if (backgroundAnalysisCircuitRef.current.decode ||
+        (kind === "enhanced" && backgroundAnalysisCircuitRef.current.enhancedRender)) {
+        deferBackgroundAnalysis(track, kind,
+          backgroundAnalysisCircuitRef.current.decode ? "decode" : "enhanced-render", true);
+        terminal = "timed-out";
+        return;
       }
-      if (enhancedTimingAvailable) {
-        try {
-          enhancedResult = await analyzeEnhancedRhythm(decoded, undefined, track.id);
-          if (generation !== analysisGenerationRef.current) return;
-          const currentRow = libraryRef.current.find((item) => item.id === track.id);
-          if (currentRow && ownsCurrentLibraryRow(currentRow)) {
-            setEnhancedFailureByTrack((current) => ({ ...current, [track.id]: false }));
-          }
-        } catch {
-          const currentRow = libraryRef.current.find((item) => item.id === track.id);
-          if (currentRow && ownsCurrentLibraryRow(currentRow)) {
-            setEnhancedFailureByTrack((current) => ({ ...current, [track.id]: true }));
-          }
-          // Basic automatic analysis and Safe Fade remain available.
-        }
-      }
-      if (generation !== analysisGenerationRef.current) return;
-      setLibrary((prev) =>
-        prev.map((item) =>
-          ownsCurrentLibraryRow(item)
-            ? (() => {
-                let current = basicResult
-                  ? { ...mergeGeneratedAnalysis(item, basicResult), programLevelStatus: "ready" }
-                  : item;
-                if (programLevel) current = { ...current, programLevel, programLevelStatus: "ready" };
-                if (enhancedResult) current = mergeEnhancedRhythm(current, enhancedResult);
-                return current;
-              })()
-            : item
-        )
-      );
-    } catch (_err) {
-      if (generation !== analysisGenerationRef.current) return;
-      setLibrary((prev) =>
-        prev.map((item) =>
-          ownsCurrentLibraryRow(item)
+
+      const readController = new AbortController();
+      const read = await runBackgroundStage({
+        lease,
+        stage: "read",
+        task: () => readBlobForBackgroundAnalysis(track.file, readController.signal),
+        onTimeout: () => readController.abort(),
+        onCancel: () => readController.abort()
+      });
+      if (read.outcome !== "completed") {
+        terminal = read.outcome;
+        if (read.outcome === "timed-out") deferBackgroundAnalysis(track, kind, "read", false);
+        if (read.outcome === "failed" && kind === "basic-program") {
+          setLibrary((prev) => prev.map((item) => ownsCurrentLibraryRow(item)
             ? applyQueuedAnalysisFailure(item, needsBasicAnalysis, needsProgramLevel)
-            : item
-        )
-      );
+            : item));
+        } else if (read.outcome === "failed" && kind === "enhanced") {
+          setEnhancedFailureByTrack((current) => ({ ...current, [track.id]: true }));
+        }
+        return;
+      }
+
+      let decodeRuntimeUnavailable = false;
+      const decode = await runBackgroundStage({
+        lease,
+        stage: "decode",
+        task: () => {
+          let analysisCtx;
+          try {
+            analysisCtx = new OfflineAudioContext(1, 1, 44100);
+          } catch (error) {
+            decodeRuntimeUnavailable = true;
+            throw error;
+          }
+          return analysisCtx.decodeAudioData(read.value.slice(0));
+        },
+        onTimeout: () => { backgroundAnalysisCircuitRef.current.decode = true; },
+        onCancel: () => undefined
+      });
+      if (decode.outcome !== "completed") {
+        terminal = decode.outcome;
+        const policy = decideBackgroundDecodeFailure({
+          outcome: decode.outcome,
+          runtimeUnavailable: decodeRuntimeUnavailable
+        });
+        if (policy.deferStage) {
+          deferBackgroundAnalysis(track, kind, policy.deferStage, policy.unabortable);
+        } else if (decode.outcome === "failed" && kind === "basic-program") {
+          setLibrary((prev) => prev.map((item) => ownsCurrentLibraryRow(item)
+            ? applyQueuedAnalysisFailure(item, needsBasicAnalysis, needsProgramLevel)
+            : item));
+        } else if (decode.outcome === "failed" && kind === "enhanced") {
+          setEnhancedFailureByTrack((current) => ({ ...current, [track.id]: true }));
+        }
+        return;
+      }
+      const decoded = decode.value;
+
+      if (kind === "basic-program") {
+        let clientRuntimeUnavailable = false;
+        const basic = await runBackgroundStage({
+          lease,
+          stage: "basic-program",
+          task: () => {
+            try {
+              if (!backgroundAnalysisClientRef.current) backgroundAnalysisClientRef.current = new AnalysisClient();
+            } catch (error) {
+              clientRuntimeUnavailable = true;
+              throw error;
+            }
+            return backgroundAnalysisClientRef.current.analyzeAudioBuffer(decoded);
+          },
+          onTimeout: () => {
+            try { backgroundAnalysisClientRef.current?.dispose?.(); } catch { /* Reset below remains authoritative. */ }
+            backgroundAnalysisClientRef.current = null;
+          },
+          onCancel: () => {
+            try { backgroundAnalysisClientRef.current?.dispose?.(); } catch { /* Reset below remains authoritative. */ }
+            backgroundAnalysisClientRef.current = null;
+          }
+        });
+        if (basic.outcome !== "completed") {
+          terminal = basic.outcome;
+          if (basic.outcome === "timed-out" || (basic.outcome === "failed" && clientRuntimeUnavailable)) {
+            deferBackgroundAnalysis(track, kind, "basic-program", false);
+          } else if (basic.outcome === "failed") {
+            setLibrary((prev) => prev.map((item) => ownsCurrentLibraryRow(item)
+              ? applyQueuedAnalysisFailure(item, needsBasicAnalysis, needsProgramLevel)
+              : item));
+          }
+          return;
+        }
+        if (!ownsBackgroundAnalysisLease(activeBackgroundAnalysisRef.current, lease)) return;
+        setLibrary((prev) => prev.map((item) => {
+          if (!ownsCurrentLibraryRow(item)) return item;
+          if (needsBasicAnalysis) return { ...mergeGeneratedAnalysis(item, basic.value), programLevelStatus: "ready" };
+          if (needsProgramLevel) return { ...item, programLevel: basic.value.programLevel, programLevelStatus: "ready" };
+          return item;
+        }));
+        terminal = "completed";
+        return;
+      }
+
+      const rendered = await runBackgroundStage({
+        lease,
+        stage: "enhanced-render",
+        task: () => canonicalizeForEnhancedRhythm(decoded),
+        onTimeout: () => {
+          backgroundAnalysisCircuitRef.current.enhancedRender = true;
+          backgroundEnhancedAnalysisRef.current?.dispose?.();
+          backgroundEnhancedAnalysisRef.current = null;
+        },
+        onCancel: () => {
+          backgroundEnhancedAnalysisRef.current?.dispose?.();
+          backgroundEnhancedAnalysisRef.current = null;
+        }
+      });
+      if (rendered.outcome !== "completed") {
+        terminal = rendered.outcome;
+        if (rendered.outcome === "timed-out") deferBackgroundAnalysis(track, kind, "enhanced-render", true);
+        if (rendered.outcome === "failed" && ownsCurrentLibraryRow(
+          libraryRef.current.find((item) => item.id === track.id) ?? {}
+        )) setEnhancedFailureByTrack((current) => ({ ...current, [track.id]: true }));
+        return;
+      }
+      let enhancedSession = backgroundEnhancedAnalysisRef.current;
+      const enhanced = await runBackgroundStage({
+        lease,
+        stage: "enhanced-inference",
+        task: () => {
+          if (!enhancedSession) enhancedSession = createEnhancedRhythmAnalysisSession();
+          backgroundEnhancedAnalysisRef.current = enhancedSession;
+          return enhancedSession.analyzePcm(
+            rendered.value,
+            decoded.sampleRate,
+            decoded.duration,
+            undefined,
+            `${generation}:${track.id}`
+          );
+        },
+        onTimeout: () => {
+          backgroundEnhancedAnalysisRef.current?.dispose?.();
+          backgroundEnhancedAnalysisRef.current = null;
+        },
+        onCancel: () => {
+          backgroundEnhancedAnalysisRef.current?.dispose?.();
+          backgroundEnhancedAnalysisRef.current = null;
+        }
+      });
+      try { enhancedSession?.dispose?.(); } catch { /* This exact job no longer owns inference. */ }
+      if (backgroundEnhancedAnalysisRef.current === enhancedSession) backgroundEnhancedAnalysisRef.current = null;
+      if (enhanced.outcome !== "completed") {
+        terminal = enhanced.outcome;
+        if (enhanced.outcome === "timed-out") deferBackgroundAnalysis(track, kind, "enhanced-inference", true);
+        if (enhanced.outcome === "failed" && ownsCurrentLibraryRow(
+          libraryRef.current.find((item) => item.id === track.id) ?? {}
+        )) setEnhancedFailureByTrack((current) => ({ ...current, [track.id]: true }));
+        return;
+      }
+      if (!ownsBackgroundAnalysisLease(activeBackgroundAnalysisRef.current, lease)) return;
+      setEnhancedFailureByTrack((current) => ({ ...current, [track.id]: false }));
+      setLibrary((prev) => prev.map((item) => ownsCurrentLibraryRow(item)
+        ? mergeEnhancedRhythm(item, enhanced.value)
+        : item));
+      terminal = "completed";
     } finally {
+      const stillOwns = ownsBackgroundAnalysisLease(activeBackgroundAnalysisRef.current, lease);
+      if (stillOwns) activeBackgroundAnalysisRef.current = null;
+      const key = backgroundAnalysisJobKey(track.id, kind);
+      queuedAnalysisIdsRef.current.delete(key);
+      if (terminal === "completed") backgroundAnalysisDeferredRef.current.delete(key);
       if (generation === analysisGenerationRef.current) {
-        queuedAnalysisIdsRef.current.delete(track.id);
         setAnalyzingIds((prev) => ({ ...prev, [track.id]: false }));
         const replacement = libraryRef.current.find((item) => item.id === track.id);
-        const replacementNeedsAnalysis = Boolean(replacement &&
-          (!hasCurrentBasicAnalysis(replacement) ||
-            (!normalizeProgramLevel(replacement.programLevel) && replacement.programLevelStatus !== "failed") ||
-            (enhancedTimingAvailable === true && !hasCurrentEnhancedRhythm(replacement))) &&
-          replacement.analysisStatus !== "failed");
-        if (shouldRequeueReplacementAnalysis({
+        const replacementNeedsAnalysis = Boolean(replacement && analysisJobKindForTrack(replacement));
+        if (terminal !== "timed-out" && shouldRequeueReplacementAnalysis({
           removed: removedTrackIdsRef.current.has(track.id),
           currentRowPresent: Boolean(replacement),
           previousJobStillOwnsRow: Boolean(replacement && ownsCurrentLibraryRow(replacement)),
@@ -1493,8 +1777,7 @@ export default function App() {
             if (generation !== analysisGenerationRef.current || removedTrackIdsRef.current.has(track.id)) return;
             const currentReplacement = libraryRef.current.find((item) => item.id === track.id);
             if (!currentReplacement || currentReplacement.file !== replacement.file ||
-              normalizeContentIdentity(currentReplacement.contentIdentity) !==
-                normalizeContentIdentity(replacement.contentIdentity)) return;
+              normalizeContentIdentity(currentReplacement.contentIdentity) !== normalizeContentIdentity(replacement.contentIdentity)) return;
             queueBackgroundAnalysis(currentReplacement);
           });
         }
@@ -1508,14 +1791,25 @@ export default function App() {
     const generation = analysisGenerationRef.current;
     try {
       while (pendingAnalysisQueueRef.current.length) {
-        pendingAnalysisQueueRef.current = sortAnalysisQueue(
+        pendingAnalysisQueueRef.current = sortBackgroundAnalysisJobs(
           pendingAnalysisQueueRef.current,
           analysisPriorityRef.current.loaded,
           analysisPriorityRef.current.queued
         );
-        const nextTrack = pendingAnalysisQueueRef.current.shift();
+        const nextJob = pendingAnalysisQueueRef.current.shift();
         if (generation !== analysisGenerationRef.current) break;
-        if (nextTrack) await analyzeQueuedTrack(nextTrack, generation);
+        if (nextJob) {
+          try {
+            await analyzeQueuedTrack(nextJob, generation);
+          } catch {
+            deferBackgroundAnalysis(
+              nextJob.track,
+              nextJob.kind,
+              nextJob.kind === "enhanced" ? "enhanced-inference" : "basic-program",
+              false
+            );
+          }
+        }
       }
     } finally {
       analysisQueueBusyRef.current = false;
@@ -1524,15 +1818,48 @@ export default function App() {
   };
 
   const queueBackgroundAnalysis = (track) => {
-    if (queuedAnalysisIdsRef.current.has(track.id)) return;
-    queuedAnalysisIdsRef.current.add(track.id);
-    pendingAnalysisQueueRef.current.push(track);
-    pendingAnalysisQueueRef.current = sortAnalysisQueue(
+    const kind = analysisJobKindForTrack(track);
+    if (!kind) return;
+    const key = backgroundAnalysisJobKey(track.id, kind);
+    const deferred = backgroundAnalysisDeferredRef.current.get(key);
+    if (deferred) {
+      const sameContent = ownsQueuedAnalysisLibraryRow({
+        expectedTrackId: track.id,
+        expectedContentIdentity: deferred.contentIdentity,
+        currentTrackId: track.id,
+        currentContentIdentity: track.contentIdentity,
+        expectedFile: deferred.file,
+        currentFile: track.file,
+        removed: removedTrackIdsRef.current.has(track.id)
+      });
+      if (sameContent) return;
+      backgroundAnalysisDeferredRef.current.delete(key);
+    }
+    if (queuedAnalysisIdsRef.current.has(key)) return;
+    queuedAnalysisIdsRef.current.add(key);
+    pendingAnalysisQueueRef.current.push({ id: track.id, track, kind });
+    pendingAnalysisQueueRef.current = sortBackgroundAnalysisJobs(
       pendingAnalysisQueueRef.current,
       analysisPriorityRef.current.loaded,
       analysisPriorityRef.current.queued
     );
     void processAnalysisQueue();
+  };
+
+  const retryDeferredBackgroundAnalysis = () => {
+    if (backgroundAnalysisRetryUsedRef.current || autoPilotEnabledRef.current || autoMixing || autoMixArming ||
+      rehearsalActive || rehearsalPreparing || partyFirstSongLoadRef.current || libraryMutationBusyRef.current ||
+      backgroundAnalysisCircuitRef.current.decode) return;
+    backgroundAnalysisRetryUsedRef.current = true;
+    for (const [key, entry] of backgroundAnalysisDeferredRef.current) {
+      if (isRetryableBackgroundAnalysisDeferral({
+        deferral: entry,
+        decodeCircuitOpen: backgroundAnalysisCircuitRef.current.decode,
+        enhancedRenderCircuitOpen: backgroundAnalysisCircuitRef.current.enhancedRender
+      })) backgroundAnalysisDeferredRef.current.delete(key);
+    }
+    refreshBackgroundAnalysisNotice();
+    for (const track of libraryRef.current) queueBackgroundAnalysis(track);
   };
 
   useEffect(() => {
@@ -1558,14 +1885,41 @@ export default function App() {
   }, [library]);
 
   useEffect(() => {
+    let deferredChanged = false;
+    for (const [key, deferred] of backgroundAnalysisDeferredRef.current) {
+      const current = library.find((track) => track.id === deferred.trackId);
+      const rowStillOwned = Boolean(current && ownsQueuedAnalysisLibraryRow({
+        expectedTrackId: deferred.trackId,
+        expectedContentIdentity: deferred.contentIdentity,
+        currentTrackId: current.id,
+        currentContentIdentity: current.contentIdentity,
+        expectedFile: deferred.file,
+        currentFile: current.file,
+        removed: removedTrackIdsRef.current.has(deferred.trackId)
+      }));
+      const retain = shouldRetainBackgroundAnalysisDeferral({
+        kind: deferred.kind,
+        rowPresent: rowStillOwned,
+        basicProgramComplete: Boolean(current && (current.analysisStatus === "failed" ||
+          (hasCurrentBasicAnalysis(current) &&
+            (normalizeProgramLevel(current.programLevel) || current.programLevelStatus === "failed")))),
+        enhancedComplete: Boolean(current && hasCurrentEnhancedRhythm(current))
+      });
+      if (!retain) {
+        backgroundAnalysisDeferredRef.current.delete(key);
+        deferredChanged = true;
+      }
+    }
+    if (deferredChanged) {
+      refreshBackgroundAnalysisNotice();
+    }
     library
       .filter(
         (track) =>
           (!hasCurrentBasicAnalysis(track) ||
             (!normalizeProgramLevel(track.programLevel) && track.programLevelStatus !== "failed") ||
             (enhancedTimingAvailable === true && !hasCurrentEnhancedRhythm(track))) &&
-          track.analysisStatus !== "failed" &&
-          !queuedAnalysisIdsRef.current.has(track.id)
+          track.analysisStatus !== "failed"
       )
       .forEach(queueBackgroundAnalysis);
   }, [library, enhancedTimingAvailable]);
@@ -2271,12 +2625,16 @@ export default function App() {
     }
     const track = library.find((candidate) => candidate.id === trackId);
     if (!track) return;
+    const analysisDeferralsBeforeRemoval = new Map(
+      [...backgroundAnalysisDeferredRef.current].filter(([, deferred]) => deferred.trackId === trackId)
+    );
+    const analysisWorkWasOwned = activeBackgroundAnalysisRef.current?.trackId === trackId ||
+      pendingAnalysisQueueRef.current.some((job) => job.id === trackId);
     if (partyFirstSongLoadRef.current?.trackId === trackId &&
       !cancelPartyFirstSongLoad({ keepStatus: false })) return;
     if (partyFirstSongLoadStatus?.trackId === trackId) setPartyFirstSongLoadStatus(null);
     removedTrackIdsRef.current.add(trackId);
-    queuedAnalysisIdsRef.current.delete(trackId);
-    pendingAnalysisQueueRef.current = pendingAnalysisQueueRef.current.filter((candidate) => candidate.id !== trackId);
+    cancelBackgroundAnalysisForTrack(trackId);
     pauseAutoPilotForHostControl("Party Autopilot paused · library changed");
     setLibraryMutationLock(true);
     let deletion;
@@ -2284,7 +2642,17 @@ export default function App() {
       deletion = await deleteTrackFromDb(trackId);
     } catch {
       removedTrackIdsRef.current.delete(trackId);
+      restoreBackgroundAnalysisDeferrals(analysisDeferralsBeforeRemoval);
       showToast("Removal failed · this track is still stored · try again");
+      queueMicrotask(() => {
+        const surviving = backgroundAnalysisRowsAfterMutationRollback(
+          libraryRef.current.filter((candidate) => candidate.id === trackId),
+          removedTrackIdsRef.current
+        )[0];
+        if (surviving && analysisWorkWasOwned && analysisDeferralsBeforeRemoval.size === 0) {
+          queueBackgroundAnalysis(surviving);
+        }
+      });
       return;
     } finally {
       setLibraryMutationLock(false);
@@ -2324,13 +2692,17 @@ export default function App() {
       return;
     }
     if (!window.confirm("Remove every imported song, saved analysis, and saved party plan from this browser profile? Active enhanced timing may finish its current local step before memory is released.")) return;
+    const analysisDeferralsBeforeClear = new Map(backgroundAnalysisDeferredRef.current);
     if (!cancelPartyFirstSongLoad({ keepStatus: false })) return;
     setPartyFirstSongLoadStatus(null);
     queuedAnalysisIdsRef.current.clear();
     pendingAnalysisQueueRef.current = [];
+    backgroundAnalysisDeferredRef.current.clear();
+    setBackgroundAnalysisNotice(null);
     for (const track of library) removedTrackIdsRef.current.add(track.id);
     setLibraryMutationLock(true);
     analysisGenerationRef.current += 1;
+    cancelActiveBackgroundAnalysis({ resetEnhanced: true });
     disposeAnalysisClient();
     disposeEnhancedRhythmClient();
     deckARef.current?.eject?.();
@@ -2341,7 +2713,19 @@ export default function App() {
       cleared = await clearTracksFromDb();
     } catch {
       for (const track of library) removedTrackIdsRef.current.delete(track.id);
+      restoreBackgroundAnalysisDeferrals(analysisDeferralsBeforeClear);
       showToast("Removal failed · your music is still stored · try again");
+      queueMicrotask(() => {
+        for (const track of backgroundAnalysisRowsAfterMutationRollback(
+          libraryRef.current,
+          removedTrackIdsRef.current
+        )) {
+          const hasRestoredDeferral = backgroundAnalysisDeferredRef.current.has(
+            backgroundAnalysisJobKey(track.id, "basic-program")
+          ) || backgroundAnalysisDeferredRef.current.has(backgroundAnalysisJobKey(track.id, "enhanced"));
+          if (!hasRestoredDeferral) queueBackgroundAnalysis(track);
+        }
+      });
       return;
     } finally {
       setLibraryMutationLock(false);
@@ -4305,6 +4689,10 @@ export default function App() {
       const activeSchedule = activeTransitionScheduleRef.current;
       const rehearsalCancel = rehearsalCancelRef.current;
       const runtime = transitionArmLeaseRef.current;
+      analysisGenerationRef.current += 1;
+      cancelActiveBackgroundAnalysis({ resetEnhanced: true, announceUnabortable: false });
+      try { disposeAnalysisClient(); } catch { /* Host teardown continues. */ }
+      try { disposeEnhancedRhythmClient(); } catch { /* Host teardown continues. */ }
       partyFirstSongLoadRef.current = null;
       try { if (partyFirstSongLoadTimerRef.current) window.clearTimeout(partyFirstSongLoadTimerRef.current.id); } catch { /* Host teardown continues. */ }
       partyFirstSongLoadTimerRef.current = null;
@@ -5388,6 +5776,18 @@ export default function App() {
             </div>
           )}
           {libraryAnalysisSaveError && <p className="library-storage-error" role="alert">{libraryAnalysisSaveError}</p>}
+          {backgroundAnalysisNotice && (
+            <div className="library-storage-error" role="status" aria-live="polite" aria-atomic="true">
+              <p>{backgroundAnalysisNotice.message}</p>
+              {backgroundAnalysisNotice.retryable && (
+                <button
+                  type="button"
+                  disabled={libraryMutationBusy || autoPilotEnabled || autoMixing || autoMixArming || rehearsalActive || rehearsalPreparing || partyFirstSongOpening}
+                  onClick={retryDeferredBackgroundAnalysis}
+                >RETRY LOCAL ANALYSIS</button>
+              )}
+            </div>
+          )}
           {Object.values(libraryTimingSaveErrors).map((message, index) => (
             <p key={`${message}-${index}`} className="library-storage-error" role="alert">{message}</p>
           ))}
@@ -5525,6 +5925,8 @@ export default function App() {
               const loadedB = loadedByDeck.b === track.id;
               const analyzing = !!analyzingIds[track.id];
               const enhancedFailed = !!enhancedFailureByTrack[track.id];
+              const analysisDeferred = backgroundAnalysisDeferredRef.current.has(backgroundAnalysisJobKey(track.id, "basic-program")) ||
+                backgroundAnalysisDeferredRef.current.has(backgroundAnalysisJobKey(track.id, "enhanced"));
               const programLevel = normalizeProgramLevel(track.programLevel);
               const levelUnavailable = track.programLevelStatus === "failed" ||
                 (programLevel && programLevel.measurement.status !== "measured");
@@ -5629,6 +6031,8 @@ export default function App() {
                   <div className="cell mix-readiness-cell">
                     {analyzing
                       ? "FINDING THE BEAT…"
+                      : analysisDeferred
+                        ? "ANALYSIS DEFERRED THIS SESSION · PLAYBACK NOT YET CHECKED"
                       : unavailableAutoPilotTrackIds.includes(track.id)
                         ? "COULDN’T OPEN · SKIPPED FOR THIS PARTY"
                       : timedOutAutoPilotTrackIds.includes(track.id)

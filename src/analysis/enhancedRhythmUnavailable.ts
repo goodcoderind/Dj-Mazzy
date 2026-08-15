@@ -21,6 +21,19 @@ export const removeEnhancedRhythmModel = async () => caches.delete(timingCacheNa
 
 export const disposeEnhancedRhythmClient = () => {};
 
+export const canonicalizeForEnhancedRhythm = async () => {
+  throw new Error("Enhanced timing is not included in this build.");
+};
+
+export const analyzeEnhancedRhythmPcm = async () => {
+  throw new Error("Enhanced timing is not included in this build.");
+};
+
+export const createEnhancedRhythmAnalysisSession = () => ({
+  analyzePcm: async () => { throw new Error("Enhanced timing is not included in this build."); },
+  dispose: () => undefined
+});
+
 export const analyzeEnhancedRhythm = async () => {
   throw new Error("Enhanced timing is not included in this build.");
 };
