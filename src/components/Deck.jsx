@@ -1,16 +1,80 @@
-import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
+import { forwardRef, useEffect, useId, useImperativeHandle, useMemo, useRef, useState } from "react";
+import { ownsEnhancedTimingAdmission } from "../analysis/enhancedTimingAdmission";
 import WaveSurfer from "wavesurfer.js";
-import MusicTempoModule from "music-tempo";
-import { getAudioContext } from "../audioContext";
+import { getAudioEngine } from "../audioContext";
+import { DECK_LOAD_OUTCOME } from "../audio/deckLoadOutcome";
+import {
+  commitDeckTransportStart,
+  deckPlaybackStartIsLocked,
+  ownsDeferredDeckInteraction,
+  partySetupRevokesDeckTransport,
+  runDeckLoadInvalidationBoundary
+} from "./deckInteractionLifecycle";
+import {
+  DECK_LOAD_PURPOSE,
+  DECK_LOAD_READINESS_VERSION,
+  commitDecodedDeckReadiness,
+  decideDeckLoadReadiness,
+  runDeckPostDecodeLoad
+} from "../audio/deckLoadReadiness";
+import { AnalysisClient, getAnalysisClient } from "../analysis/AnalysisClient";
+import { hasCurrentBasicAnalysis } from "../analysis/analysisVersion";
+import { normalizeProgramLevel } from "../analysis/programLevel";
+import { programLevelFailurePolicy } from "../analysis/programLevelRuntime";
+import {
+  buildEffectiveBeatGrid,
+  emptyBeatGridOverrides,
+  nudgeBeatGrid,
+  normalizeBeatGridOverrides,
+  scaleCorrectedBpm,
+  setBeatAtTime,
+  setDownbeatAtTime
+} from "../analysis/beatGridCorrections";
+import BeatGridOverlay from "./BeatGridOverlay";
+import { startBeatGridAudition } from "../audio/BeatGridAudition";
+import {
+  captureDeckTransportAuthority,
+  createDeckTransportAuthority,
+  invalidateDeckTransportAuthority,
+  ownsDeckTransportAuthority
+} from "../audio/deckTransportAuthority";
+import { appendTap, applyTapTempo, estimateTapTempo, MIN_TAP_COUNT } from "../analysis/tapTempo";
+import { createTimingReview, isTimingReviewCurrent } from "../domain/timingReview";
+import { analyzeEnhancedRhythm } from "@mazzy/enhanced-rhythm";
+import { mergeEnhancedRhythm } from "../analysis/mergeEnhancedRhythm";
+import { hasCurrentEnhancedRhythm } from "../analysis/enhancedRhythmVersion";
 
 const clampTempo = (value) => Math.max(0.5, Math.min(1.5, value));
-const MusicTempo = MusicTempoModule.default ?? MusicTempoModule;
+const manualGridFields = (overrides) => ({
+  correctedBpm: overrides.correctedBpm ?? null,
+  firstBeatSeconds: overrides.firstBeatSeconds ?? null,
+  firstDownbeatBeatIndex: overrides.firstDownbeatBeatIndex ?? null
+});
+const manualGridChanged = (before, after) =>
+  JSON.stringify(manualGridFields(before)) !== JSON.stringify(manualGridFields(after));
 
-const readFileAsArrayBuffer = (file) =>
+const readFileAsArrayBuffer = (file, signal) =>
   new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.onload = () => resolve(reader.result);
-    reader.onerror = () => reject(new Error("Failed to read audio file"));
+    let settled = false;
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener?.("abort", onAbort);
+      callback(value);
+    };
+    const onAbort = () => {
+      try { reader.abort(); } catch { /* reader already settled */ }
+      finish(reject, new Error("Audio file read cancelled"));
+    };
+    reader.onload = () => finish(resolve, reader.result);
+    reader.onerror = () => finish(reject, new Error("Failed to read audio file"));
+    reader.onabort = () => finish(reject, new Error("Audio file read cancelled"));
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
+    signal?.addEventListener?.("abort", onAbort, { once: true });
     reader.readAsArrayBuffer(file);
   });
 
@@ -51,9 +115,29 @@ const Deck = forwardRef(function Deck(
     otherBpm,
     onBpmChange,
     onTrackLoaded,
-    onKeyDetected,
+    onAnalysisDetected,
+    onEnhancedRhythmDetected,
+    onProgramLevelDetected,
+    enhancedTimingAvailable,
+    enhancedTimingAdmissionRef,
+    onAnalysisOverrideChange,
+    onTimingReviewSave,
+    onTimingReviewRemove,
+    librarySaveStatus,
     onDeckPlayStart,
-    flash
+    onDeckTransportStart,
+    onDeckLoadInvalidated,
+    onAuxAudioStart,
+    onStopAllSound,
+    onDeckPlaybackCompletion,
+    onAudioStartError,
+    playbackStartLocked = false,
+    playbackStartLockRef,
+    playbackStartOwnerRef,
+    flash,
+    transitionLocked = false,
+    rehearsalLocked = false,
+    partySetupLocked = false
   },
   ref
 ) {
@@ -63,20 +147,44 @@ const Deck = forwardRef(function Deck(
   const lastObjectUrlRef = useRef(null);
   const rafRef = useRef(0);
   const releaseRafRef = useRef(0);
-
-  const deckStateRef = useRef({
-    buffer: null,
-    gainNode: null,
-    lowFilter: null,
-    midFilter: null,
-    highFilter: null,
-    sourceNode: null,
-    isPlaying: false,
-    startTime: 0,
-    startOffset: 0,
-    playbackRate: 1,
-    originalPlaybackRate: 1
+  const currentTrackIdRef = useRef(null);
+  const loadGenerationRef = useRef(0);
+  const loadAuthorityKeyRef = useRef(null);
+  const transportAuthorityRef = useRef(createDeckTransportAuthority());
+  const loadAbortControllerRef = useRef(null);
+  const isolatedAnalysisClientRef = useRef(null);
+  const loadReadinessRef = useRef(null);
+  const metronomeAuditionGenerationRef = useRef(0);
+  const metronomeCancelRef = useRef(null);
+  const metronomeUiTimerRef = useRef(0);
+  const clickPulseTimersRef = useRef([]);
+  const timingWizardTriggerRef = useRef(null);
+  const timingWizardDialogRef = useRef(null);
+  const timingWizardCloseRef = useRef(null);
+  const timingWizardTitleId = useId();
+  const timingWizardDescriptionId = useId();
+  const deckEngineRef = useRef(null);
+  const interactionLocked = transitionLocked || rehearsalLocked;
+  const manualInteractionLocked = interactionLocked || partySetupLocked;
+  const playbackStartIsLocked = (startAuthorityKey = null) => deckPlaybackStartIsLocked({
+    renderedLocked: playbackStartLocked,
+    mutableLocked: Boolean(playbackStartLockRef?.current),
+    activeOwnerKey: playbackStartOwnerRef?.current ?? null,
+    requestOwnerKey: startAuthorityKey
   });
+  const startOrLoadLocked = manualInteractionLocked || playbackStartIsLocked();
+  const interactionLockedRef = useRef(manualInteractionLocked);
+  const onDeckPlaybackCompletionRef = useRef(onDeckPlaybackCompletion);
+  interactionLockedRef.current = manualInteractionLocked;
+  onDeckPlaybackCompletionRef.current = onDeckPlaybackCompletion;
+  if (!deckEngineRef.current) {
+    deckEngineRef.current = getAudioEngine().getDeck(channel);
+  }
+  const deckEngine = deckEngineRef.current;
+
+  useEffect(() => deckEngine.subscribePlaybackCompletion((event) => {
+    onDeckPlaybackCompletionRef.current?.(channel, event);
+  }), [channel, deckEngine]);
 
   const [fileReady, setFileReady] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -93,241 +201,469 @@ const Deck = forwardRef(function Deck(
   const [rotationDuration, setRotationDuration] = useState(1.8);
   const [eq, setEq] = useState({ low: 0, mid: 0, high: 0 });
   const [eqKill, setEqKill] = useState({ low: false, mid: false, high: false });
+  const [deckStatus, setDeckStatus] = useState(deckEngine.getSnapshot().status);
+  const [analysisRecord, setAnalysisRecord] = useState(null);
+  const [runtimeProgramLevel, setRuntimeProgramLevel] = useState(null);
+  const [loadReadiness, setLoadReadiness] = useState(null);
+  const [programLevelRuntimeStatus, setProgramLevelRuntimeStatus] = useState("pending");
+  const [metronomeActive, setMetronomeActive] = useState(false);
+  const [clickPulse, setClickPulse] = useState(null);
+  const [timingWizard, setTimingWizard] = useState(null);
+  const [tapTimes, setTapTimes] = useState([]);
+  const [timingReviewSaveStatus, setTimingReviewSaveStatus] = useState("idle");
   const eqBeforeKillRef = useRef({ low: 0, mid: 0, high: 0 });
-  const currentTrackIdRef = useRef(null);
+
+  const effectiveGrid = useMemo(
+    () =>
+      analysisRecord
+        ? buildEffectiveBeatGrid(analysisRecord)
+        : {
+            bpm: null,
+            beatsSeconds: [],
+            downbeatsSeconds: [],
+            meter: 4,
+            overrides: emptyBeatGridOverrides(),
+            isManual: false
+          },
+    [analysisRecord]
+  );
+  const previewAnalysis = timingWizard && analysisRecord
+    ? { ...analysisRecord, analysisOverrides: timingWizard.draftOverrides }
+    : analysisRecord;
+  const previewGrid = useMemo(
+    () => previewAnalysis ? buildEffectiveBeatGrid(previewAnalysis) : effectiveGrid,
+    [previewAnalysis, effectiveGrid]
+  );
+  const tapEstimate = useMemo(() => estimateTapTempo(tapTimes), [tapTimes]);
+  const savedTimingReview = analysisRecord?.timingReview &&
+    isTimingReviewCurrent(analysisRecord.timingReview, analysisRecord)
+    ? analysisRecord.timingReview
+    : null;
+  const automaticTrust = analysisRecord?.automaticRhythmTrust ?? null;
+  const currentProgramLevel = normalizeProgramLevel(analysisRecord?.programLevel) ??
+    normalizeProgramLevel(runtimeProgramLevel);
+  const programLevelRangeLabel = currentProgramLevel?.measurement.loudnessRangeLu == null
+    ? "level range unavailable"
+    : `level range ${currentProgramLevel.measurement.loudnessRangeLu.toFixed(1)} LU${currentProgramLevel.measurement.loudnessRangeStatus === "provisional" ? " · early estimate" : ""}`;
+  const programLevelLabel = programLevelRuntimeStatus === "failed"
+    ? "level check failed · no trim"
+    : programLevelRuntimeStatus === "deferred"
+    ? "no loudness trim for this play"
+    : !currentProgramLevel
+    ? "automatic loudness trim pending"
+    : currentProgramLevel.measurement.status === "measured"
+      ? `automatic loudness trim ${currentProgramLevel.normalization.trimDb > 0 ? "+" : ""}${currentProgramLevel.normalization.trimDb.toFixed(1)} dB · ${programLevelRangeLabel}`
+      : currentProgramLevel.measurement.status === "unsupported-channels"
+        ? "loudness matching unavailable for this file · no trim"
+        : currentProgramLevel.measurement.status === "silence"
+          ? "loudness not measured · no trim"
+          : "loudness analysis unavailable · no trim";
+  const currentEnhancedTiming = hasCurrentEnhancedRhythm(analysisRecord);
+  const automaticBarHandoff = currentEnhancedTiming &&
+    ["bar-cut-candidate", "short-sync-candidate", "long-candidate"].includes(automaticTrust?.tier);
+  const automaticTimingLabel = !analysisRecord
+    ? loadReadiness?.safeFadeOnly === true
+      ? "No timing grid for this play — Safe Fade ready"
+      : "Waiting for automatic analysis"
+    : effectiveGrid.isManual
+      ? "Manual timing — safe transitions only"
+      : automaticBarHandoff
+        ? "Automatic bar timing found"
+      : automaticTrust?.tier === "reject"
+        ? "Timing uncertain — Safe transition ready"
+        : "Automatic timing checked — Safe transition ready";
 
   const ensureGraphReady = async () => {
-    const audioContext = getAudioContext();
-    if (audioContext.state === "suspended") {
-      await audioContext.resume();
-    }
-    if (!deckStateRef.current.gainNode) {
-      const lowFilter = audioContext.createBiquadFilter();
-      lowFilter.type = "lowshelf";
-      lowFilter.frequency.value = 320;
-
-      const midFilter = audioContext.createBiquadFilter();
-      midFilter.type = "peaking";
-      midFilter.frequency.value = 1000;
-      midFilter.Q.value = 0.5;
-
-      const highFilter = audioContext.createBiquadFilter();
-      highFilter.type = "highshelf";
-      highFilter.frequency.value = 3200;
-
-      const gainNode = audioContext.createGain();
-      gainNode.gain.value = 1;
-      lowFilter.connect(midFilter);
-      midFilter.connect(highFilter);
-      highFilter.connect(gainNode);
-      gainNode.connect(audioContext.destination);
-      deckStateRef.current.lowFilter = lowFilter;
-      deckStateRef.current.midFilter = midFilter;
-      deckStateRef.current.highFilter = highFilter;
-      deckStateRef.current.gainNode = gainNode;
-    }
+    const engine = getAudioEngine();
+    await engine.resume();
     contextReadyRef.current = true;
-    return audioContext;
+    return engine.context;
   };
 
-  const getCurrentTime = () => {
-    const deck = deckStateRef.current;
-    if (!deck.isPlaying || !deck.sourceNode) {
-      return deck.startOffset;
+  const getCurrentTime = () => deckEngine.getPosition();
+
+  const play = async (
+    offset = null,
+    when = null,
+    notifyMaster = true,
+    startAuthority = null,
+    startAuthorityKey = null,
+    claimStartCommit = null
+  ) => {
+    if (playbackStartIsLocked(startAuthorityKey)) return false;
+    const transportRevision = captureDeckTransportAuthority(transportAuthorityRef.current);
+    try {
+      await ensureGraphReady();
+    } catch {
+      onAudioStartError?.(getAudioEngine().context.state);
+      return false;
     }
-    const audioContext = getAudioContext();
-    return deck.startOffset + (audioContext.currentTime - deck.startTime) * deck.playbackRate;
-  };
-
-  const stopSource = () => {
-    const deck = deckStateRef.current;
-    if (deck.sourceNode) {
-      try {
-        deck.sourceNode.stop();
-      } catch (_err) {
-        // Source might already be stopped.
-      }
-      deck.sourceNode.disconnect();
-      deck.sourceNode = null;
-    }
-  };
-
-  const play = async (offset = null, when = null, notifyMaster = true) => {
-    const audioContext = await ensureGraphReady();
-    const deck = deckStateRef.current;
-    if (!deck.buffer) {
+    if (!ownsDeckTransportAuthority(transportAuthorityRef.current, transportRevision) ||
+      playbackStartIsLocked(startAuthorityKey) || (startAuthority && !startAuthority())) return false;
+    if (!deckEngine.isReady()) {
       return false;
     }
 
-    stopSource();
-
-    const requestedOffset = offset == null ? getCurrentTime() : offset;
-    const safeOffset = Math.max(0, Math.min(requestedOffset, Math.max(deck.buffer.duration - 0.01, 0)));
-    const startAt = when == null ? audioContext.currentTime : Math.max(when, audioContext.currentTime);
-
-    const source = audioContext.createBufferSource();
-    source.buffer = deck.buffer;
-    source.playbackRate.value = deck.playbackRate;
-    source.connect(deck.lowFilter);
-    source.onended = () => {
-      if (deckStateRef.current.sourceNode === source) {
-        deckStateRef.current.sourceNode = null;
-        deckStateRef.current.isPlaying = false;
-        setIsPlaying(false);
-      }
-    };
-
-    deck.startOffset = safeOffset;
-    deck.startTime = startAt;
-    deck.sourceNode = source;
-    deck.isPlaying = true;
-    setIsPlaying(true);
-
+    const statusBeforePlay = deckEngine.getSnapshot().status;
+    const startAt = when == null ? getAudioEngine().clock.now() : when;
+    if (!ownsDeckTransportAuthority(transportAuthorityRef.current, transportRevision) ||
+      (startAuthority && !startAuthority())) return false;
+    const committedStart = commitDeckTransportStart({
+      start: () => deckEngine.play(offset ?? undefined, startAt),
+      ownsAuthority: () => ownsDeckTransportAuthority(transportAuthorityRef.current, transportRevision) &&
+        !playbackStartIsLocked(startAuthorityKey) && (!startAuthority || startAuthority()) &&
+        (!claimStartCommit || claimStartCommit()),
+      rollback: () => deckEngine.pause(),
+      notify: () => onDeckTransportStart?.(
+        channel,
+        currentTrackIdRef.current,
+        loadReadinessRef.current?.loadAuthorityKey ?? null
+      )
+    });
+    if (committedStart == null) return false;
     if (when == null) {
-      const logPrefix = title === "Deck A" ? "Playing deck A, gain:" : `Playing ${title}, gain:`;
-      console.log(logPrefix, deck.gainNode.gain.value);
-      source.start(0, safeOffset);
       if (notifyMaster) {
-        onDeckPlayStart?.(channel);
+        onDeckPlayStart?.(
+          channel,
+          statusBeforePlay === "ended" ? "restart" : statusBeforePlay === "paused" ? "resume" : "start"
+        );
       }
-    } else {
-      source.start(startAt, safeOffset);
     }
     return true;
   };
 
+  const playReadyAtIfRunning = (startTime, offset = 0, startAuthority = null) => {
+    if (playbackStartIsLocked() || getAudioEngine().context.state !== "running") return null;
+    const transportRevision = captureDeckTransportAuthority(transportAuthorityRef.current);
+    const before = deckEngine.getSnapshot();
+    if (!ownsDeckTransportAuthority(transportAuthorityRef.current, transportRevision) ||
+      (startAuthority && !startAuthority()) || before.status !== "ready" || !deckEngine.isReady()) return null;
+    const scheduledStart = commitDeckTransportStart({
+      start: () => deckEngine.play(offset, startTime),
+      ownsAuthority: () => ownsDeckTransportAuthority(transportAuthorityRef.current, transportRevision) &&
+        !playbackStartIsLocked() && (!startAuthority || startAuthority()),
+      rollback: () => deckEngine.pause(),
+      notify: () => onDeckTransportStart?.(
+        channel,
+        currentTrackIdRef.current,
+        loadReadinessRef.current?.loadAuthorityKey ?? null
+      )
+    });
+    if (scheduledStart == null) return null;
+    return Object.freeze({ scheduledStart, snapshot: deckEngine.getSnapshot() });
+  };
+
   const pause = () => {
-    const deck = deckStateRef.current;
-    deck.startOffset = getCurrentTime();
-    deck.isPlaying = false;
-    setIsPlaying(false);
-    stopSource();
+    invalidateDeckTransportAuthority(transportAuthorityRef.current);
+    stopMetronomeAudition();
+    return deckEngine.pause();
   };
 
   const seek = async (seconds) => {
-    const deck = deckStateRef.current;
-    if (!deck.buffer) {
+    if (manualInteractionLocked || playbackStartIsLocked()) return false;
+    stopMetronomeAudition();
+    if (timingWizard?.step === 2) setTapTimes([]);
+    const snapshot = deckEngine.getSnapshot();
+    if (!deckEngine.isReady()) {
       return;
     }
-    const safeOffset = Math.max(0, Math.min(seconds, Math.max(deck.buffer.duration - 0.01, 0)));
-    const wasPlaying = deck.isPlaying;
-
-    if (wasPlaying) {
-      await play(safeOffset);
-    } else {
-      deck.startOffset = safeOffset;
-    }
+    const safeOffset = Math.max(0, Math.min(seconds, Math.max(snapshot.durationSeconds - 0.01, 0)));
+    deckEngine.seek(safeOffset);
 
     setScratch(true);
     window.setTimeout(() => setScratch(false), 140);
 
-    wavesurferRef.current?.seekTo(safeOffset / deck.buffer.duration);
+    wavesurferRef.current?.seekTo(safeOffset / snapshot.durationSeconds);
     setCurrentTimeSec(safeOffset);
+    return true;
   };
 
-  const detectKey = async (audioBuffer) => {
-    console.log("detecting key...");
-    const rawData = audioBuffer.getChannelData(0);
-    const sampleRate = audioBuffer.sampleRate;
-    const fftSize = 4096;
-    const halfBins = fftSize / 2;
-    const numSamples = 10;
-    const chroma = new Float32Array(12);
-    const majorTemplate = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88];
-    const minorTemplate = [6.33, 2.68, 3.52, 5.38, 2.6, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17];
-    const noteNames = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
-    const windowed = new Float32Array(fftSize);
-    const real = new Float32Array(halfBins);
-    const imag = new Float32Array(halfBins);
-
-    for (let i = 0; i < numSamples; i++) {
-      const center = Math.floor((rawData.length * (i + 1)) / (numSamples + 1));
-      const start = Math.max(0, Math.min(center - Math.floor(fftSize / 2), rawData.length - fftSize));
-      for (let n = 0; n < fftSize; n++) {
-        const hann = 0.5 * (1 - Math.cos((2 * Math.PI * n) / (fftSize - 1)));
-        windowed[n] = (rawData[start + n] || 0) * hann;
-      }
-      for (let k = 0; k < halfBins; k++) {
-        let sumRe = 0;
-        let sumIm = 0;
-        for (let n = 0; n < fftSize; n++) {
-          const angle = (2 * Math.PI * k * n) / fftSize;
-          sumRe += windowed[n] * Math.cos(angle);
-          sumIm -= windowed[n] * Math.sin(angle);
-        }
-        real[k] = sumRe;
-        imag[k] = sumIm;
-      }
-      for (let bin = 1; bin < halfBins; bin++) {
-        const freq = (bin * sampleRate) / fftSize;
-        if (freq < 80 || freq > 4000) continue;
-        const pitchClass = Math.round(12 * Math.log2(freq / 440)) % 12;
-        const pc = ((pitchClass % 12) + 12) % 12;
-        const magnitude = Math.sqrt(real[bin] * real[bin] + imag[bin] * imag[bin]);
-        chroma[pc] += magnitude;
-      }
-    }
-
-    let bestScore = -Infinity;
-    let bestKey = "C";
-    let bestScale = "major";
-    for (let root = 0; root < 12; root++) {
-      let majorScore = 0;
-      let minorScore = 0;
-      for (let i = 0; i < 12; i++) {
-        majorScore += chroma[(i + root) % 12] * majorTemplate[i];
-        minorScore += chroma[(i + root) % 12] * minorTemplate[i];
-      }
-      if (majorScore > bestScore) {
-        bestScore = majorScore;
-        bestKey = noteNames[root];
-        bestScale = "major";
-      }
-      if (minorScore > bestScore) {
-        bestScore = minorScore;
-        bestKey = noteNames[root];
-        bestScale = "minor";
-      }
-    }
-    console.log("detected key:", bestKey, bestScale);
-    return { key: bestKey, scale: bestScale };
+  const applyAnalysis = (result, trackId, reportToLibrary = true) => {
+    const nextRecord = {
+      ...result,
+      analysisStatus: "ready",
+      analysisOverrides: normalizeBeatGridOverrides(result.analysisOverrides)
+    };
+    const grid = buildEffectiveBeatGrid(nextRecord);
+    setAnalysisRecord(nextRecord);
+    setOriginalBpm(grid.bpm);
+    setBpmLabel(grid.bpm == null ? "n/a" : String(Math.round(grid.bpm * 10) / 10));
+    onBpmChange(channel, grid.bpm);
+    const keyString =
+      result.key && result.scale
+        ? `${result.key} ${result.scale === "major" ? "maj" : "min"}`
+        : "--";
+    setKeyLabel(keyString);
+    if (trackId && reportToLibrary) onAnalysisDetected?.(trackId, result);
   };
 
-  const analyzeBpm = async (audioBuffer) => {
+  const commitGridOverrides = (overrides) => {
+    if (!analysisRecord) return;
+    const normalized = normalizeBeatGridOverrides(overrides);
+    const nextRecord = { ...analysisRecord, analysisOverrides: normalized, timingReview: null };
+    const grid = buildEffectiveBeatGrid(nextRecord);
+    setAnalysisRecord(nextRecord);
+    setOriginalBpm(grid.bpm);
+    setBpmLabel(grid.bpm == null ? "n/a" : String(Math.round(grid.bpm * 10) / 10));
+    onBpmChange(channel, grid.bpm);
+    onAnalysisOverrideChange?.(currentTrackIdRef.current, normalized);
+  };
+
+  const stopMetronomeAudition = () => {
+    metronomeAuditionGenerationRef.current += 1;
+    metronomeCancelRef.current?.();
+    metronomeCancelRef.current = null;
+    window.clearTimeout(metronomeUiTimerRef.current);
+    clickPulseTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+    clickPulseTimersRef.current = [];
+    setClickPulse(null);
+    setMetronomeActive(false);
+  };
+
+  const auditionBeatGrid = async () => {
+    if (metronomeActive) {
+      stopMetronomeAudition();
+      return;
+    }
+    if (interactionLockedRef.current || playbackStartIsLocked() ||
+      !deckEngine.isActive() || !previewGrid.beatsSeconds.length) return;
+    const auditionGeneration = ++metronomeAuditionGenerationRef.current;
+    const transportRevision = captureDeckTransportAuthority(transportAuthorityRef.current);
+    const engine = getAudioEngine();
+    await engine.resume();
+    if (!ownsDeckTransportAuthority(transportAuthorityRef.current, transportRevision) ||
+      auditionGeneration !== metronomeAuditionGenerationRef.current || interactionLockedRef.current ||
+      playbackStartIsLocked()) return;
+    const audition = startBeatGridAudition(engine, {
+      beatsSeconds: previewGrid.beatsSeconds,
+      downbeatsSeconds: previewGrid.downbeatsSeconds,
+      playbackRate: deckEngine.getPlaybackRate(),
+      getTrackPosition: (audioTime) => deckEngine.getPosition(audioTime),
+      maxBeats: 16
+    });
+    if (!audition.events.length) return;
+    onAuxAudioStart?.();
+    metronomeCancelRef.current = audition.cancel;
+    setMetronomeActive(true);
+    clickPulseTimersRef.current = audition.events.flatMap((event) => {
+      const delayMs = Math.max(0, (event.audioTime - engine.clock.now()) * 1000);
+      const showTimer = window.setTimeout(
+        () => setClickPulse(event.downbeat ? "one" : "beat"),
+        delayMs
+      );
+      const hideTimer = window.setTimeout(() => setClickPulse(null), delayMs + 110);
+      return [showTimer, hideTimer];
+    });
+    const finalEvent = audition.events[audition.events.length - 1];
+    const remainingMs = Math.max(100, (finalEvent.audioTime - engine.clock.now() + 0.1) * 1000);
+    metronomeUiTimerRef.current = window.setTimeout(stopMetronomeAudition, remainingMs);
+  };
+
+  useEffect(() => {
+    if (playbackStartLocked) stopMetronomeAudition();
+  }, [playbackStartLocked]);
+
+  useEffect(() => {
+    if (!partySetupRevokesDeckTransport({
+      partySetupLocked,
+      activeStartOwnerKey: playbackStartOwnerRef?.current ?? null
+    })) return;
+    invalidateDeckTransportAuthority(transportAuthorityRef.current);
+    stopMetronomeAudition();
+    setTapTimes([]);
+    setTimingWizard(null);
+    setTimingReviewSaveStatus("idle");
+  }, [partySetupLocked, playbackStartOwnerRef]);
+
+  const openTimingWizard = () => {
+    if (!analysisRecord || manualInteractionLocked) return;
+    stopMetronomeAudition();
+    setTapTimes([]);
+    setTimingWizard({
+      step: 0,
+      trackId: currentTrackIdRef.current,
+      loadGeneration: loadGenerationRef.current,
+      originalOverrides: normalizeBeatGridOverrides(analysisRecord.analysisOverrides),
+      draftOverrides: normalizeBeatGridOverrides(analysisRecord.analysisOverrides),
+      changed: false,
+      adjustmentChanged: false,
+      initialVerdict: null,
+      tempoAction: previewGrid.bpm ? "unchanged" : "not_available",
+      tapEstimate: null,
+      beatAction: "kept",
+      downbeatAction: previewGrid.downbeatsSeconds.length ? "kept" : "skipped",
+      beginningAuditioned: false,
+      laterAuditioned: false,
+      beginningVerdict: "not_checked",
+      laterVerdict: "not_checked"
+    });
+    setTimingReviewSaveStatus("idle");
+  };
+
+  const playTimingCheckAt = async (positionSeconds) => {
+    if (manualInteractionLocked || playbackStartIsLocked()) return;
+    const startAuthority = () => !interactionLockedRef.current &&
+      !playbackStartIsLocked();
+    stopMetronomeAudition();
+    if (!await seek(positionSeconds)) return;
+    if (!startAuthority()) return;
+    if (!deckEngine.isActive() && !await play(positionSeconds, null, true, startAuthority)) return;
+    if (!startAuthority()) return;
+    await auditionBeatGrid();
+  };
+
+  const closeTimingWizard = () => {
+    stopMetronomeAudition();
+    setTapTimes([]);
+    setTimingWizard(null);
+    window.setTimeout(() => timingWizardTriggerRef.current?.focus(), 0);
+  };
+
+  const updateTimingDraft = (draftOverrides, responses = {}) => {
+    if (manualInteractionLocked) return;
+    setTimingWizard((current) => current ? {
+      ...current,
+      draftOverrides: normalizeBeatGridOverrides({ ...draftOverrides, autoMixDisabled: true }),
+      changed: true,
+      adjustmentChanged: true,
+      ...responses
+    } : current);
+  };
+
+  const draftAnalysis = () => analysisRecord && timingWizard
+    ? { ...analysisRecord, analysisOverrides: timingWizard.draftOverrides }
+    : analysisRecord;
+
+  const chooseTempoInterpretation = (factor) => {
+    if (manualInteractionLocked || !analysisRecord || !timingWizard) return;
+    const original = { ...analysisRecord, analysisOverrides: timingWizard.originalOverrides };
+    updateTimingDraft({
+      ...timingWizard.draftOverrides,
+      ...scaleCorrectedBpm(original, factor)
+    }, { tempoAction: factor < 1 ? "halved" : "doubled", step: 3 });
+  };
+
+  const tapNaturalBeat = () => {
+    if (manualInteractionLocked || !timingWizard || !isPlaying) return;
+    const audioTime = getAudioEngine().clock.now();
+    setTapTimes((current) => appendTap(current, deckEngine.getPosition(audioTime)));
+  };
+
+  const applyTappedPulse = () => {
+    if (manualInteractionLocked) return;
+    const source = draftAnalysis();
+    if (!source || !tapEstimate) return;
+    updateTimingDraft(applyTapTempo(source, tapEstimate), {
+      tempoAction: "tapped",
+      tapEstimate,
+      beatAction: "aligned"
+    });
+  };
+
+  const saveTimingWizard = async () => {
+    if (manualInteractionLocked || !timingWizard || !analysisRecord) return;
+    if (
+      timingWizard.loadGeneration !== loadGenerationRef.current ||
+      timingWizard.trackId !== currentTrackIdRef.current
+    ) {
+      setTimingReviewSaveStatus("error");
+      return;
+    }
+    const overrides = normalizeBeatGridOverrides({
+      ...timingWizard.draftOverrides,
+      autoMixDisabled: true
+    });
+    const expectedLoadGeneration = loadGenerationRef.current;
+    const expectedTrackId = currentTrackIdRef.current;
+    let review;
     try {
-      const pcmData = audioBuffer.getChannelData(0);
-      const sampleRate = audioBuffer.sampleRate;
-      const hopSize = Math.max(128, Math.round(sampleRate * 0.01));
-      const mt = new MusicTempo(pcmData, {
-        hopSize,
-        timeStep: hopSize / sampleRate
+      review = createTimingReview({
+        analysis: { ...analysisRecord, analysisOverrides: overrides },
+        initialVerdict: timingWizard.initialVerdict ?? (previewGrid.bpm ? "not_sure" : "pulse_missing"),
+        tempoAction: timingWizard.tempoAction,
+        tapEstimate: timingWizard.tapEstimate,
+        beatAction: timingWizard.beatAction,
+        downbeatAction: timingWizard.downbeatAction,
+        beginningVerdict: timingWizard.beginningVerdict,
+        laterVerdict: timingWizard.laterVerdict,
+        manualAdjustmentChanged: manualGridChanged(timingWizard.originalOverrides, overrides),
+        autoMixWasNewlyDisabled: timingWizard.originalOverrides.autoMixDisabled !== true
       });
-      const rawDetectedBpm = Number(mt.tempo);
-      console.log(`[${title}] raw detected BPM:`, rawDetectedBpm);
-
-      let detectedBpm = rawDetectedBpm;
-      while (detectedBpm > 160) detectedBpm /= 2;
-      while (detectedBpm < 70) detectedBpm *= 2;
-      detectedBpm = Math.round(detectedBpm * 10) / 10;
-      setOriginalBpm(detectedBpm);
-      setBpmLabel(String(detectedBpm));
-      onBpmChange(channel, detectedBpm);
-
-      console.log("calling detectKey...");
-      const keyResult = await detectKey(audioBuffer);
-      console.log("key result:", keyResult);
-      const keyString = `${keyResult.key} ${keyResult.scale === "major" ? "maj" : "min"}`;
-      setKeyLabel(keyString);
-      if (currentTrackIdRef.current) {
-        onKeyDetected?.(currentTrackIdRef.current, keyString);
+      setTimingReviewSaveStatus("saving");
+      if (timingWizard.trackId) {
+        if (!onTimingReviewSave) throw new Error("Timing review storage is unavailable");
+        await onTimingReviewSave(timingWizard.trackId, overrides, review);
       }
-    } catch {
-      setOriginalBpm(null);
-      setBpmLabel("n/a");
-      setKeyLabel("--");
-      onBpmChange(channel, null);
+      if (!ownsDeferredDeckInteraction({
+        locked: interactionLockedRef.current,
+        expectedLoadGeneration,
+        currentLoadGeneration: loadGenerationRef.current,
+        expectedTrackId,
+        currentTrackId: currentTrackIdRef.current
+      })) return;
+      const nextRecord = { ...analysisRecord, analysisOverrides: overrides, timingReview: review };
+      const grid = buildEffectiveBeatGrid(nextRecord);
+      setAnalysisRecord(nextRecord);
+      setOriginalBpm(grid.bpm);
+      setBpmLabel(grid.bpm == null ? "n/a" : String(Math.round(grid.bpm * 10) / 10));
+      onBpmChange(channel, grid.bpm);
+      setTimingReviewSaveStatus("saved");
+      closeTimingWizard();
+    } catch (_error) {
+      setTimingReviewSaveStatus("error");
     }
   };
+
+  const removeTimingReview = async () => {
+    if (manualInteractionLocked || !analysisRecord?.timingReview) return;
+    const trackId = currentTrackIdRef.current;
+    const expectedLoadGeneration = loadGenerationRef.current;
+    setTimingReviewSaveStatus("saving");
+    try {
+      if (trackId) {
+        if (!onTimingReviewRemove) throw new Error("Timing review storage is unavailable");
+        await onTimingReviewRemove(trackId);
+      }
+      if (!ownsDeferredDeckInteraction({
+        locked: interactionLockedRef.current,
+        expectedLoadGeneration,
+        currentLoadGeneration: loadGenerationRef.current,
+        expectedTrackId: trackId,
+        currentTrackId: currentTrackIdRef.current
+      })) return;
+      setAnalysisRecord((current) => current ? { ...current, timingReview: null } : current);
+      setTimingReviewSaveStatus("saved");
+    } catch (_error) {
+      setTimingReviewSaveStatus("error");
+    }
+  };
+
+  useEffect(() => {
+    if (!timingWizard) return undefined;
+    const dialog = timingWizardDialogRef.current;
+    const handleKeyDown = (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeTimingWizard();
+        return;
+      }
+      if (event.key !== "Tab" || !dialog) return;
+      const focusable = [...dialog.querySelectorAll("button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex='-1'])")];
+      if (!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    window.setTimeout(() => timingWizardCloseRef.current?.focus(), 0);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [timingWizard?.trackId]);
 
   const createWaveSurfer = () => {
     if (wavesurferRef.current) {
@@ -346,22 +682,37 @@ const Deck = forwardRef(function Deck(
       interact: true
     });
     wavesurferRef.current.on("click", (progress) => {
-      const deck = deckStateRef.current;
-      if (!deck.buffer) return;
-      void seek(progress * deck.buffer.duration);
+      const duration = deckEngine.getSnapshot().durationSeconds;
+      if (!duration || interactionLockedRef.current || playbackStartIsLocked()) return;
+      void seek(progress * duration);
     });
   };
 
   useEffect(() => {
     createWaveSurfer();
+    const unsubscribe = deckEngine.subscribe((snapshot) => {
+      setDeckStatus(snapshot.status);
+      setFileReady(
+        snapshot.durationSeconds > 0 &&
+          snapshot.status !== "preparing" &&
+          snapshot.status !== "recoverable-error"
+      );
+      setIsPlaying(snapshot.status === "scheduled" || snapshot.status === "playing");
+    });
 
     const updateDisplay = () => {
-      const deck = deckStateRef.current;
-      if (deck.buffer) {
-        const current = getCurrentTime();
-        const bounded = Math.min(current, deck.buffer.duration);
+      deckEngine.reconcilePlaybackCompletion();
+      const snapshot = deckEngine.getSnapshot();
+      setDeckStatus(snapshot.status);
+      if (snapshot.durationSeconds > 0) {
+        const bounded = Math.min(snapshot.positionSeconds, snapshot.durationSeconds);
         setCurrentTimeSec(bounded);
-        wavesurferRef.current?.seekTo(deck.buffer.duration > 0 ? bounded / deck.buffer.duration : 0);
+        wavesurferRef.current?.seekTo(bounded / snapshot.durationSeconds);
+        setTempo((currentTempo) => {
+          if (Math.abs(currentTempo - snapshot.playbackRate) < 0.001) return currentTempo;
+          wavesurferRef.current?.setPlaybackRate(snapshot.playbackRate);
+          return snapshot.playbackRate;
+        });
       } else {
         setCurrentTimeSec(0);
       }
@@ -370,62 +721,299 @@ const Deck = forwardRef(function Deck(
     rafRef.current = requestAnimationFrame(updateDisplay);
 
     return () => {
+      invalidateDeckTransportAuthority(transportAuthorityRef.current);
       cancelAnimationFrame(rafRef.current);
       cancelAnimationFrame(releaseRafRef.current);
+      metronomeCancelRef.current?.();
+      window.clearTimeout(metronomeUiTimerRef.current);
+      clickPulseTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+      loadAbortControllerRef.current?.abort?.();
+      loadAuthorityKeyRef.current = null;
+      isolatedAnalysisClientRef.current?.dispose?.();
+      unsubscribe();
       wavesurferRef.current?.destroy();
-      stopSource();
-      deckStateRef.current.lowFilter?.disconnect();
-      deckStateRef.current.midFilter?.disconnect();
-      deckStateRef.current.highFilter?.disconnect();
-      deckStateRef.current.gainNode?.disconnect();
       if (lastObjectUrlRef.current) {
         URL.revokeObjectURL(lastObjectUrlRef.current);
       }
     };
   }, [color]);
 
-  const loadFileToDeck = async (file, trackId = null) => {
-    if (!file) {
-      return false;
+  const loadFileToDeck = async (
+    file,
+    trackId = null,
+    knownAnalysis = null,
+    {
+      isolatedAnalysis = false,
+      loadAuthorityKey = null,
+      purpose = DECK_LOAD_PURPOSE.manual
+    } = {}
+  ) => {
+    if ((partySetupLocked && purpose !== DECK_LOAD_PURPOSE.partyFirstSong) ||
+      playbackStartIsLocked()) {
+      return DECK_LOAD_OUTCOME.cancelled;
     }
+    if (!(file instanceof Blob)) return DECK_LOAD_OUTCOME.unplayableFile;
 
-    const objectUrl = URL.createObjectURL(file);
-    if (lastObjectUrlRef.current) {
-      URL.revokeObjectURL(lastObjectUrlRef.current);
-    }
-    lastObjectUrlRef.current = objectUrl;
-    createWaveSurfer();
-    wavesurferRef.current?.load(objectUrl);
-
-    setFileReady(false);
-    setBpmLabel("...");
-    setTrackName(file.name);
-    setSyncActive(false);
-    setTempo(1);
-
-    const audioContext = await ensureGraphReady();
-    const deck = deckStateRef.current;
-    pause();
-    deck.startOffset = 0;
-    deck.playbackRate = 1;
-
+    runDeckLoadInvalidationBoundary({
+      notify: () => onDeckLoadInvalidated?.(
+        channel,
+        currentTrackIdRef.current,
+        loadReadinessRef.current?.loadAuthorityKey ?? null
+      ),
+      revoke: () => {
+        invalidateDeckTransportAuthority(transportAuthorityRef.current);
+        loadAbortControllerRef.current?.abort?.();
+        isolatedAnalysisClientRef.current?.dispose?.();
+        isolatedAnalysisClientRef.current = null;
+      }
+    });
+    const loadAbortController = new AbortController();
+    loadAbortControllerRef.current = loadAbortController;
+    loadGenerationRef.current += 1;
+    const loadGeneration = loadGenerationRef.current;
+    const enhancedTimingAdmission = enhancedTimingAdmissionRef?.current ?? null;
+    const ownsCurrentEnhancedTimingAdmission = () => ownsEnhancedTimingAdmission(
+      enhancedTimingAdmissionRef?.current,
+      enhancedTimingAdmission
+    );
+    const expectedLoadAuthorityKey = typeof loadAuthorityKey === "string" && loadAuthorityKey.length > 0
+      ? loadAuthorityKey
+      : null;
+    loadAuthorityKeyRef.current = expectedLoadAuthorityKey;
+    const ownsLoad = () =>
+      loadGenerationRef.current === loadGeneration &&
+      currentTrackIdRef.current === trackId &&
+      loadAuthorityKeyRef.current === expectedLoadAuthorityKey &&
+      !playbackStartIsLocked();
+    let audioContext;
     try {
-      const arrayBuffer = await readFileAsArrayBuffer(file);
-      const decoded = await audioContext.decodeAudioData(arrayBuffer.slice(0));
-      deck.buffer = null;
-      deck.buffer = decoded;
-      currentTrackIdRef.current = trackId;
-      setFileReady(true);
-      await analyzeBpm(decoded);
-      onTrackLoaded?.(channel, trackId, file.name);
-      return true;
+      audioContext = await ensureGraphReady();
     } catch {
-      deck.buffer = null;
+      onAudioStartError?.(getAudioEngine().context.state);
+      return DECK_LOAD_OUTCOME.audioBlocked;
+    }
+    if (loadGenerationRef.current !== loadGeneration || playbackStartIsLocked()) return DECK_LOAD_OUTCOME.cancelled;
+    try {
+      const objectUrl = URL.createObjectURL(file);
+      if (lastObjectUrlRef.current) URL.revokeObjectURL(lastObjectUrlRef.current);
+      lastObjectUrlRef.current = objectUrl;
+      createWaveSurfer();
+      void wavesurferRef.current?.load(objectUrl)?.catch?.(() => undefined);
+      setFileReady(false);
+      setBpmLabel("...");
+      setTrackName(file.name || "LOCAL AUDIO");
+      setSyncActive(false);
+      setTempo(1);
+      stopMetronomeAudition();
+      setTimingWizard(null);
+      setTapTimes([]);
+      currentTrackIdRef.current = trackId;
+      setAnalysisRecord(null);
+      setRuntimeProgramLevel(null);
+      loadReadinessRef.current = null;
+      setLoadReadiness(null);
+      setProgramLevelRuntimeStatus("pending");
+      deckEngine.beginPreparing(trackId);
+    } catch {
+      return DECK_LOAD_OUTCOME.cancelled;
+    }
+    let decoded;
+    const hadCurrentBasicAnalysis = !!knownAnalysis && hasCurrentBasicAnalysis(knownAnalysis);
+    try {
+      const arrayBuffer = await readFileAsArrayBuffer(file, loadAbortController.signal);
+      decoded = await audioContext.decodeAudioData(arrayBuffer.slice(0));
+      if (!ownsLoad()) {
+        return DECK_LOAD_OUTCOME.cancelled;
+      }
+    } catch (error) {
+      if (!ownsLoad()) {
+        return DECK_LOAD_OUTCOME.cancelled;
+      }
+      if (playbackStartIsLocked()) return DECK_LOAD_OUTCOME.cancelled;
+      if (audioContext.state !== "running") {
+        onAudioStartError?.(audioContext.state);
+        return DECK_LOAD_OUTCOME.audioBlocked;
+      }
+      deckEngine.fail(error);
       setFileReady(false);
       setBpmLabel("n/a");
       onBpmChange(channel, null);
-      return false;
+      return DECK_LOAD_OUTCOME.unplayableFile;
     }
+
+    const cachedProgramLevel = normalizeProgramLevel(knownAnalysis?.programLevel);
+    const readinessDecision = decideDeckLoadReadiness({
+      purpose,
+      hasCurrentBasicAnalysis: hadCurrentBasicAnalysis,
+      cachedTrimDb: cachedProgramLevel?.normalization.trimDb ?? null
+    });
+
+    return runDeckPostDecodeLoad({
+      decision: readinessDecision,
+      publishDecoded: (readinessDecision) => {
+      if (!ownsLoad() || audioContext.state !== "running") {
+        if (audioContext.state !== "running") onAudioStartError?.(audioContext.state);
+        return audioContext.state === "running"
+          ? DECK_LOAD_OUTCOME.cancelled
+          : DECK_LOAD_OUTCOME.audioBlocked;
+      }
+      const publication = commitDecodedDeckReadiness({
+        decision: readinessDecision,
+        ownsAuthority: () => ownsLoad() && audioContext.state === "running",
+        applyCachedBasicAnalysis: () => applyAnalysis(
+          {
+            ...knownAnalysis,
+            durationSeconds: decoded.duration,
+            analyzerVersion: knownAnalysis.analyzerVersion
+          },
+          trackId,
+          false
+        ),
+        clearBasicAnalysis: () => {
+          setAnalysisRecord(null);
+          setOriginalBpm(null);
+          setBpmLabel("n/a");
+          setKeyLabel("--");
+          onBpmChange(channel, null);
+        },
+        applyTrim: (trimDb, levelStatus) => {
+          deckEngine.setTrackTrimDb(trimDb);
+          setRuntimeProgramLevel(cachedProgramLevel);
+          setProgramLevelRuntimeStatus(levelStatus);
+        },
+        publishDecodedBuffer: () => deckEngine.loadBuffer(decoded, trackId)
+      });
+      if (publication !== "published") return DECK_LOAD_OUTCOME.cancelled;
+      const readiness = Object.freeze({
+        version: DECK_LOAD_READINESS_VERSION,
+        trackId,
+        loadAuthorityKey: expectedLoadAuthorityKey,
+        timingFacts: readinessDecision.timingFacts,
+        levelTrim: readinessDecision.levelTrim,
+        safeFadeOnly: readinessDecision.safeFadeOnly,
+        reason: readinessDecision.reason,
+        trimDb: readinessDecision.trimDb
+      });
+      loadReadinessRef.current = readiness;
+      setLoadReadiness(readiness);
+      onTrackLoaded?.(channel, trackId, file.name, expectedLoadAuthorityKey);
+      return DECK_LOAD_OUTCOME.loaded;
+      },
+      runInlineAnalysis: async () => {
+
+    let isolatedAnalysisClient = null;
+    let resolvedBasicAnalysis = hadCurrentBasicAnalysis;
+    let resolvedProgramLevel = cachedProgramLevel;
+    const analysisClient = () => {
+      if (!isolatedAnalysis) return getAnalysisClient();
+      if (!isolatedAnalysisClient) {
+        isolatedAnalysisClient = new AnalysisClient();
+        isolatedAnalysisClientRef.current = isolatedAnalysisClient;
+      }
+      return isolatedAnalysisClient;
+    };
+    try {
+      if (loadGenerationRef.current !== loadGeneration || currentTrackIdRef.current !== trackId) return DECK_LOAD_OUTCOME.cancelled;
+      let generatedAnalysis = null;
+      if (hadCurrentBasicAnalysis) {
+        applyAnalysis(
+          {
+            ...knownAnalysis,
+            durationSeconds: decoded.duration,
+            analyzerVersion: knownAnalysis.analyzerVersion
+          },
+          trackId,
+          false
+        );
+      } else {
+        generatedAnalysis = await analysisClient().analyzeAudioBuffer(decoded);
+        if (loadGenerationRef.current !== loadGeneration || currentTrackIdRef.current !== trackId) return DECK_LOAD_OUTCOME.cancelled;
+        resolvedBasicAnalysis = true;
+        applyAnalysis(
+          { ...generatedAnalysis, analysisOverrides: knownAnalysis?.analysisOverrides },
+          trackId
+        );
+      }
+      const activeProgramLevel = normalizeProgramLevel(generatedAnalysis?.programLevel) ??
+        normalizeProgramLevel(knownAnalysis?.programLevel);
+      if (activeProgramLevel) {
+        if (!ownsLoad()) return DECK_LOAD_OUTCOME.cancelled;
+        resolvedProgramLevel = activeProgramLevel;
+        deckEngine.setTrackTrimDb(activeProgramLevel.normalization.trimDb);
+        setRuntimeProgramLevel(activeProgramLevel);
+        setProgramLevelRuntimeStatus("ready");
+      } else {
+        const current = await analysisClient().analyzeAudioBuffer(decoded);
+        if (!ownsLoad()) return DECK_LOAD_OUTCOME.cancelled;
+        resolvedProgramLevel = normalizeProgramLevel(current.programLevel);
+        deckEngine.setTrackTrimDb(current.programLevel.normalization.trimDb);
+        setRuntimeProgramLevel(current.programLevel);
+        setProgramLevelRuntimeStatus("ready");
+        setAnalysisRecord((record) => record ? { ...record, programLevel: current.programLevel } : record);
+        if (trackId) onProgramLevelDetected?.(trackId, current.programLevel);
+      }
+      if (
+        enhancedTimingAvailable &&
+        ownsCurrentEnhancedTimingAdmission() &&
+        !hasCurrentEnhancedRhythm(knownAnalysis)
+      ) {
+        void analyzeEnhancedRhythm(decoded, undefined, trackId).then((enhanced) => {
+          if (loadGenerationRef.current !== loadGeneration || currentTrackIdRef.current !== trackId ||
+            !ownsCurrentEnhancedTimingAdmission()) return;
+          setAnalysisRecord((current) => {
+            if (!current) return current;
+            const next = mergeEnhancedRhythm(current, enhanced);
+            const grid = buildEffectiveBeatGrid(next);
+            setOriginalBpm(grid.bpm);
+            setBpmLabel(grid.bpm == null ? "n/a" : String(Math.round(grid.bpm * 10) / 10));
+            onBpmChange(channel, grid.bpm);
+            return next;
+          });
+          onEnhancedRhythmDetected?.(trackId, enhanced);
+        }).catch(() => {
+          // Playback and the basic Safe Fade analysis remain available.
+        });
+      }
+    } catch {
+      if (!ownsLoad()) return DECK_LOAD_OUTCOME.cancelled;
+      const failure = programLevelFailurePolicy(hadCurrentBasicAnalysis);
+      resolvedBasicAnalysis = failure.preserveBasicAnalysis;
+      resolvedProgramLevel = null;
+      deckEngine.setTrackTrimDb(failure.trimDb);
+      setProgramLevelRuntimeStatus(failure.levelStatus);
+      if (!failure.preserveBasicAnalysis) {
+        setOriginalBpm(null);
+        setBpmLabel("n/a");
+        setKeyLabel("--");
+        onBpmChange(channel, null);
+      }
+    } finally {
+      if (isolatedAnalysisClientRef.current === isolatedAnalysisClient) {
+        isolatedAnalysisClientRef.current = null;
+      }
+      isolatedAnalysisClient?.dispose();
+    }
+    if (!ownsLoad()) return DECK_LOAD_OUTCOME.cancelled;
+    // Publish deck readiness only after the current track has either a valid
+    // v2 trim or an explicit neutral fallback. Manual Play cannot observe a
+    // ready buffer and then receive a late multi-decibel trim step.
+    deckEngine.loadBuffer(decoded, trackId);
+    const inlineReadiness = Object.freeze({
+      version: DECK_LOAD_READINESS_VERSION,
+      trackId,
+      loadAuthorityKey: expectedLoadAuthorityKey,
+      timingFacts: resolvedBasicAnalysis ? "cached-basic" : "none",
+      levelTrim: resolvedProgramLevel ? "cached" : "neutral",
+      safeFadeOnly: !resolvedBasicAnalysis,
+      reason: resolvedProgramLevel ? "cached-analysis" : "level-analysis-pending",
+      trimDb: deckEngine.getTrackTrimDb()
+    });
+    loadReadinessRef.current = inlineReadiness;
+    setLoadReadiness(inlineReadiness);
+    onTrackLoaded?.(channel, trackId, file.name, expectedLoadAuthorityKey);
+    return DECK_LOAD_OUTCOME.loaded;
+      }
+    });
   };
 
   const onFileChange = async (event) => {
@@ -434,34 +1022,27 @@ const Deck = forwardRef(function Deck(
   };
 
   const onPlayPause = async () => {
-    const audioContext = getAudioContext();
-    await audioContext.resume();
-    if (!deckStateRef.current.buffer || !fileReady) {
+    if (!deckEngine.isReady() || !fileReady) {
       return;
     }
-    if (deckStateRef.current.isPlaying) {
+    if (deckEngine.isActive()) {
+      if (timingWizard?.step === 2) setTapTimes([]);
       pause();
       return;
     }
-    deckStateRef.current.gainNode.gain.value = 1;
+    if (startOrLoadLocked) return;
     await play();
   };
 
   const onTempoChange = async (event) => {
+    stopMetronomeAudition();
     const nextTempo = clampTempo(Number(event.target.value));
     setTempo(nextTempo);
     setSyncActive(false);
     setSyncTargetBpm(null);
     wavesurferRef.current?.setPlaybackRate(nextTempo);
 
-    const deck = deckStateRef.current;
-    const current = getCurrentTime();
-    deck.playbackRate = nextTempo;
-    if (deck.isPlaying) {
-      await play(current);
-    } else {
-      deck.startOffset = current;
-    }
+    deckEngine.setPlaybackRate(nextTempo);
 
     if (originalBpm) {
       onBpmChange(channel, Math.round(originalBpm * nextTempo * 10) / 10);
@@ -478,6 +1059,7 @@ const Deck = forwardRef(function Deck(
   }, [originalBpm, tempo]);
 
   const syncToBpm = async (targetBpm) => {
+    stopMetronomeAudition();
     if (!originalBpm || !targetBpm) {
       return null;
     }
@@ -487,14 +1069,7 @@ const Deck = forwardRef(function Deck(
     setSyncTargetBpm(targetBpm);
     wavesurferRef.current?.setPlaybackRate(syncedTempo);
 
-    const deck = deckStateRef.current;
-    const current = getCurrentTime();
-    deck.playbackRate = syncedTempo;
-    if (deck.isPlaying) {
-      await play(current);
-    } else {
-      deck.startOffset = current;
-    }
+    deckEngine.setPlaybackRate(syncedTempo);
 
     const currentBpm = Math.round(originalBpm * syncedTempo * 10) / 10;
     onBpmChange(channel, currentBpm);
@@ -509,18 +1084,12 @@ const Deck = forwardRef(function Deck(
   };
 
   const releaseSyncInstant = async () => {
-    const deck = deckStateRef.current;
-    const current = getCurrentTime();
-    setTempo(deck.originalPlaybackRate);
+    stopMetronomeAudition();
+    setTempo(1);
     setSyncActive(false);
     setSyncTargetBpm(null);
-    wavesurferRef.current?.setPlaybackRate(deck.originalPlaybackRate);
-    deck.playbackRate = deck.originalPlaybackRate;
-    if (deck.isPlaying) {
-      await play(current);
-    } else {
-      deck.startOffset = current;
-    }
+    wavesurferRef.current?.setPlaybackRate(1);
+    deckEngine.setPlaybackRate(1);
     if (originalBpm) {
       setBpmLabel(String(originalBpm));
       onBpmChange(channel, originalBpm);
@@ -528,30 +1097,24 @@ const Deck = forwardRef(function Deck(
   };
 
   const startTempoRelease = (durationSeconds = 8) => {
-    const deck = deckStateRef.current;
-    const startRate = deck.playbackRate;
-    const targetRate = deck.originalPlaybackRate;
-    const audioContext = getAudioContext();
-    if (deck.sourceNode) {
-      const now = audioContext.currentTime;
-      deck.sourceNode.playbackRate.cancelScheduledValues(now);
-      deck.sourceNode.playbackRate.setValueAtTime(startRate, now);
-      deck.sourceNode.playbackRate.linearRampToValueAtTime(targetRate, now + durationSeconds);
+    stopMetronomeAudition();
+    const engine = getAudioEngine();
+    const startedAt = engine.clock.now();
+    const targetRate = 1;
+    if (!deckEngine.schedulePlaybackRateRamp(targetRate, startedAt, durationSeconds)) {
+      return false;
     }
 
     cancelAnimationFrame(releaseRafRef.current);
-    const startedAt = performance.now();
     const tick = () => {
-      const t = Math.min((performance.now() - startedAt) / (durationSeconds * 1000), 1);
-      const nextRate = startRate + (targetRate - startRate) * t;
+      const now = engine.clock.now();
+      const nextRate = deckEngine.getPlaybackRate(now);
       setTempo(nextRate);
       wavesurferRef.current?.setPlaybackRate(nextRate);
-      deck.playbackRate = nextRate;
-      if (t < 1) {
+      if (now < startedAt + durationSeconds) {
         releaseRafRef.current = requestAnimationFrame(tick);
       } else {
         setTempo(targetRate);
-        deck.playbackRate = targetRate;
         setSyncActive(false);
         setSyncTargetBpm(null);
         if (originalBpm) {
@@ -561,28 +1124,17 @@ const Deck = forwardRef(function Deck(
       }
     };
     releaseRafRef.current = requestAnimationFrame(tick);
+    return true;
   };
 
   const setGain = (value) => {
-    const deck = deckStateRef.current;
     const safe = Math.max(0, Math.min(1, Number(value)));
-    if (deck.gainNode) {
-      deck.gainNode.gain.value = safe;
-    }
+    getAudioEngine().setDeckGain(channel, safe);
   };
 
   const applyBandGain = (band, gainValue) => {
-    const deck = deckStateRef.current;
     const safe = Math.max(-12, Math.min(12, Number(gainValue)));
-    if (band === "low" && deck.lowFilter) {
-      deck.lowFilter.gain.value = safe;
-    }
-    if (band === "mid" && deck.midFilter) {
-      deck.midFilter.gain.value = safe;
-    }
-    if (band === "high" && deck.highFilter) {
-      deck.highFilter.gain.value = safe;
-    }
+    deckEngine.setEqBandGain(band, safe);
   };
 
   const setEqBandGain = (band, gainValue) => {
@@ -607,50 +1159,125 @@ const Deck = forwardRef(function Deck(
   };
 
   const scheduleEqBandRamp = (band, fromDb, toDb, startTime, duration) => {
-    const deck = deckStateRef.current;
-    let param = null;
-    if (band === "low") {
-      param = deck.lowFilter?.gain;
-    } else if (band === "mid") {
-      param = deck.midFilter?.gain;
-    } else if (band === "high") {
-      param = deck.highFilter?.gain;
-    }
-    if (!param) {
-      return;
-    }
-    param.cancelScheduledValues(startTime);
-    param.setValueAtTime(fromDb, startTime);
-    param.linearRampToValueAtTime(toDb, startTime + duration);
+    deckEngine.scheduleEqBandRamp(band, fromDb, toDb, startTime, duration);
     setEq((prev) => ({ ...prev, [band]: toDb }));
   };
 
   const scheduleGainCurve = (curve, startTime, duration) => {
-    const gain = deckStateRef.current.gainNode?.gain;
-    if (!gain || !curve?.length) {
+    if (!curve?.length) {
       return;
     }
-    gain.cancelScheduledValues(startTime);
-    gain.setValueCurveAtTime(curve, startTime, duration);
+    getAudioEngine().scheduleDeckGainCurve(channel, curve, startTime, duration);
+  };
+
+  const stopAt = (when) => {
+    return deckEngine.stopAt(when);
+  };
+
+  const stopAllDeckSound = () => {
+    invalidateDeckTransportAuthority(transportAuthorityRef.current);
+    stopMetronomeAudition();
+    loadAbortControllerRef.current?.abort?.();
+    loadAbortControllerRef.current = null;
+    isolatedAnalysisClientRef.current?.dispose?.();
+    isolatedAnalysisClientRef.current = null;
+    loadGenerationRef.current += 1;
+    loadAuthorityKeyRef.current = null;
+    loadReadinessRef.current = null;
+    setLoadReadiness(null);
+    if (deckEngine.getSnapshot().status !== "preparing") {
+      return { cancelledLoad: false, paused: deckEngine.pause(), auxiliaryStopped: !metronomeCancelRef.current };
+    }
+    wavesurferRef.current?.empty?.();
+    if (lastObjectUrlRef.current) {
+      URL.revokeObjectURL(lastObjectUrlRef.current);
+      lastObjectUrlRef.current = null;
+    }
+    currentTrackIdRef.current = null;
+    setAnalysisRecord(null);
+    setRuntimeProgramLevel(null);
+    setFileReady(false);
+    setTrackName("NO TRACK LOADED");
+    setCurrentTimeSec(0);
+    setTimingWizard(null);
+    setTapTimes([]);
+    setTimingReviewSaveStatus("idle");
+    deckEngine.eject();
+    return { cancelledLoad: true, paused: false, auxiliaryStopped: !metronomeCancelRef.current };
   };
 
   useImperativeHandle(
     ref,
     () => ({
-      isPlaying: () => deckStateRef.current.isPlaying,
-      isReady: () => !!deckStateRef.current.buffer,
-      getTransportAnchorTime: () =>
-        deckStateRef.current.startTime - deckStateRef.current.startOffset / Math.max(deckStateRef.current.playbackRate, 0.001),
+      isPlaying: () => deckEngine.isActive(),
+      isReady: () => deckEngine.isReady(),
+      getTransportAnchorTime: () => deckEngine.getTransportAnchorTime(),
       getCurrentBpm: () => (originalBpm ? Math.round(originalBpm * tempo * 10) / 10 : null),
-      play: async () => play(),
-      playAt: async (startTime, offset = 0) => play(offset, startTime, false),
-      loadTrack: async (file, trackId = null) => loadFileToDeck(file, trackId),
-      getTrackId: () => currentTrackIdRef.current,
+      play: async (startAuthority = null, startAuthorityKey = null, claimStartCommit = null) =>
+        play(null, null, true, startAuthority, startAuthorityKey, claimStartCommit),
+      playAt: async (startTime, offset = 0, startAuthority = null) => play(offset, startTime, false, startAuthority),
+      playReadyAtIfRunning: (startTime, offset = 0, startAuthority = null) =>
+        playReadyAtIfRunning(startTime, offset, startAuthority),
+      loadTrack: async (file, trackId = null, knownAnalysis = null, options = undefined) =>
+        loadFileToDeck(file, trackId, knownAnalysis, options),
+      getTrackId: () => deckEngine.getSnapshot().trackId,
+      getTrackName: () => trackName,
+      getDeckSnapshot: () => deckEngine.getSnapshot(),
+      getAnalysisRecord: () => analysisRecord,
+      getLoadReadiness: () => loadReadinessRef.current,
+      getDspSnapshot: () => ({
+        trimDb: deckEngine.getTrackTrimDb(),
+        eqDb: deckEngine.getEqSnapshot(),
+        filterCutoffHz: deckEngine.getFilterCutoff()
+      }),
+      getOwnedArmAudioHandle: () => Object.freeze({
+        getTrackId: () => deckEngine.getSnapshot().trackId,
+        isActive: () => deckEngine.isActive(),
+        setGain: (value) => getAudioEngine().setDeckGain(channel, value),
+        setEqBandGain: (band, db) => deckEngine.setEqBandGain(band, db),
+        setFilterCutoff: (hz) => deckEngine.setFilterCutoff(hz),
+        pause: () => deckEngine.pause()
+      }),
+      reconcilePlaybackCompletion: (nowSeconds) => deckEngine.reconcilePlaybackCompletion(nowSeconds),
+      getDecodedBufferForRehearsal: () => deckEngine.getDecodedBufferForRehearsal(),
       pause: () => pause(),
+      stopAllSound: () => stopAllDeckSound(),
+      cancelLoadIfOwned: (authorityKey) => {
+        if (typeof authorityKey !== "string" || loadAuthorityKeyRef.current !== authorityKey) {
+          return { owned: false, authorityRevoked: false };
+        }
+        stopAllDeckSound();
+        const snapshot = deckEngine.getSnapshot();
+        return {
+          owned: true,
+          authorityRevoked: loadAuthorityKeyRef.current == null && !deckEngine.isActive() &&
+            snapshot.status !== "preparing"
+        };
+      },
+      stopAt: (when) => stopAt(when),
       eject: () => {
-        pause();
-        deckStateRef.current.buffer = null;
+        invalidateDeckTransportAuthority(transportAuthorityRef.current);
+        stopMetronomeAudition();
+        loadAbortControllerRef.current?.abort?.();
+        loadAbortControllerRef.current = null;
+        isolatedAnalysisClientRef.current?.dispose?.();
+        isolatedAnalysisClientRef.current = null;
+        loadGenerationRef.current += 1;
+        loadAuthorityKeyRef.current = null;
+        loadReadinessRef.current = null;
+        setLoadReadiness(null);
+        wavesurferRef.current?.empty?.();
+        if (lastObjectUrlRef.current) {
+          URL.revokeObjectURL(lastObjectUrlRef.current);
+          lastObjectUrlRef.current = null;
+        }
+        setTimingWizard(null);
+        setTapTimes([]);
+        setTimingReviewSaveStatus("idle");
+        deckEngine.eject();
         currentTrackIdRef.current = null;
+        setAnalysisRecord(null);
+        setRuntimeProgramLevel(null);
         setFileReady(false);
         setTrackName("NO TRACK LOADED");
         setCurrentTimeSec(0);
@@ -659,15 +1286,32 @@ const Deck = forwardRef(function Deck(
       startTempoRelease: (durationSeconds = 8) => startTempoRelease(durationSeconds),
       releaseSyncInstant: async () => releaseSyncInstant(),
       setGain: (value) => setGain(value),
-      setFilterCutoff: () => {},
+      getEqBandGain: (band) => Number(eq[band] ?? 0),
+      setTrackTrimDb: (value) => deckEngine.setTrackTrimDb(value),
+      setFilterCutoff: (hz) => deckEngine.setFilterCutoff(hz),
       setEqBandGain: (band, db) => setEqBandGain(band, db),
       scheduleEqBandRamp: (band, fromDb, toDb, startTime, duration) =>
         scheduleEqBandRamp(band, fromDb, toDb, startTime, duration),
       scheduleGainCurve: (curve, startTime, duration) => scheduleGainCurve(curve, startTime, duration),
-      scheduleFilterSweep: () => {}
+      scheduleFilterSweep: (fromHz, toHz, startTime, duration) =>
+        deckEngine.scheduleFilterSweep(fromHz, toHz, startTime, duration)
     }),
-    [originalBpm, tempo]
+    [analysisRecord, originalBpm, tempo, eq, playbackStartLocked]
   );
+
+  const statusLabel =
+    deckStatus === "recoverable-error"
+      ? "RECOVERY NEEDED"
+      : deckStatus === "preparing"
+        ? "PREPARING"
+        : deckStatus === "scheduled"
+          ? "ARMED"
+          : deckStatus.toUpperCase();
+  const averageFeature = (values = []) =>
+    values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
+  const averageEnergy = averageFeature(analysisRecord?.energyByBeat);
+  const averageVocalProxy = averageFeature(analysisRecord?.vocalProbabilityByBeat);
+  const structureBoundaryCount = analysisRecord?.structureBoundaries?.length ?? 0;
 
   return (
     <section className={`deck ${flash ? "deck-flash" : ""}`}>
@@ -679,11 +1323,12 @@ const Deck = forwardRef(function Deck(
         {trackName}
       </div>
       <div className="deck-top-actions">
-        <button className="text-control-btn" type="button" onClick={() => fileInputRef.current?.click()}>
+        <button className="text-control-btn" type="button" onClick={() => fileInputRef.current?.click()} disabled={startOrLoadLocked}>
           LOAD TRACK
         </button>
+        <span className={`deck-engine-status status-${deckStatus}`}>{statusLabel}</span>
       </div>
-      <input ref={fileInputRef} className="file-input-hidden" type="file" accept="audio/*" onChange={onFileChange} />
+      <input ref={fileInputRef} className="file-input-hidden" type="file" accept="audio/*" onChange={onFileChange} disabled={startOrLoadLocked} />
 
       <div className="wave-section">
         <div
@@ -695,11 +1340,17 @@ const Deck = forwardRef(function Deck(
         </div>
         <div className="waveform-wrap">
           <div className="waveform" ref={waveformRef} />
+          <BeatGridOverlay
+            beatsSeconds={effectiveGrid.beatsSeconds}
+            downbeatsSeconds={effectiveGrid.downbeatsSeconds}
+            durationSeconds={deckEngine.getSnapshot().durationSeconds}
+            color={color}
+          />
           <div className="playhead-line" />
         </div>
       </div>
       <div className="time-row">
-        <span>{`${formatTime(currentTimeSec)} / ${formatTime(deckStateRef.current.buffer?.duration ?? 0)}`}</span>
+        <span>{`${formatTime(currentTimeSec)} / ${formatTime(deckEngine.getSnapshot().durationSeconds)}`}</span>
         <input
           className="time-input"
           type="text"
@@ -714,9 +1365,259 @@ const Deck = forwardRef(function Deck(
               }
             }
           }}
-          disabled={!fileReady}
+          disabled={!fileReady || startOrLoadLocked}
         />
       </div>
+
+      <div className="grid-review-panel">
+        <div className="grid-review-header">
+          <span className={effectiveGrid.isManual ? "grid-status manual" : "grid-status automatic"}>
+            {effectiveGrid.isManual ? "TIMING ADJUSTED" : automaticTimingLabel.toUpperCase()}
+          </span>
+          <span className="grid-lock">
+            {effectiveGrid.isManual
+              ? "LONG BLENDS LOCKED"
+              : automaticBarHandoff
+                ? "BAR HANDOFF CANDIDATE"
+                : "SAFE TRANSITION AVAILABLE"}
+          </span>
+        </div>
+        <p className="grid-review-explainer">
+          Mazzy checks timing automatically. You do not need to count beats, know BPM, or approve a grid before using Auto Mix.
+        </p>
+        <details className="automatic-timing-details" onToggle={(event) => {
+          if (manualInteractionLocked && event.currentTarget.open) event.currentTarget.open = false;
+        }}>
+          <summary>Timing details and advanced review</summary>
+          <div className="grid-review-meta">
+            <span>{`${effectiveGrid.beatsSeconds.length} beats · ${effectiveGrid.downbeatsSeconds.length} bar starts`}</span>
+            <span>{automaticTrust ? `machine check ${automaticTrust.trustIndex}/100 · ${automaticTrust.tier.replaceAll("-", " ")}` : "machine check pending"}</span>
+            <span>{automaticTrust?.reasons?.[0] ?? "Long mixes require a calibrated detector."}</span>
+            <span role="status" aria-live="polite">{programLevelLabel}</span>
+            <span>
+              {currentTrackIdRef.current
+                ? librarySaveStatus === "saving" ? "SAVING…" : librarySaveStatus === "error" ? "COULDN'T SAVE" : "STORED IN THIS BROWSER PROFILE"
+                : "SESSION ONLY"}
+            </span>
+            <span title="Vocal Proxy is an uncalibrated spectral estimate, not a stem or verified vocal detector">
+              {averageEnergy == null ? "FEATURES --" : `ENERGY ${Math.round(averageEnergy * 100)}% · VOCAL PROXY ${Math.round((averageVocalProxy ?? 0) * 100)}% · ${structureBoundaryCount} CHANGES`}
+            </span>
+          </div>
+          {savedTimingReview && (
+            <div className="saved-timing-review" aria-live="polite">
+              <span>{`ADVANCED REVIEW SAVED ${savedTimingReview.reviewedOn} · BEGINNING ${savedTimingReview.beginningVerdict.replace("_", " ")} · LATER ${savedTimingReview.laterVerdict.replace("_", " ")}`}</span>
+              <button type="button" onClick={() => void removeTimingReview()} disabled={manualInteractionLocked || timingReviewSaveStatus === "saving"}>REMOVE SAVED TIMING REVIEW</button>
+            </div>
+          )}
+          {timingReviewSaveStatus === "error" && <p className="timing-review-error" role="alert">YOUR TIMING ANSWERS COULDN'T BE SAVED. TRY AGAIN.</p>}
+          <button ref={timingWizardTriggerRef} className="check-timing-button" type="button" onClick={openTimingWizard} disabled={!analysisRecord || manualInteractionLocked}>
+            REVIEW TIMING (ADVANCED)
+          </button>
+        </details>
+      </div>
+
+      {timingWizard && !partySetupLocked && (
+        <div className="timing-wizard-backdrop" onMouseDown={(event) => {
+          if (event.target === event.currentTarget) closeTimingWizard();
+        }}>
+          <div
+            ref={timingWizardDialogRef}
+            className="timing-wizard"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby={timingWizardTitleId}
+            aria-describedby={timingWizardDescriptionId}
+          >
+            <div className="timing-wizard-header">
+              <div>
+                <span className="timing-wizard-kicker">TIMING CHECK · {timingWizard.step + 1} OF 6</span>
+                <h3 id={timingWizardTitleId}>Make the clicks follow the song</h3>
+              </div>
+              <button ref={timingWizardCloseRef} type="button" className="wizard-close" onClick={closeTimingWizard} aria-label="Cancel timing check">×</button>
+            </div>
+            <p id={timingWizardDescriptionId} className="timing-wizard-privacy">
+              Your audio and adjustments stay in this browser profile on this device. Nothing is uploaded.
+            </p>
+            <button
+              className="timing-stop-all"
+              type="button"
+              onClick={() => {
+                onStopAllSound?.();
+                closeTimingWizard();
+              }}
+            >STOP ALL SOUND</button>
+            <div className="wizard-progress" aria-hidden="true">
+              {Array.from({ length: 6 }, (_, index) => <span key={index} className={index <= timingWizard.step ? "done" : ""} />)}
+            </div>
+
+            {timingWizard.step === 0 && (
+              <div className="wizard-step">
+                <h4>First, listen</h4>
+                <p>Start the song, then play 16 clicks. Do the clicks land with the rhythm you naturally feel?</p>
+                <div className="wizard-actions two">
+                  <button type="button" onClick={onPlayPause} disabled={!isPlaying && startOrLoadLocked}>{isPlaying ? "PAUSE SONG" : "PLAY SONG"}</button>
+                  <button type="button" aria-pressed={metronomeActive} onClick={() => void auditionBeatGrid()} disabled={!isPlaying || !previewGrid.beatsSeconds.length || (!metronomeActive && startOrLoadLocked)}>
+                    {metronomeActive ? "STOP CLICKS" : "PLAY 16 CLICKS"}
+                  </button>
+                </div>
+                <div className={`click-visual ${clickPulse ? `pulse-${clickPulse}` : ""}`} aria-live="polite" aria-atomic="true">
+                  <span aria-hidden="true" />
+                  {clickPulse === "one" ? "STRONG CLICK · ONE" : clickPulse === "beat" ? "CLICK" : "CLICK INDICATOR"}
+                </div>
+                {!previewGrid.bpm && <p className="wizard-warning">Mazzy couldn't find a steady pulse. Continue to tap along, or keep Safe Fade.</p>}
+                <div className="wizard-choice-list">
+                  <button type="button" onClick={() => setTimingWizard((current) => ({ ...current, initialVerdict: "matched", tempoAction: "unchanged", step: 4 }))}>THEY MATCH</button>
+                  <button type="button" onClick={() => setTimingWizard((current) => ({ ...current, initialVerdict: previewGrid.bpm ? "felt_wrong" : "pulse_missing", step: 1 }))}>THEY FEEL WRONG</button>
+                  <button type="button" onClick={() => setTimingWizard((current) => ({ ...current, initialVerdict: previewGrid.bpm ? "not_sure" : "pulse_missing", tempoAction: previewGrid.bpm ? "unchanged" : "not_available", draftOverrides: normalizeBeatGridOverrides({ ...current.draftOverrides, autoMixDisabled: true }), changed: true, step: 4 }))}>NOT SURE — KEEP SAFE FADE</button>
+                </div>
+              </div>
+            )}
+
+            {timingWizard.step === 1 && (
+              <div className="wizard-step">
+                <h4>Choose what sounds closest</h4>
+                <p>Preview a slower or faster pulse. This only changes the draft until you save.</p>
+                {previewGrid.bpm ? (
+                  <div className="wizard-tempo-options">
+                    <button type="button" onClick={() => chooseTempoInterpretation(0.5)}>CLICKS TWICE TOO FAST<br/><strong>{(effectiveGrid.bpm / 2).toFixed(1)} BPM</strong></button>
+                    <button type="button" onClick={() => chooseTempoInterpretation(2)}>CLICKS TWICE TOO SLOW<br/><strong>{(effectiveGrid.bpm * 2).toFixed(1)} BPM</strong></button>
+                  </div>
+                ) : <p className="wizard-warning">There is no reliable starting pulse to adjust. Tap with the song instead.</p>}
+                <button className="wizard-primary" type="button" onClick={() => setTimingWizard((current) => ({ ...current, step: 2 }))}>TAP WITH THE SONG</button>
+              </div>
+            )}
+
+            {timingWizard.step === 2 && (
+              <div className="wizard-step">
+                <h4>Tap the beat eight times</h4>
+                <p>While the song plays, press the big button or Space whenever you would naturally tap your foot.</p>
+                <button
+                  className="tap-beat-button"
+                  type="button"
+                  disabled={!isPlaying}
+                  onPointerDown={(event) => { event.preventDefault(); tapNaturalBeat(); }}
+                  onKeyDown={(event) => {
+                    if ((event.code === "Space" || event.code === "Enter") && !event.repeat) {
+                      event.preventDefault();
+                      tapNaturalBeat();
+                    }
+                  }}
+                >
+                  TAP BEAT
+                  <span>{tapTimes.length} / {MIN_TAP_COUNT} minimum</span>
+                </button>
+                <p className="tap-quality" aria-live="polite">
+                  {tapEstimate ? `${tapEstimate.quality === "steady" ? "STEADY" : "ROUGH"} TAP · ${tapEstimate.bpm.toFixed(1)} BPM · MANUAL REPAIR` : tapTimes.length ? "KEEP TAPPING — NO CHANGE YET" : "PLAY THE SONG, THEN START TAPPING"}
+                </p>
+                <div className="wizard-actions two">
+                  <button type="button" onClick={() => setTapTimes([])}>START TAPS AGAIN</button>
+                  <button type="button" className="wizard-primary" disabled={!tapEstimate} onClick={() => { applyTappedPulse(); setTimingWizard((current) => ({ ...current, step: 3 })); }}>PREVIEW THIS PULSE</button>
+                </div>
+              </div>
+            )}
+
+            {timingWizard.step === 3 && (
+              <div className="wizard-step">
+                <h4>Line up one click</h4>
+                <p>Pause on a clear drum hit, then choose “Put a click here.” Use Earlier or Later only if the clicks feel slightly behind or ahead.</p>
+                <div className="wizard-actions three">
+                  <button type="button" disabled={startOrLoadLocked} onClick={() => void seek(Math.max(0, currentTimeSec - 2))}>− 2 SECONDS</button>
+                  <button type="button" onClick={onPlayPause} disabled={!isPlaying && startOrLoadLocked}>{isPlaying ? "PAUSE" : "PLAY"}</button>
+                  <button type="button" disabled={startOrLoadLocked} onClick={() => void seek(Math.min(deckEngine.getSnapshot().durationSeconds, currentTimeSec + 2))}>+ 2 SECONDS</button>
+                </div>
+                <button className="wizard-primary" type="button" disabled={!previewGrid.bpm} onClick={() => updateTimingDraft(setBeatAtTime(draftAnalysis(), deckEngine.getPosition()), { beatAction: "aligned" })}>PUT A CLICK HERE</button>
+                <details className="wizard-advanced">
+                  <summary>Small timing adjustment</summary>
+                  <div className="wizard-actions two">
+                    <button type="button" onClick={() => updateTimingDraft(nudgeBeatGrid(draftAnalysis(), -0.01), { beatAction: "aligned" })}>CLICKS EARLIER</button>
+                    <button type="button" onClick={() => updateTimingDraft(nudgeBeatGrid(draftAnalysis(), 0.01), { beatAction: "aligned" })}>CLICKS LATER</button>
+                  </div>
+                </details>
+                <div className="wizard-actions two">
+                  <button type="button" onClick={() => setTimingWizard((current) => ({ ...current, beatAction: "skipped", step: 4 }))}>SKIP — I'M NOT SURE</button>
+                  <button type="button" className="wizard-primary" onClick={() => setTimingWizard((current) => ({ ...current, step: 4 }))}>NEXT</button>
+                </div>
+              </div>
+            )}
+
+            {timingWizard.step === 4 && (
+              <div className="wizard-step">
+                <h4>Optional: mark the strongest first beat</h4>
+                <p>Many songs repeat in groups of four. Pause on the “ONE” that begins a group, then mark it. Mazzy will use a stronger click there. Skip this if you are unsure.</p>
+                <div className="wizard-actions three">
+                  <button type="button" disabled={startOrLoadLocked} onClick={() => void seek(Math.max(0, currentTimeSec - 2))}>− 2 SECONDS</button>
+                  <button type="button" onClick={onPlayPause} disabled={!isPlaying && startOrLoadLocked}>{isPlaying ? "PAUSE" : "PLAY"}</button>
+                  <button type="button" disabled={startOrLoadLocked} onClick={() => void seek(Math.min(deckEngine.getSnapshot().durationSeconds, currentTimeSec + 2))}>+ 2 SECONDS</button>
+                </div>
+                <button
+                  className="wizard-primary"
+                  type="button"
+                  disabled={!previewGrid.beatsSeconds.length}
+                  onClick={() => updateTimingDraft(setDownbeatAtTime(draftAnalysis(), deckEngine.getPosition()), { downbeatAction: "marked" })}
+                >
+                  MARK THE “ONE” HERE
+                </button>
+                <div className="wizard-actions two">
+                  <button type="button" onClick={() => setTimingWizard((current) => ({ ...current, downbeatAction: "skipped", step: 5 }))}>SKIP — I'M NOT SURE</button>
+                  <button type="button" className="wizard-primary" onClick={() => setTimingWizard((current) => ({ ...current, step: 5 }))}>NEXT</button>
+                </div>
+              </div>
+            )}
+
+            {timingWizard.step === 5 && (
+              <div className="wizard-step">
+                <h4>Check again later in the song</h4>
+                <p>A repaired pulse can begin correctly but drift later. Check near the beginning and near the final third before saving.</p>
+                <div className="wizard-actions two">
+                  <button type="button" onClick={() => { setTimingWizard((current) => ({ ...current, beginningAuditioned: true, beginningVerdict: "not_checked" })); void playTimingCheckAt(Math.min(10, deckEngine.getSnapshot().durationSeconds * 0.1)); }}>CHECK BEGINNING</button>
+                  <button type="button" onClick={() => { setTimingWizard((current) => ({ ...current, laterAuditioned: true, laterVerdict: "not_checked" })); void playTimingCheckAt(deckEngine.getSnapshot().durationSeconds * 0.67); }}>CHECK LATER</button>
+                </div>
+                {timingWizard.beginningAuditioned && (
+                  <fieldset className="wizard-verdicts">
+                    <legend>At the beginning, did the clicks follow the song?</legend>
+                    <button type="button" className={timingWizard.beginningVerdict === "matches" ? "selected" : ""} onClick={() => { stopMetronomeAudition(); setTimingWizard((current) => ({ ...current, beginningVerdict: "matches" })); }}>YES, THEY MATCH</button>
+                    <button type="button" className={timingWizard.beginningVerdict === "drifts" ? "selected" : ""} onClick={() => { stopMetronomeAudition(); setTimingWizard((current) => ({ ...current, beginningVerdict: "drifts" })); }}>NO, THEY FEEL OFF</button>
+                    <button type="button" className={timingWizard.beginningVerdict === "not_sure" ? "selected" : ""} onClick={() => { stopMetronomeAudition(); setTimingWizard((current) => ({ ...current, beginningVerdict: "not_sure" })); }}>NOT SURE</button>
+                  </fieldset>
+                )}
+                {timingWizard.laterAuditioned && (
+                  <fieldset className="wizard-verdicts">
+                    <legend>Later in the song, did the clicks still follow?</legend>
+                    <button type="button" className={timingWizard.laterVerdict === "matches" ? "selected" : ""} onClick={() => { stopMetronomeAudition(); setTimingWizard((current) => ({ ...current, laterVerdict: "matches" })); }}>YES, THEY MATCH</button>
+                    <button type="button" className={timingWizard.laterVerdict === "drifts" ? "selected" : ""} onClick={() => { stopMetronomeAudition(); setTimingWizard((current) => ({ ...current, laterVerdict: "drifts" })); }}>NO, THEY DRIFT</button>
+                    <button type="button" className={timingWizard.laterVerdict === "not_sure" ? "selected" : ""} onClick={() => { stopMetronomeAudition(); setTimingWizard((current) => ({ ...current, laterVerdict: "not_sure" })); }}>NOT SURE</button>
+                  </fieldset>
+                )}
+                <p className="wizard-safe-note">Manual adjustments never unlock long blends. Mazzy will keep using Safe Fade until detector confidence is professionally validated.</p>
+                <dl className="wizard-summary">
+                  <div><dt>Original pulse</dt><dd>{effectiveGrid.bpm ? `${effectiveGrid.bpm.toFixed(1)} BPM` : "Not found"}</dd></div>
+                  <div><dt>Draft pulse</dt><dd>{previewGrid.bpm ? `${previewGrid.bpm.toFixed(1)} BPM` : "Not found"}</dd></div>
+                  <div><dt>Safety</dt><dd>Safe Fade active</dd></div>
+                </dl>
+                <div className="wizard-actions two">
+                  <button type="button" onClick={closeTimingWizard}>CANCEL</button>
+                  <button
+                    type="button"
+                    className="wizard-primary"
+                    disabled={timingReviewSaveStatus === "saving" || timingWizard.beginningVerdict === "not_checked" || timingWizard.laterVerdict === "not_checked"}
+                    onClick={() => void saveTimingWizard()}
+                  >
+                    {timingReviewSaveStatus === "saving" ? "SAVING ANSWERS…" : timingWizard.trackId ? "SAVE ANSWERS ON THIS DEVICE" : "USE UNTIL UNLOADED"}
+                  </button>
+                </div>
+                {(timingWizard.beginningVerdict === "not_checked" || timingWizard.laterVerdict === "not_checked") && (
+                  <p className="wizard-save-help">Check both places and choose an answer. “Not sure” is a valid answer.</p>
+                )}
+              </div>
+            )}
+
+            <div className="wizard-footer" aria-live="polite">
+              <button type="button" onClick={() => { stopMetronomeAudition(); setTimingWizard((current) => ({ ...current, step: Math.max(0, current.step - 1) })); }} disabled={timingWizard.step === 0}>BACK</button>
+              <span>Adjusted is not the same as professionally verified.</span>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="eq-panel">
         {["high", "mid", "low"].map((band) => (
@@ -731,14 +1632,14 @@ const Deck = forwardRef(function Deck(
                 step="0.1"
                 value={eq[band]}
                 onChange={(event) => setEqBandGain(band, Number(event.target.value))}
-                disabled={!fileReady}
+                disabled={!fileReady || manualInteractionLocked}
               />
             </div>
             <button
               type="button"
               className={`kill-btn ${eqKill[band] ? "kill-on" : ""}`}
               onClick={() => toggleEqKill(band)}
-              disabled={!fileReady}
+              disabled={!fileReady || manualInteractionLocked}
             >
               K
             </button>
@@ -747,14 +1648,14 @@ const Deck = forwardRef(function Deck(
       </div>
 
       <div className="deck-row">
-        <button className={`action-btn ${isPlaying ? "playing" : ""}`} type="button" onClick={onPlayPause} disabled={!fileReady}>
+        <button className={`action-btn ${isPlaying ? "playing" : ""}`} type="button" onClick={onPlayPause} disabled={!fileReady || interactionLocked || (!isPlaying && startOrLoadLocked)}>
           {isPlaying ? "Pause" : "Play"}
         </button>
         <button
           className={`secondary-btn ${syncActive ? "sync-active" : ""}`}
           type="button"
           onClick={onSync}
-          disabled={!fileReady || !originalBpm || !otherBpm}
+          disabled={!fileReady || !originalBpm || !otherBpm || manualInteractionLocked}
         >
           SYNC
         </button>
@@ -763,7 +1664,7 @@ const Deck = forwardRef(function Deck(
       {syncActive && syncTargetBpm && (
         <div className="sync-meta">
           <span>{`SYNCED TO ${Math.round(syncTargetBpm * 10) / 10} BPM`}</span>
-          <button type="button" className="sync-release-btn" onClick={() => void releaseSyncInstant()}>
+          <button type="button" className="sync-release-btn" onClick={() => void releaseSyncInstant()} disabled={manualInteractionLocked}>
             X
           </button>
         </div>
@@ -780,7 +1681,7 @@ const Deck = forwardRef(function Deck(
             step="0.01"
             value={tempo}
             onChange={onTempoChange}
-            disabled={!fileReady}
+            disabled={!fileReady || manualInteractionLocked}
           />
         </div>
       </label>

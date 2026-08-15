@@ -1,0 +1,90 @@
+import { describe, expect, it } from "vitest";
+import { estimateDecodedTruePeakLinear } from "./decodedTruePeak";
+
+const amplitudeForDb = (value: number) => 10 ** (value / 20);
+const db = (value: number) => 20 * Math.log10(value);
+
+const taperedSine = (
+  sampleRate: number,
+  frequency: number,
+  amplitude: number,
+  phaseDegrees: number,
+  durationSeconds = 0.1
+) => {
+  const frameCount = Math.round(sampleRate * durationSeconds);
+  const fadeFrames = Math.round(sampleRate * 0.01);
+  const phase = phaseDegrees * Math.PI / 180;
+  return Float32Array.from({ length: frameCount }, (_, frame) => {
+    const fadeIn = Math.min(1, frame / fadeFrames);
+    const fadeOut = Math.min(1, (frameCount - 1 - frame) / fadeFrames);
+    return amplitude * Math.min(fadeIn, fadeOut) *
+      Math.sin(2 * Math.PI * frequency * frame / sampleRate + phase);
+  });
+};
+
+describe("decoded true-peak estimate", () => {
+  it("never reports below the decoded sample peak", () => {
+    const impulse = new Float32Array(48);
+    impulse[24] = 1;
+    expect(estimateDecodedTruePeakLinear([impulse])).toBe(1);
+  });
+
+  it("finds an intersample peak hidden by quarter-rate sample phase", () => {
+    const sampleRate = 48_000;
+    const amplitude = amplitudeForDb(-3);
+    const samples = Float32Array.from(
+      { length: sampleRate },
+      (_, frame) => amplitude * Math.sin(2 * Math.PI * 12_000 * frame / sampleRate + Math.PI / 4)
+    );
+    const samplePeak = Math.max(...samples.map((sample) => Math.abs(sample)));
+    const estimatedPeak = estimateDecodedTruePeakLinear([samples]);
+    expect(db(samplePeak)).toBeCloseTo(-6.01, 1);
+    expect(db(estimatedPeak)).toBeCloseTo(-2.92, 1);
+    expect(estimatedPeak).toBeGreaterThan(samplePeak);
+  });
+
+  it.each([
+    { caseNumber: 15, divisor: 4, amplitude: 0.5, phaseDegrees: 0, expectedDbtp: -6 },
+    { caseNumber: 16, divisor: 4, amplitude: 0.5, phaseDegrees: 45, expectedDbtp: -6 },
+    { caseNumber: 17, divisor: 6, amplitude: 0.5, phaseDegrees: 60, expectedDbtp: -6 },
+    { caseNumber: 18, divisor: 8, amplitude: 0.5, phaseDegrees: 67.5, expectedDbtp: -6 },
+    { caseNumber: 19, divisor: 4, amplitude: 1.41, phaseDegrees: 45, expectedDbtp: 3 }
+  ])("meets the EBU Tech 3341 case $caseNumber true-peak tolerance", ({
+    divisor,
+    amplitude,
+    phaseDegrees,
+    expectedDbtp
+  }) => {
+    const sampleRate = 48_000;
+    const channel = taperedSine(
+      sampleRate,
+      sampleRate / divisor,
+      amplitude,
+      phaseDegrees
+    );
+    const measuredDbtp = db(estimateDecodedTruePeakLinear([channel, channel]));
+    // Tech 3341's minimum-requirement tolerance is asymmetric:
+    // expected +0.2/-0.4 dBTP. These formula-defined signals contain no
+    // downloaded EBU audio and are never rendered to a speaker.
+    expect(measuredDbtp).toBeGreaterThanOrEqual(expectedDbtp - 0.4);
+    expect(measuredDbtp).toBeLessThanOrEqual(expectedDbtp + 0.2);
+  });
+
+  it("measures the loudest channel independently", () => {
+    const left = new Float32Array(128);
+    const right = new Float32Array(128);
+    right[64] = 0.75;
+    expect(estimateDecodedTruePeakLinear([left, right])).toBeCloseTo(0.75);
+  });
+
+  it("rejects malformed or non-finite channel input", () => {
+    expect(() => estimateDecodedTruePeakLinear([])).toThrow(RangeError);
+    expect(() => estimateDecodedTruePeakLinear([
+      new Float32Array(2),
+      new Float32Array(3)
+    ])).toThrow(RangeError);
+    expect(() => estimateDecodedTruePeakLinear([
+      Float32Array.of(0, Number.NaN)
+    ])).toThrow(RangeError);
+  });
+});

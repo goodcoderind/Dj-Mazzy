@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Mazzy · Local Key-Lock Listening Lab</title>
+    <style>
+      body { max-width: 820px; margin: 36px auto; padding: 0 20px 60px; font: 16px/1.55 system-ui; background: #101010; color: #eee; }
+      section { margin: 22px 0; padding: 18px; border: 1px solid #3a3a3a; background: #171717; }
+      h1, h2 { line-height: 1.2; }
+      .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+      button, label.file { min-height: 44px; box-sizing: border-box; padding: 10px 15px; border: 1px solid #b99b64; background: #222; color: #fff; font: inherit; cursor: pointer; }
+      button:disabled { opacity: .45; cursor: not-allowed; }
+      input[type=file] { max-width: 100%; }
+      .muted { color: #aaa; }
+      pre { white-space: pre-wrap; background: #0d0d0d; border: 1px solid #333; padding: 12px; }
+      :focus-visible { outline: 3px solid #f4c873; outline-offset: 3px; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Local key-lock listening lab</h1>
+      <p>This advanced check helps decide whether pitch-preserving tempo changes sound clean on real music. Music stays in this tab, is never uploaded or saved, and filenames are discarded after short excerpts are prepared.</p>
+      <section aria-labelledby="choose-title">
+        <h2 id="choose-title">1. Choose two local songs</h2>
+        <p class="muted">Mazzy uses a short excerpt from around one-third into each song. Keep speaker volume comfortable.</p>
+        <div class="row">
+          <label>Song A <input id="file-a" type="file" accept="audio/*" /></label>
+          <label>Song B <input id="file-b" type="file" accept="audio/*" /></label>
+          <button id="prepare" type="button">Prepare private excerpts</button>
+        </div>
+        <p id="prepare-status" role="status" aria-live="polite">No songs prepared.</p>
+      </section>
+      <section aria-labelledby="listen-title">
+        <h2 id="listen-title">2. Listen</h2>
+        <p class="muted">Original is a reference. The slower/faster checks preserve pitch. The handoff deliberately stresses two processors at once; it does not judge song choice or DJ timing.</p>
+        <div class="row">
+          <button class="listen" data-mode="original" disabled>Play A · original</button>
+          <button class="listen" data-mode="slow" disabled>Play A · slightly slower</button>
+          <button class="listen" data-mode="fast" disabled>Play A · slightly faster</button>
+          <button class="listen" data-mode="handoff" disabled>Play A → B handoff</button>
+          <button id="stop" type="button" disabled>Stop audio</button>
+        </div>
+        <p id="listen-status" role="status" aria-live="polite">Prepare excerpts first.</p>
+      </section>
+      <section aria-labelledby="feedback-title">
+        <h2 id="feedback-title">3. What did you hear?</h2>
+        <p class="muted">Listen for metallic voices, watery drums, flutter, stereo wobble, clicks, or dropouts. “Not sure” is useful evidence.</p>
+        <div class="row">
+          <button class="rating" data-rating="clean" disabled>Sounds clean</button>
+          <button class="rating" data-rating="artifacts" disabled>Heard artifacts</button>
+          <button class="rating" data-rating="unsure" disabled>Not sure</button>
+        </div>
+        <pre id="summary" aria-label="Private listening summary">No ratings yet. Nothing is saved.</pre>
+        <button id="discard" type="button">Discard this tab’s feedback</button>
+      </section>
+    </main>
+    <script type="module" src="/src/diagnostics/keyLockListeningPage.ts"></script>
+  </body>
+</html>

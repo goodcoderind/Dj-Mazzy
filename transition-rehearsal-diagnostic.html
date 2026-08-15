@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Mazzy · Transition Rehearsal Diagnostic</title>
+    <style>
+      :root { color-scheme: dark; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+      body { margin: 0; background: #090909; color: #ddd; }
+      main { max-width: 840px; margin: 0 auto; padding: 40px 24px; }
+      h1 { margin: 0 0 12px; font-size: 22px; }
+      p { color: #999; line-height: 1.55; }
+      button { min-height: 44px; padding: 10px 16px; border: 1px solid #c8a96e; background: #151515; color: #eee; font: inherit; }
+      table { width: 100%; margin-top: 20px; border-collapse: collapse; }
+      th, td { padding: 10px; border: 1px solid #303030; text-align: left; vertical-align: top; }
+      .pass { color: #8bd6a4; } .fail { color: #ff929f; }
+      pre { overflow: auto; padding: 12px; border: 1px solid #303030; background: #111; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Transition Rehearsal Diagnostic</h1>
+      <p>Development-only, copyright-free Web Audio checks. This page is excluded from normal production builds. It renders synthetic transition and current protected-master paths offline, plus a clearly separate peak-guard candidate that is not used by the live app. It does not test a speaker or claim certified true-peak metering. Signals stay in memory and are never played, uploaded, or saved.</p>
+      <button id="run" type="button">RUN LOCAL AUDIO CHECKS</button>
+      <p id="status" role="status">Ready.</p>
+      <table>
+        <thead><tr><th>Check</th><th>Result</th><th>Evidence</th></tr></thead>
+        <tbody id="results"></tbody>
+      </table>
+      <pre id="summary">No run yet.</pre>
+    </main>
+    <script type="module" src="/src/diagnostics/transitionRehearsalDiagnosticPage.ts"></script>
+  </body>
+</html>

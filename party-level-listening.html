@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Mazzy · Private Party-Level Listening Lab</title>
+    <style>
+      body { max-width: 860px; margin: 36px auto; padding: 0 20px 60px; font: 16px/1.55 system-ui; background: #101010; color: #eee; }
+      section { margin: 22px 0; padding: 18px; border: 1px solid #3a3a3a; background: #171717; }
+      h1, h2 { line-height: 1.2; }
+      .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+      button, select { min-height: 44px; box-sizing: border-box; padding: 10px 15px; border: 1px solid #b99b64; background: #222; color: #fff; font: inherit; }
+      button { cursor: pointer; }
+      button:disabled, select:disabled { opacity: .45; cursor: not-allowed; }
+      input[type=file] { max-width: 100%; }
+      .muted { color: #aaa; }
+      .warning { color: #ffd48a; }
+      pre { white-space: pre-wrap; background: #0d0d0d; border: 1px solid #333; padding: 12px; }
+      :focus-visible { outline: 3px solid #f4c873; outline-offset: 3px; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Private party-level listening lab</h1>
+      <p>This advanced check helps humans compare three possible playback targets on real music. It never chooses a production target automatically. Music and numeric measurements stay in this tab, filenames are discarded, and nothing is uploaded, saved, or exported.</p>
+      <section aria-labelledby="choose-title">
+        <h2 id="choose-title">1. Prepare two local songs</h2>
+        <p class="muted">Use contrasting songs you know well. Mazzy analyzes both locally, then keeps only anonymous 8-second excerpts and numeric level measurements in memory. Keep speaker volume comfortable.</p>
+        <div class="row">
+          <label>Track A <input id="file-a" type="file" accept="audio/*" /></label>
+          <label>Track B <input id="file-b" type="file" accept="audio/*" /></label>
+          <button id="prepare" type="button">Prepare private comparison</button>
+          <button id="stop" type="button" disabled>Cancel or stop audio</button>
+        </div>
+        <p id="prepare-status" role="status" aria-live="polite">No songs prepared.</p>
+      </section>
+      <section aria-labelledby="listen-title">
+        <h2 id="listen-title">2. Compare one target</h2>
+        <p class="muted">Listen to A and B at the same selected target. The current production value is still provisional; these choices are candidates, not quality labels.</p>
+        <div class="row">
+          <label for="target">Candidate target</label>
+          <select id="target" disabled>
+            <option value="-16">−16 LUFS</option>
+            <option value="-14" selected>−14 LUFS</option>
+            <option value="-12">−12 LUFS</option>
+          </select>
+          <button class="listen" data-track="a" disabled>Play anonymous track A</button>
+          <button class="listen" data-track="b" disabled>Play anonymous track B</button>
+        </div>
+        <p id="candidate" class="muted">Prepare songs to see bounded trim estimates.</p>
+        <p id="listen-status" role="status" aria-live="polite">Prepare songs first.</p>
+      </section>
+      <section aria-labelledby="feedback-title">
+        <h2 id="feedback-title">3. Record a private judgment</h2>
+        <p class="muted">Rating unlocks only after both excerpts finish without a detected browser-audio failure at this target. Repeat across genres, devices, and comfortable speaker settings; one pair cannot calibrate the product.</p>
+        <div class="row" role="group" aria-label="Private loudness judgment">
+          <button class="rating" data-rating="even" disabled>Levels feel even</button>
+          <button class="rating" data-rating="a-louder" disabled>A feels louder</button>
+          <button class="rating" data-rating="b-louder" disabled>B feels louder</button>
+          <button class="rating" data-rating="too-loud" disabled>Overall too loud</button>
+          <button class="rating" data-rating="too-quiet" disabled>Overall too quiet</button>
+          <button class="rating" data-rating="unsure" disabled>Not sure</button>
+        </div>
+        <pre id="summary" aria-label="Private party-level listening summary">No judgments yet. Nothing is saved.</pre>
+        <div class="row">
+          <button id="clear-songs" type="button" disabled>Clear private excerpts</button>
+          <button id="discard-feedback" type="button">Discard this tab’s judgments</button>
+        </div>
+      </section>
+    </main>
+    <script type="module" src="/src/diagnostics/partyLevelListeningPage.ts"></script>
+  </body>
+</html>
