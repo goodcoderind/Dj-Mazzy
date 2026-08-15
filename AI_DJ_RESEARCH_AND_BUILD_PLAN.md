@@ -2668,13 +2668,14 @@ These are the active backlog, not reasons to discard the prototype.
   exact readonly track/meta/checkpoint transaction. Once that transaction
   exists, abort cancels it and removes its listener. Browser database-open
   requests are not themselves cancellable, so a timeout revokes application
-authority, retains the fail-closed library lock, and shows a focused
-**Reload Local Music** action instead of starting another open in the same
-document. An ordinary on-time rejection retains the existing bounded-owner
-**Retry Opening Local Music** flow. The visible polite opening status and the
-same synchronous lock cover Party actions plus direct Deck load/start/timing
-controls, while Pause and **Stop All Sound** remain available. Both retryable
-and reload-required failures focus their persistent alert. No File, Blob, filename, raw error,
+  authority, retains the fail-closed library lock, and shows a focused
+  **Reload Local Music** action instead of starting another open in the same
+  document. An ordinary on-time rejection retains the existing bounded-owner
+  **Retry Opening Local Music** flow. The visible polite opening status and the
+  same synchronous lock cover Party actions plus direct Deck load/start/timing
+  controls, while Pause and **Stop All Sound** remain available. Both retryable
+  and reload-required failures focus their persistent alert. No File, Blob,
+  filename, raw error,
   checkpoint payload, or operation timing is added to persistence, trace,
   report, export, or network paths; no stored schema changes.
 
@@ -2683,8 +2684,53 @@ and reload-required failures focus their persistent alert. No File, Blob, filena
   malformed owner/clock rejection, and pre-aborted storage access. Existing
   recovery-bundle tests still prove valid library/checkpoint hydration. This is
   a startup-liveness and ownership gate, not browser durability evidence. The
-  later paused-plan claim and routine analysis-row persistence remain explicit
-  follow-up storage-liveness slices.
+  later paused-plan claim remains an explicit follow-up storage-liveness slice.
+
+- **D-074 — Bound and coalesce routine analysis-row persistence without
+  blocking party recovery:** `library-routine-write-runtime/v1` owns one active
+  batch and one merged latest pending batch under immutable epoch/operation and
+  monotonic 15-second deadline authority. Repeated full analysis snapshots
+  replace the pending snapshot instead of retaining unbounded File/library
+  copies. Manual timing patches merge per exact track/content owner and are
+  applied after snapshot merging, so routine analysis cannot overwrite a newer
+  host correction.
+
+  The production adapter uses the shared cross-tab Web Lock and same-tab
+  serializer with one AbortSignal covering queued admission, an
+  authority-bounded wait for the shared database open, and the exact live
+  readwrite transaction. The platform open request itself is not cancellable
+  and remains available to unrelated recovery owners. Exact-deadline or delayed-timer
+  settlement revokes authority first, aborts storage, drops pending work, and
+  opens an analysis-persistence-only circuit. Late success/error is inert.
+  Music, neutral trim, Safe Fade, and already imported rows remain available;
+  a focused fixed-text **Reload Mazzy** alert explains that future analysis may
+  not be saved. Ordinary on-time storage rejection retains a bounded retry on
+  the next exact candidate rather than creating a hot loop.
+
+  Import, single-track removal, and Remove All synchronously acquire one
+  exclusive runtime handoff before membership mutation; duplicate exclusive
+  owners are refused, and completion restores the prior running or circuit
+  mode. Every generated-analysis publication first advances a synchronous dirty
+  generation, independent of React-effect timing and the pending queue. An
+  exclusive or remote membership boundary compares that generation with the
+  last confirmed save and rebases the newest exact surviving snapshot before a
+  clean committed snapshot may be skipped. Hydration and clean, successfully
+  committed membership snapshots are therefore not rewritten without losing a
+  locally published update. The database adapter updates only an existing exact
+  content identity and reports mismatches instead of resurrecting or overwriting
+  a replacement.
+  Stored track/checkpoint schemas, trace, export, and network behavior do not
+  change; owner/timer/batch/error details remain tab-memory-only.
+
+  Deterministic evidence covers 1,000 triggers coalescing to one active/one
+  pending batch, manual-patch merge priority, exact-deadline and throttled-timer
+  timeout, abort plus late-settlement inertness, exclusive membership admission,
+  preservation of an open analysis circuit, ordinary failure recovery,
+  hydration no-op, synchronous dirty-generation replay across membership,
+  exact IndexedDB snapshot/patch behavior, replacement-content rejection, and
+  pre-aborted storage access. Real IndexedDB suspension, quota
+  eviction, and crash durability remain browser/device gates. The paused-plan
+  restore claim is the next bounded storage-ownership follow-up.
 
 ### Open questions
 

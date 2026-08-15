@@ -7,10 +7,9 @@ import {
   clearTracksFromDb,
   deleteTrackFromDb,
   loadLibraryRecoveryBundle,
-  patchTrackInDb,
   savePartySessionCheckpointToDb,
   saveImportedTracksToDb,
-  saveTracksToDb,
+  saveRoutineTrackUpdatesToDb,
   subscribeToLibraryMutations
 } from "./libraryDb";
 import { equalPowerGains } from "./planning/transitionMath";
@@ -114,6 +113,19 @@ import {
 import { assessImportCapacity, formatStorageSize } from "./storage/importCapacity";
 import { identifyLocalFile, normalizeContentIdentity } from "./storage/contentIdentity";
 import { ownsLibraryHydration, startLibraryHydration } from "./storage/libraryHydrationRuntime";
+import {
+  createLibraryRoutinePatchBatch,
+  createLibraryRoutineMembershipBatch,
+  createLibraryRoutineSnapshotBatch,
+  hasUnpersistedLibraryRoutineGeneration,
+  libraryRoutineEnqueueOwnsPersistence,
+  libraryRoutineSaveStatusAfterSettlement,
+  mergeLibraryRoutineWriteBatches,
+  retryRejectedLibraryRoutineSnapshot,
+  shouldEnqueueLibraryRoutineSnapshot,
+  shouldQueueLibraryRoutineSnapshot
+} from "./storage/libraryRoutineWriteBatch";
+import { createLibraryRoutineWriteRuntime } from "./storage/libraryRoutineWriteRuntime";
 import {
   createPartyCheckpointClearOwner,
   createPartyCheckpointWriteRuntime,
@@ -315,6 +327,7 @@ export default function App() {
   const [libraryMutationBusy, setLibraryMutationBusy] = useState(true);
   const [libraryStorageError, setLibraryStorageError] = useState("");
   const [libraryHydrationCircuitOpen, setLibraryHydrationCircuitOpen] = useState(false);
+  const [libraryRoutineWriteCircuitOpen, setLibraryRoutineWriteCircuitOpen] = useState(false);
   const [libraryAnalysisSaveError, setLibraryAnalysisSaveError] = useState("");
   const [backgroundAnalysisNotice, setBackgroundAnalysisNotice] = useState(null);
   const [libraryTimingSaveErrors, setLibraryTimingSaveErrors] = useState({});
@@ -427,6 +440,11 @@ export default function App() {
   const libraryHydrationRetryRequestedRef = useRef(false);
   const libraryHydrationStatusRef = useRef(null);
   const libraryStorageAlertRef = useRef(null);
+  const libraryRoutineWriteRuntimeRef = useRef(null);
+  const libraryRoutineSkipSnapshotRef = useRef(null);
+  const libraryRoutineDirtyGenerationRef = useRef(0);
+  const libraryRoutineSavedGenerationRef = useRef(0);
+  const libraryRoutineWriteAlertRef = useRef(null);
   const libraryImportGenerationRef = useRef(0);
   const audioOutputWatchArmedRef = useRef(false);
   const outputDeviceGenerationRef = useRef(0);
@@ -441,6 +459,14 @@ export default function App() {
       partyCheckpointWriterLostRef.current ||
       partySoundStopInProgressRef.current ||
       transitionCompletionUncertainRef.current;
+  };
+  const publishLibrary = (update, { routineDirty = false } = {}) => {
+    const previous = libraryRef.current;
+    const next = typeof update === "function" ? update(previous) : update;
+    libraryRef.current = next;
+    if (routineDirty && next !== previous) libraryRoutineDirtyGenerationRef.current += 1;
+    setLibrary(next);
+    return next;
   };
   const advancePartyAutopilotCoordinatorEpoch = () => {
     partyAutopilotTickBoundaryRef.current = advancePartyAutopilotTickEpoch(
@@ -684,10 +710,14 @@ export default function App() {
         deckBRef.current?.eject?.();
         setLoadedByDeck((current) => ({ ...current, b: null }));
       }
-      setLibrary((current) => {
+      publishLibrary((current) => {
         const currentById = new Map(current.map((track) => [track.id, track]));
-        return restoredRows.map((track) => currentById.get(track.id) ?? track);
+        const next = restoredRows.map((track) => currentById.get(track.id) ?? track);
+        libraryRef.current = next;
+        libraryRoutineSkipSnapshotRef.current = next;
+        return next;
       });
+      enqueueCurrentLibraryRoutineSnapshot({ membershipChanged: true });
       setQueue((current) => current.filter((trackId) => storedIds.has(trackId)));
       libraryStateRef.current = bundle.libraryState;
       partyCheckpointRevisionRef.current = bundle.checkpointRevision;
@@ -719,7 +749,13 @@ export default function App() {
         removedTrackIdsRef.current.add(message.trackId);
         cancelBackgroundAnalysisForTrack(message.trackId);
         playedTrackIdsRef.current = playedTrackIdsRef.current.filter((trackId) => trackId !== message.trackId);
-        setLibrary((current) => current.filter((track) => track.id !== message.trackId));
+        publishLibrary((current) => {
+          const next = current.filter((track) => track.id !== message.trackId);
+          libraryRef.current = next;
+          libraryRoutineSkipSnapshotRef.current = next;
+          return next;
+        });
+        enqueueCurrentLibraryRoutineSnapshot({ membershipChanged: true });
         setQueue((current) => current.filter((trackId) => trackId !== message.trackId));
         setPlayedTrackIds((current) => current.filter((trackId) => trackId !== message.trackId));
       } else if (message.type === "library-cleared") {
@@ -955,7 +991,8 @@ export default function App() {
           setPartyCheckpointCardVisible(true);
           partyCheckpointHydratedRef.current = true;
           libraryRef.current = restoredLibrary;
-          setLibrary(restoredLibrary);
+          libraryRoutineSkipSnapshotRef.current = restoredLibrary;
+          publishLibrary(restoredLibrary);
           setLibraryStorageError("");
           if (libraryHydrationRetryRequestedRef.current) {
             libraryHydrationRetryRequestedRef.current = false;
@@ -1007,6 +1044,142 @@ export default function App() {
   };
 
   const libraryWritesBlocked = () => !["idle", "importing"].includes(libraryMutationModeRef.current);
+
+  const getLibraryRoutineWriteRuntime = () => {
+    if (libraryRoutineWriteRuntimeRef.current) return libraryRoutineWriteRuntimeRef.current;
+    libraryRoutineWriteRuntimeRef.current = createLibraryRoutineWriteRuntime({
+      write: (batch, signal) => saveRoutineTrackUpdatesToDb(batch, { signal }),
+      mergePending: mergeLibraryRoutineWriteBatches,
+      retryRejectedWhileExclusive: retryRejectedLibraryRoutineSnapshot,
+      onResolved: (batch, result) => {
+        if (result.status !== "saved") {
+          const pending = libraryRoutineWriteRuntimeRef.current?.snapshot?.().pending;
+          const skippedStillCurrent = result.skippedTrackIds.some((trackId) => {
+            const current = libraryRef.current.find((track) => track.id === trackId);
+            if (!current) return false;
+            const expected = batch.tracks?.find((track) => track.id === trackId) ??
+              batch.patches.find((entry) => entry.trackId === trackId);
+            if (!expected) return true;
+            return normalizeContentIdentity(current.contentIdentity) ===
+              normalizeContentIdentity(expected?.contentIdentity);
+          });
+          if (pending && !skippedStillCurrent) {
+            setLibrarySaveStatus("saving");
+            return true;
+          }
+          setLibrarySaveStatus("error");
+          setLibraryRoutineWriteCircuitOpen(true);
+          setLibraryAnalysisSaveError("Local music changed while analysis was being saved. Music and Safe Fade still work, but reload Mazzy before relying on newly saved analysis.");
+          window.requestAnimationFrame(() => libraryRoutineWriteAlertRef.current?.focus?.());
+          return false;
+        }
+        libraryRoutineSavedGenerationRef.current = Math.max(
+          libraryRoutineSavedGenerationRef.current,
+          batch.routineGeneration
+        );
+        const runtimeSnapshot = libraryRoutineWriteRuntimeRef.current?.snapshot?.();
+        const saveStatus = libraryRoutineSaveStatusAfterSettlement({
+          pending: Boolean(runtimeSnapshot?.pending),
+          dirtyGeneration: libraryRoutineDirtyGenerationRef.current,
+          savedGeneration: libraryRoutineSavedGenerationRef.current
+        });
+        setLibrarySaveStatus(saveStatus);
+        if (saveStatus === "saved" && !libraryRoutineWriteCircuitOpen) setLibraryAnalysisSaveError("");
+        if (saveStatus === "saving" && runtimeSnapshot?.mode === "running" && !runtimeSnapshot.pending) {
+          window.queueMicrotask(() => enqueueCurrentLibraryRoutineSnapshot());
+        }
+        return true;
+      },
+      onRejected: () => {
+        setLibrarySaveStatus("error");
+        setLibraryAnalysisSaveError("Your music is still stored, but the newest local analysis could not be saved. Free browser storage and reload to retry analysis.");
+        return true;
+      },
+      onTimedOut: () => {
+        setLibrarySaveStatus("error");
+        setLibraryRoutineWriteCircuitOpen(true);
+        setLibraryAnalysisSaveError("Local analysis saving stopped because browser storage did not respond. Music and Safe Fade still work; reload Mazzy before relying on newly saved analysis.");
+        window.requestAnimationFrame(() => libraryRoutineWriteAlertRef.current?.focus?.());
+      }
+    });
+    return libraryRoutineWriteRuntimeRef.current;
+  };
+
+  const persistRoutineTrackPatch = async (trackId, patch) => {
+    const current = libraryRef.current.find((track) => track.id === trackId);
+    if (!current || removedTrackIdsRef.current.has(trackId)) {
+      throw new DOMException("The local track changed before its update could be saved", "InvalidStateError");
+    }
+    const expectedContentIdentity = normalizeContentIdentity(current.contentIdentity);
+    const queued = getLibraryRoutineWriteRuntime().enqueue(createLibraryRoutinePatchBatch(
+      trackId,
+      expectedContentIdentity,
+      patch
+    ));
+    const settlement = await queued.settlement;
+    const settledCurrent = libraryRef.current.find((track) => track.id === trackId);
+    if (settlement.outcome !== "completed" || settlement.result.status !== "saved" ||
+        !settlement.result.savedTrackIds.includes(trackId) ||
+        normalizeContentIdentity(settledCurrent?.contentIdentity) !== expectedContentIdentity) {
+      throw new DOMException("The local track update was not saved", "InvalidStateError");
+    }
+  };
+
+  const prepareLibraryRoutineWriteExclusive = async () => {
+    const ready = await getLibraryRoutineWriteRuntime().prepareExclusive();
+    if (!ready) {
+      setLibrarySaveStatus("error");
+      setLibraryRoutineWriteCircuitOpen(true);
+      setLibraryAnalysisSaveError("Local analysis saving did not release browser storage. Music remains available, but reload Mazzy before changing the saved library.");
+      window.requestAnimationFrame(() => libraryRoutineWriteAlertRef.current?.focus?.());
+    }
+    return ready;
+  };
+
+  const enqueueCurrentLibraryRoutineSnapshot = ({ membershipChanged = false } = {}) => {
+    const runtime = getLibraryRoutineWriteRuntime();
+    const snapshot = runtime.snapshot();
+    if (!shouldEnqueueLibraryRoutineSnapshot({
+      membershipChanged,
+      active: snapshot.active,
+      pending: snapshot.pending,
+      dirtyGeneration: libraryRoutineDirtyGenerationRef.current,
+      savedGeneration: libraryRoutineSavedGenerationRef.current
+    })) return false;
+    const tracks = libraryRef.current
+      .filter((track) => !removedTrackIdsRef.current.has(track.id))
+      .map(persistedTrack);
+    const queued = runtime.enqueue(membershipChanged
+      ? createLibraryRoutineMembershipBatch(tracks, libraryRoutineDirtyGenerationRef.current)
+      : createLibraryRoutineSnapshotBatch(tracks, libraryRoutineDirtyGenerationRef.current));
+    if (!libraryRoutineEnqueueOwnsPersistence(queued.status)) return false;
+    setLibrarySaveStatus("saving");
+    return true;
+  };
+
+  const completeLibraryRoutineWriteExclusive = ({ membershipChanged = false } = {}) => {
+    const runtime = getLibraryRoutineWriteRuntime();
+    const snapshot = runtime.snapshot();
+    const replayPending = snapshot.pending;
+    const replayAllowed = snapshot.mode === "exclusive" && snapshot.exclusiveReturnMode === "running";
+    const dirtyUnpersisted = hasUnpersistedLibraryRoutineGeneration({
+      dirtyGeneration: libraryRoutineDirtyGenerationRef.current,
+      savedGeneration: libraryRoutineSavedGenerationRef.current
+    });
+    if (replayAllowed && (replayPending || dirtyUnpersisted)) {
+      const tracks = libraryRef.current
+        .filter((track) => !removedTrackIdsRef.current.has(track.id))
+        .map(persistedTrack);
+      runtime.enqueue(membershipChanged
+        ? createLibraryRoutineMembershipBatch(tracks, libraryRoutineDirtyGenerationRef.current)
+        : createLibraryRoutineSnapshotBatch(tracks, libraryRoutineDirtyGenerationRef.current));
+      setLibrarySaveStatus("saving");
+    }
+    return Object.freeze({
+      completed: runtime.completeExclusive(),
+      replayed: replayAllowed && (replayPending || dirtyUnpersisted)
+    });
+  };
 
   useEffect(() => {
     const closeMenu = () => dismissContextMenu();
@@ -1748,9 +1921,9 @@ export default function App() {
         terminal = read.outcome;
         if (read.outcome === "timed-out") deferBackgroundAnalysis(track, kind, "read", false);
         if (read.outcome === "failed" && kind === "basic-program") {
-          setLibrary((prev) => prev.map((item) => ownsCurrentLibraryRow(item)
+          publishLibrary((prev) => prev.map((item) => ownsCurrentLibraryRow(item)
             ? applyQueuedAnalysisFailure(item, needsBasicAnalysis, needsProgramLevel)
-            : item));
+            : item), { routineDirty: true });
         } else if (read.outcome === "failed" && kind === "enhanced") {
           setEnhancedFailureByTrack((current) => ({ ...current, [track.id]: true }));
         }
@@ -1783,9 +1956,9 @@ export default function App() {
         if (policy.deferStage) {
           deferBackgroundAnalysis(track, kind, policy.deferStage, policy.unabortable);
         } else if (decode.outcome === "failed" && kind === "basic-program") {
-          setLibrary((prev) => prev.map((item) => ownsCurrentLibraryRow(item)
+          publishLibrary((prev) => prev.map((item) => ownsCurrentLibraryRow(item)
             ? applyQueuedAnalysisFailure(item, needsBasicAnalysis, needsProgramLevel)
-            : item));
+            : item), { routineDirty: true });
         } else if (decode.outcome === "failed" && kind === "enhanced") {
           setEnhancedFailureByTrack((current) => ({ ...current, [track.id]: true }));
         }
@@ -1821,19 +1994,19 @@ export default function App() {
           if (basic.outcome === "timed-out" || (basic.outcome === "failed" && clientRuntimeUnavailable)) {
             deferBackgroundAnalysis(track, kind, "basic-program", false);
           } else if (basic.outcome === "failed") {
-            setLibrary((prev) => prev.map((item) => ownsCurrentLibraryRow(item)
+            publishLibrary((prev) => prev.map((item) => ownsCurrentLibraryRow(item)
               ? applyQueuedAnalysisFailure(item, needsBasicAnalysis, needsProgramLevel)
-              : item));
+              : item), { routineDirty: true });
           }
           return;
         }
         if (!ownsBackgroundAnalysisLease(activeBackgroundAnalysisRef.current, lease)) return;
-        setLibrary((prev) => prev.map((item) => {
+        publishLibrary((prev) => prev.map((item) => {
           if (!ownsCurrentLibraryRow(item)) return item;
           if (needsBasicAnalysis) return { ...mergeGeneratedAnalysis(item, basic.value), programLevelStatus: "ready" };
           if (needsProgramLevel) return { ...item, programLevel: basic.value.programLevel, programLevelStatus: "ready" };
           return item;
-        }));
+        }), { routineDirty: true });
         terminal = "completed";
         return;
       }
@@ -1896,9 +2069,9 @@ export default function App() {
       }
       if (!ownsBackgroundAnalysisLease(activeBackgroundAnalysisRef.current, lease)) return;
       setEnhancedFailureByTrack((current) => ({ ...current, [track.id]: false }));
-      setLibrary((prev) => prev.map((item) => ownsCurrentLibraryRow(item)
+      publishLibrary((prev) => prev.map((item) => ownsCurrentLibraryRow(item)
         ? mergeEnhancedRhythm(item, enhanced.value)
-        : item));
+        : item), { routineDirty: true });
       terminal = "completed";
     } finally {
       const stillOwns = ownsBackgroundAnalysisLease(activeBackgroundAnalysisRef.current, lease);
@@ -2006,26 +2179,26 @@ export default function App() {
   };
 
   useEffect(() => {
-    if (!library.length) {
+    const dirtyUnpersisted = hasUnpersistedLibraryRoutineGeneration({
+      dirtyGeneration: libraryRoutineDirtyGenerationRef.current,
+      savedGeneration: libraryRoutineSavedGenerationRef.current
+    });
+    if (libraryRoutineSkipSnapshotRef.current === library && !dirtyUnpersisted) {
+      libraryRoutineSkipSnapshotRef.current = null;
+      setLibrarySaveStatus("saved");
       return;
     }
-    let active = true;
-    setLibrarySaveStatus("saving");
-    void saveTracksToDb(
-      library.filter((track) => !removedTrackIdsRef.current.has(track.id)).map(persistedTrack)
-    ).then(() => {
-      if (active) {
-        setLibrarySaveStatus("saved");
-        setLibraryAnalysisSaveError("");
-      }
-    }).catch(() => {
-      if (active) {
-        setLibrarySaveStatus("error");
-        setLibraryAnalysisSaveError("Your music is still stored, but the newest local analysis could not be saved. Free browser storage and reload to retry analysis.");
-      }
-    });
-    return () => { active = false; };
-  }, [library]);
+    if (!shouldQueueLibraryRoutineSnapshot({
+      library,
+      skipSnapshot: dirtyUnpersisted ? null : libraryRoutineSkipSnapshotRef.current,
+      circuitOpen: libraryRoutineWriteCircuitOpen
+    })) return;
+    const queued = getLibraryRoutineWriteRuntime().enqueue(createLibraryRoutineSnapshotBatch(
+      library.filter((track) => !removedTrackIdsRef.current.has(track.id)).map(persistedTrack),
+      libraryRoutineDirtyGenerationRef.current
+    ));
+    if (libraryRoutineEnqueueOwnsPersistence(queued.status)) setLibrarySaveStatus("saving");
+  }, [library, libraryRoutineWriteCircuitOpen]);
 
   useEffect(() => {
     let deferredChanged = false;
@@ -2086,9 +2259,13 @@ export default function App() {
 
     setLibraryMutationLock(true, "importing");
     const importGeneration = ++libraryImportGenerationRef.current;
+    let routineWriteExclusive = false;
+    let routineMembershipChanged = false;
     setLibrarySaveStatus("saving");
     setLibraryStorageError("");
     try {
+      routineWriteExclusive = await prepareLibraryRoutineWriteExclusive();
+      if (!routineWriteExclusive) return;
       const importLibraryState = { ...libraryStateRef.current };
       const existingIdentities = new Set();
       const legacyIdentityById = new Map();
@@ -2122,12 +2299,15 @@ export default function App() {
             importLibraryState
           );
           if (identityCommit.status !== "saved") throw new DOMException("The local library changed in another tab", "InvalidStateError");
+          routineMembershipChanged = identityCommit.libraryState.revision !== importLibraryState.revision ||
+            identityCommit.libraryState.epoch !== importLibraryState.epoch;
           libraryStateRef.current = identityCommit.libraryState;
-          setLibrary((current) => {
+          publishLibrary((current) => {
             const next = current.map((track) => legacyIdentityById.has(track.id)
               ? { ...track, contentIdentity: legacyIdentityById.get(track.id) }
               : track);
             libraryRef.current = next;
+            libraryRoutineSkipSnapshotRef.current = next;
             return next;
           });
         }
@@ -2197,16 +2377,19 @@ export default function App() {
       if (importCommit.status !== "saved") {
         throw new DOMException("The local library changed in another tab", "InvalidStateError");
       }
+      routineMembershipChanged = importCommit.libraryState.revision !== importLibraryState.revision ||
+        importCommit.libraryState.epoch !== importLibraryState.epoch;
       libraryStateRef.current = importCommit.libraryState;
       if (importGeneration !== libraryImportGenerationRef.current) {
         await Promise.all(importCommit.savedTrackIds.map(deleteTrackFromDb));
+        routineMembershipChanged = routineMembershipChanged || importCommit.savedTrackIds.length > 0;
         return;
       }
       const committedTrackIds = new Set(importCommit.savedTrackIds);
       const committedTracks = tracks.filter((track) => committedTrackIds.has(track.id));
       duplicatesSkipped += tracks.length - committedTracks.length;
       for (const track of committedTracks) removedTrackIdsRef.current.delete(track.id);
-      setLibrary((current) => {
+      publishLibrary((current) => {
         const next = [
           ...current.map((track) => legacyIdentityById.has(track.id)
             ? { ...track, contentIdentity: legacyIdentityById.get(track.id) }
@@ -2214,6 +2397,7 @@ export default function App() {
           ...committedTracks
         ];
         libraryRef.current = next;
+        libraryRoutineSkipSnapshotRef.current = next;
         return next;
       });
       setLibrarySaveStatus("saved");
@@ -2230,6 +2414,7 @@ export default function App() {
       showToast(message);
     } finally {
       if (importRef.current) importRef.current.value = "";
+      if (routineWriteExclusive) completeLibraryRoutineWriteExclusive({ membershipChanged: routineMembershipChanged });
       if (importGeneration === libraryImportGenerationRef.current) setLibraryMutationLock(false);
     }
   };
@@ -2650,42 +2835,50 @@ export default function App() {
 
   const onAnalysisDetected = (trackId, result) => {
     if (!trackId || libraryWritesBlocked() || removedTrackIdsRef.current.has(trackId)) return;
-    setLibrary((prev) =>
-      prev.map((track) =>
+    publishLibrary(
+      (prev) => prev.map((track) =>
         track.id === trackId && !removedTrackIdsRef.current.has(trackId)
           ? { ...mergeGeneratedAnalysis(track, result), programLevelStatus: "ready" }
           : track
-      )
+      ),
+      { routineDirty: true }
     );
   };
 
   const onEnhancedRhythmDetected = (trackId, enhanced) => {
     if (!trackId || libraryWritesBlocked() || removedTrackIdsRef.current.has(trackId)) return;
-    setLibrary((previous) => previous.map((track) =>
-      track.id === trackId ? mergeEnhancedRhythm(track, enhanced) : track
-    ));
+    publishLibrary(
+      (previous) => previous.map((track) =>
+        track.id === trackId ? mergeEnhancedRhythm(track, enhanced) : track
+      ),
+      { routineDirty: true }
+    );
   };
 
   const onProgramLevelDetected = (trackId, programLevel) => {
     if (!trackId || libraryWritesBlocked() || removedTrackIdsRef.current.has(trackId)) return;
     const currentProgramLevel = normalizeProgramLevel(programLevel);
     if (!currentProgramLevel) return;
-    setLibrary((previous) => previous.map((track) =>
-      track.id === trackId ? { ...track, programLevel: currentProgramLevel, programLevelStatus: "ready" } : track
-    ));
+    publishLibrary(
+      (previous) => previous.map((track) =>
+        track.id === trackId ? { ...track, programLevel: currentProgramLevel, programLevelStatus: "ready" } : track
+      ),
+      { routineDirty: true }
+    );
   };
 
   const onAnalysisOverrideChange = (trackId, overrides) => {
     if (!trackId || libraryWritesBlocked() || removedTrackIdsRef.current.has(trackId)) return;
     const analysisOverrides = normalizeBeatGridOverrides(overrides);
-    setLibrary((prev) =>
-      prev.map((track) =>
+    publishLibrary(
+      (prev) => prev.map((track) =>
         track.id === trackId
           ? { ...track, analysisOverrides, timingReview: null }
           : track
-      )
+      ),
+      { routineDirty: true }
     );
-    void patchTrackInDb(trackId, { analysisOverrides, timingReview: null }).then(() => {
+    void persistRoutineTrackPatch(trackId, { analysisOverrides, timingReview: null }).then(() => {
       setLibraryTimingSaveErrors((current) => {
         const next = { ...current };
         delete next[trackId];
@@ -2711,7 +2904,7 @@ export default function App() {
     };
     if (!next.timingReview) throw new Error("The timing answers were invalid");
     try {
-      await patchTrackInDb(trackId, {
+      await persistRoutineTrackPatch(trackId, {
         analysisOverrides: next.analysisOverrides,
         timingReview: next.timingReview
       });
@@ -2729,7 +2922,7 @@ export default function App() {
     }
     if (removedTrackIdsRef.current.has(trackId) || libraryWritesBlocked() ||
       !libraryRef.current.some((track) => track.id === trackId)) return;
-    setLibrary((previous) => previous.map((track) => track.id === trackId
+    publishLibrary((previous) => previous.map((track) => track.id === trackId
       ? { ...track, analysisOverrides: next.analysisOverrides, timingReview: next.timingReview }
       : track));
   };
@@ -2740,7 +2933,7 @@ export default function App() {
     if (!current) return;
     const next = { ...current, timingReview: null };
     try {
-      await patchTrackInDb(trackId, { timingReview: null });
+      await persistRoutineTrackPatch(trackId, { timingReview: null });
       setLibraryTimingSaveErrors((current) => {
         const nextErrors = { ...current };
         delete nextErrors[trackId];
@@ -2755,7 +2948,7 @@ export default function App() {
     }
     if (removedTrackIdsRef.current.has(trackId) || libraryWritesBlocked() ||
       !libraryRef.current.some((track) => track.id === trackId)) return;
-    setLibrary((previous) => previous.map((track) => track.id === trackId
+    publishLibrary((previous) => previous.map((track) => track.id === trackId
       ? { ...track, timingReview: null }
       : track));
   };
@@ -2776,10 +2969,15 @@ export default function App() {
     if (partyFirstSongLoadRef.current?.trackId === trackId &&
       !cancelPartyFirstSongLoad({ keepStatus: false })) return;
     if (partyFirstSongLoadStatus?.trackId === trackId) setPartyFirstSongLoadStatus(null);
+    setLibraryMutationLock(true);
+    const routineWriteExclusive = await prepareLibraryRoutineWriteExclusive();
+    if (!routineWriteExclusive) {
+      setLibraryMutationLock(false);
+      return;
+    }
     removedTrackIdsRef.current.add(trackId);
     cancelBackgroundAnalysisForTrack(trackId);
     pauseAutoPilotForHostControl("Party Autopilot paused · library changed");
-    setLibraryMutationLock(true);
     let deletion;
     try {
       deletion = await deleteTrackFromDb(trackId);
@@ -2796,9 +2994,9 @@ export default function App() {
           queueBackgroundAnalysis(surviving);
         }
       });
-      return;
-    } finally {
+      completeLibraryRoutineWriteExclusive();
       setLibraryMutationLock(false);
+      return;
     }
     libraryStateRef.current = deletion.libraryState;
     partyCheckpointRevisionRef.current = deletion.checkpointRevision;
@@ -2816,7 +3014,14 @@ export default function App() {
     setRestoredPartyPlan(null);
     playedTrackIdsRef.current = playedTrackIdsRef.current.filter((id) => id !== trackId);
     setPlayedTrackIds((current) => current.filter((id) => id !== trackId));
-    setLibrary((current) => current.filter((candidate) => candidate.id !== trackId));
+    publishLibrary((current) => {
+      const next = current.filter((candidate) => candidate.id !== trackId);
+      libraryRef.current = next;
+      libraryRoutineSkipSnapshotRef.current = next;
+      return next;
+    });
+    completeLibraryRoutineWriteExclusive({ membershipChanged: true });
+    setLibraryMutationLock(false);
     setQueue((current) => current.filter((id) => id !== trackId));
     if (deckARef.current?.getTrackId?.() === trackId) {
       deckARef.current?.eject?.();
@@ -2839,12 +3044,17 @@ export default function App() {
     const analysisDeferralsBeforeClear = new Map(backgroundAnalysisDeferredRef.current);
     if (!cancelPartyFirstSongLoad({ keepStatus: false })) return;
     setPartyFirstSongLoadStatus(null);
+    setLibraryMutationLock(true);
+    const routineWriteExclusive = await prepareLibraryRoutineWriteExclusive();
+    if (!routineWriteExclusive) {
+      setLibraryMutationLock(false);
+      return;
+    }
     queuedAnalysisIdsRef.current.clear();
     pendingAnalysisQueueRef.current = [];
     backgroundAnalysisDeferredRef.current.clear();
     setBackgroundAnalysisNotice(null);
     for (const track of library) removedTrackIdsRef.current.add(track.id);
-    setLibraryMutationLock(true);
     analysisGenerationRef.current += 1;
     cancelActiveBackgroundAnalysis({ resetEnhanced: true });
     disposeAnalysisClient();
@@ -2870,9 +3080,9 @@ export default function App() {
           if (!hasRestoredDeferral) queueBackgroundAnalysis(track);
         }
       });
-      return;
-    } finally {
+      completeLibraryRoutineWriteExclusive();
       setLibraryMutationLock(false);
+      return;
     }
     libraryStateRef.current = cleared.libraryState;
     partyCheckpointRevisionRef.current = cleared.checkpointRevision;
@@ -2893,7 +3103,11 @@ export default function App() {
     deckBRef.current?.eject?.();
     setQueue([]);
     setPlayedTrackIds([]);
-    setLibrary([]);
+    libraryRef.current = [];
+    libraryRoutineSkipSnapshotRef.current = libraryRef.current;
+    publishLibrary(libraryRef.current);
+    completeLibraryRoutineWriteExclusive({ membershipChanged: true });
+    setLibraryMutationLock(false);
     setAutoPilotChoice(null);
     showToast("All imported music, saved analysis, and saved party recovery were removed");
   };
@@ -4840,6 +5054,7 @@ export default function App() {
       try { partyCheckpointClearCancelRef.current?.(); } catch { /* Storage owner is already revoked. */ }
       partyCheckpointClearCancelRef.current = null;
       partyCheckpointWriteRuntimeRef.current?.halt?.();
+      libraryRoutineWriteRuntimeRef.current?.halt?.();
       cancelActiveBackgroundAnalysis({ resetEnhanced: true, announceUnabortable: false });
       try { disposeAnalysisClient(); } catch { /* Host teardown continues. */ }
       try { disposeEnhancedRhythmClient(); } catch { /* Host teardown continues. */ }
@@ -5943,7 +6158,14 @@ export default function App() {
               )}
             </div>
           )}
-          {libraryAnalysisSaveError && <p className="library-storage-error" role="alert">{libraryAnalysisSaveError}</p>}
+          {libraryAnalysisSaveError && (
+            <div ref={libraryRoutineWriteAlertRef} tabIndex={-1} className="library-storage-error" role="alert">
+              <p>{libraryAnalysisSaveError}</p>
+              {libraryRoutineWriteCircuitOpen && (
+                <button type="button" onClick={() => window.location.reload()}>RELOAD MAZZY</button>
+              )}
+            </div>
+          )}
           {backgroundAnalysisNotice && (
             <div className="library-storage-error" role="status" aria-live="polite" aria-atomic="true">
               <p>{backgroundAnalysisNotice.message}</p>

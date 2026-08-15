@@ -8,6 +8,7 @@ import {
   createPartySessionCheckpointTombstone,
   normalizePartySessionCheckpointRecord
 } from "./domain/partySessionCheckpoint";
+import { normalizeContentIdentity } from "./storage/contentIdentity";
 
 const DB_NAME = "mazzy-library";
 export const LIBRARY_DATABASE_VERSION = 8;
@@ -21,7 +22,6 @@ const LIBRARY_STATE_SCHEMA_VERSION = "library-state/v1";
 const LIBRARY_MUTATION_CHANNEL = "mazzy-library-mutations/v2";
 const LIBRARY_MUTATION_SCHEMA_VERSION = "library-mutation/v2";
 const mutationOriginId = crypto.randomUUID();
-let mutationQueue = Promise.resolve();
 let databasePromise = null;
 
 const checkpointAbortError = () => new DOMException("Party recovery write cancelled", "AbortError");
@@ -129,6 +129,29 @@ const awaitWithAbort = (promise, signal) => {
     );
   });
 };
+
+const openDbWithAbort = async (signal, { closeLate = false } = {}) => {
+  if (signal?.aborted) throw checkpointAbortError();
+  const opening = openDb();
+  try {
+    return await awaitWithAbort(opening, signal);
+  } catch (error) {
+    if (signal?.aborted && closeLate) {
+      void opening.then((opened) => {
+        if (!signal.aborted) return;
+        try { opened.close(); } catch { /* The late open is already non-authoritative. */ }
+        if (databasePromise === opening) databasePromise = null;
+      }, () => undefined);
+    }
+    throw error;
+  }
+};
+
+export const __setLibraryDatabasePromiseForTests = (promise) => {
+  databasePromise = promise;
+};
+
+export const __openDbWithAbortForTests = (signal, options) => openDbWithAbort(signal, options);
 
 const migrateTracks = (store, event) => {
   const needsAnalysisUpgrade = event.oldVersion < 5;
@@ -241,21 +264,7 @@ const readLibraryState = async (store) => {
 };
 
 export const loadLibraryRecoveryBundle = async ({ signal = null } = {}) => {
-  if (signal?.aborted) throw checkpointAbortError();
-  const opening = openDb();
-  let db;
-  try {
-    db = await awaitWithAbort(opening, signal);
-  } catch (error) {
-    if (signal?.aborted) {
-      void opening.then((opened) => {
-        if (!signal.aborted) return;
-        try { opened.close(); } catch { /* The late open is already non-authoritative. */ }
-        if (databasePromise === opening) databasePromise = null;
-      }, () => undefined);
-    }
-    throw error;
-  }
+  const db = await openDbWithAbort(signal, { closeLate: true });
   if (signal?.aborted) throw checkpointAbortError();
   const tx = db.transaction([STORE_NAME, META_STORE_NAME, PARTY_SESSION_STORE_NAME], "readonly");
   const completed = waitForTransaction(tx);
@@ -366,18 +375,76 @@ export const mergeRoutineTrackUpdate = (existing, incoming) => ({
   timingReview: existing.timingReview ?? null
 });
 
-export const saveTracksToDb = async (tracks) => serializeMutation(async () => {
-  const db = await openDb();
-  const tx = db.transaction(STORE_NAME, "readwrite");
-  const store = tx.objectStore(STORE_NAME);
-  tracks.forEach((track) => {
-    const request = store.get(track.id);
-    request.onsuccess = () => {
-      if (request.result) store.put(mergeRoutineTrackUpdate(request.result, track));
+const sameRoutineContent = (existing, expected) => {
+  const existingIdentity = normalizeContentIdentity(existing?.contentIdentity);
+  const expectedIdentity = normalizeContentIdentity(expected);
+  return existingIdentity === expectedIdentity &&
+    (existingIdentity !== null || existing?.contentIdentity == null);
+};
+
+export const saveRoutineTrackUpdatesToDb = async ({ tracks = [], patches = [] }, { signal = null } = {}) =>
+  withCrossTabMutationLock(() => serializeMutation(async () => {
+    if (signal?.aborted) throw checkpointAbortError();
+    const db = await openDbWithAbort(signal);
+    if (signal?.aborted) throw checkpointAbortError();
+    const tx = db.transaction(STORE_NAME, "readwrite");
+    const completed = waitForTransaction(tx);
+    const abortTransaction = () => {
+      try { tx.abort(); } catch { /* The exact transaction already settled. */ }
     };
-  });
-  return waitForTransaction(tx);
-});
+    signal?.addEventListener("abort", abortTransaction, { once: true });
+    const store = tx.objectStore(STORE_NAME);
+    const snapshots = new Map();
+    const patchByTrack = new Map();
+    for (const track of tracks) {
+      if (!track || typeof track.id !== "string" || !track.id) continue;
+      snapshots.set(track.id, track);
+    }
+    for (const entry of patches) {
+      if (!entry || typeof entry.trackId !== "string" || !entry.trackId ||
+          !entry.patch || typeof entry.patch !== "object" || Array.isArray(entry.patch)) continue;
+      const current = patchByTrack.get(entry.trackId);
+      patchByTrack.set(entry.trackId, {
+        trackId: entry.trackId,
+        contentIdentity: normalizeContentIdentity(entry.contentIdentity),
+        patch: { ...(current?.patch ?? {}), ...entry.patch }
+      });
+    }
+    const ids = new Set([...snapshots.keys(), ...patchByTrack.keys()]);
+    const savedTrackIds = [];
+    const skippedTrackIds = [];
+    try {
+      for (const trackId of ids) {
+        const request = store.get(trackId);
+        request.onsuccess = () => {
+          const existing = request.result;
+          const snapshot = snapshots.get(trackId);
+          const patch = patchByTrack.get(trackId);
+          const snapshotIdentity = normalizeContentIdentity(snapshot?.contentIdentity);
+          const patchOwnedBySnapshot = !snapshot || patch?.contentIdentity === snapshotIdentity;
+          const exactPatch = patchOwnedBySnapshot ? patch : null;
+          const expectedIdentity = snapshot ? snapshotIdentity : exactPatch?.contentIdentity ?? null;
+          if (!existing || !sameRoutineContent(existing, expectedIdentity)) {
+            skippedTrackIds.push(trackId);
+            return;
+          }
+          let next = snapshot ? mergeRoutineTrackUpdate(existing, snapshot) : existing;
+          if (exactPatch) next = { ...next, ...exactPatch.patch, id: trackId };
+          store.put(next);
+          savedTrackIds.push(trackId);
+        };
+      }
+      await completed;
+      if (signal?.aborted) throw checkpointAbortError();
+      return Object.freeze({
+        status: skippedTrackIds.length ? "partial" : "saved",
+        savedTrackIds: Object.freeze([...savedTrackIds]),
+        skippedTrackIds: Object.freeze([...skippedTrackIds])
+      });
+    } finally {
+      signal?.removeEventListener("abort", abortTransaction);
+    }
+  }, { signal }), { signal });
 
 const sameLibraryState = (current, expected) => current && expected &&
   current.epoch === expected.epoch && current.revision === expected.revision;
@@ -444,29 +511,6 @@ export const saveImportedTracksToDb = async (
   }
   return { status: "saved", savedTrackIds, duplicateContentIdentities, libraryState };
 }));
-
-export const saveTrackToDb = async (track) => serializeMutation(async () => {
-  const db = await openDb();
-  const tx = db.transaction(STORE_NAME, "readwrite");
-  const store = tx.objectStore(STORE_NAME);
-  const request = store.get(track.id);
-  request.onsuccess = () => {
-    if (request.result) store.put(mergeRoutineTrackUpdate(request.result, track));
-  };
-  return waitForTransaction(tx);
-});
-
-export const patchTrackInDb = async (trackId, patch) => serializeMutation(async () => {
-  const db = await openDb();
-  const tx = db.transaction(STORE_NAME, "readwrite");
-  const store = tx.objectStore(STORE_NAME);
-  const completed = waitForTransaction(tx);
-  const request = store.get(trackId);
-  request.onsuccess = () => {
-    if (request.result) store.put({ ...request.result, ...patch, id: trackId });
-  };
-  await completed;
-});
 
 const rawCheckpointRevision = (value) => safeCounter(value?.revision) && value.revision > 0 &&
   value.revision < Number.MAX_SAFE_INTEGER
@@ -714,7 +758,6 @@ export const __resetLibraryDbForTests = async ({ deleteDatabase = false } = {}) 
   const db = databasePromise ? await databasePromise.catch(() => null) : null;
   db?.close?.();
   databasePromise = null;
-  mutationQueue = Promise.resolve();
   if (!deleteDatabase || typeof indexedDB === "undefined") return;
   await new Promise((resolve, reject) => {
     const request = indexedDB.deleteDatabase(DB_NAME);

@@ -4,7 +4,9 @@ import { afterAll, beforeEach } from "vitest";
 import {
   LIBRARY_DATABASE_VERSION,
   __normalizeLibraryMutationEventForTests,
+  __openDbWithAbortForTests,
   __resetLibraryDbForTests,
+  __setLibraryDatabasePromiseForTests,
   claimPartySessionCheckpoint,
   clearPartySessionCheckpoint,
   clearTracksFromDb,
@@ -14,6 +16,7 @@ import {
   mergeRoutineTrackUpdate,
   saveImportedTracksToDb,
   savePartySessionCheckpointToDb,
+  saveRoutineTrackUpdatesToDb,
   waitForTransaction
 } from "./libraryDb";
 
@@ -185,6 +188,93 @@ describe("library recovery storage", () => {
     controller.abort();
     await expect(loadLibraryRecoveryBundle({ signal: controller.signal }))
       .rejects.toMatchObject({ name: "AbortError" });
+  });
+
+  it("saves exact routine snapshots while preserving a newer manual timing patch", async () => {
+    const initial = (await loadLibraryRecoveryBundle()).libraryState;
+    const source = {
+      ...track("source", "a"),
+      bpm: 100,
+      analysisOverrides: { schemaVersion: "override/v1", beatShiftSeconds: 0 },
+      timingReview: null
+    };
+    await saveImportedTracksToDb([source], [], initial);
+    const manual = { schemaVersion: "override/v1", beatShiftSeconds: 0.04 };
+    const patched = await saveRoutineTrackUpdatesToDb({
+      patches: [{ trackId: source.id, contentIdentity: source.contentIdentity, patch: { analysisOverrides: manual } }]
+    });
+    expect(patched).toMatchObject({ status: "saved", savedTrackIds: ["source"] });
+
+    const snapshot = await saveRoutineTrackUpdatesToDb({
+      tracks: [{ ...source, bpm: 128, analysisOverrides: { ...manual, beatShiftSeconds: 0 } }]
+    });
+    expect(snapshot.status).toBe("saved");
+    const restored = (await loadLibraryRecoveryBundle()).tracks[0];
+    expect(restored.bpm).toBe(128);
+    expect(restored.analysisOverrides).toEqual(manual);
+  });
+
+  it("fails closed instead of writing a routine result into replaced content", async () => {
+    const initial = (await loadLibraryRecoveryBundle()).libraryState;
+    await saveImportedTracksToDb([track("source", "a")], [], initial);
+    const result = await saveRoutineTrackUpdatesToDb({
+      tracks: [{ ...track("source", "b"), bpm: 140 }],
+      patches: [{
+        trackId: "source",
+        contentIdentity: contentIdentity("b"),
+        patch: { timingReview: { schemaVersion: "hostile" } }
+      }]
+    });
+    expect(result).toMatchObject({ status: "partial", savedTrackIds: [], skippedTrackIds: ["source"] });
+    expect((await loadLibraryRecoveryBundle()).tracks[0]).not.toHaveProperty("bpm");
+  });
+
+  it("preserves a successor snapshot while discarding its predecessor's pending patch", async () => {
+    const initial = (await loadLibraryRecoveryBundle()).libraryState;
+    await saveImportedTracksToDb([track("source", "a")], [], initial);
+    const deletion = await deleteTrackFromDb("source");
+    const successor = track("source", "b");
+    await saveImportedTracksToDb([successor], [], deletion.libraryState);
+    const result = await saveRoutineTrackUpdatesToDb({
+      tracks: [{ ...successor, bpm: 132 }],
+      patches: [{
+        trackId: "source",
+        contentIdentity: contentIdentity("a"),
+        patch: { timingReview: { schemaVersion: "stale-predecessor" } }
+      }]
+    });
+    expect(result.status).toBe("saved");
+    const restored = (await loadLibraryRecoveryBundle()).tracks[0];
+    expect(restored.bpm).toBe(132);
+    expect(restored.timingReview).toBeNull();
+  });
+
+  it("rejects an already-aborted routine write without changing the row", async () => {
+    const initial = (await loadLibraryRecoveryBundle()).libraryState;
+    const source = track("source", "a");
+    await saveImportedTracksToDb([source], [], initial);
+    const controller = new AbortController();
+    controller.abort();
+    await expect(saveRoutineTrackUpdatesToDb({ tracks: [{ ...source, bpm: 150 }] }, {
+      signal: controller.signal
+    })).rejects.toMatchObject({ name: "AbortError" });
+    expect((await loadLibraryRecoveryBundle()).tracks[0]).not.toHaveProperty("bpm");
+  });
+
+  it("does not close a shared pending database open when only a routine owner aborts", async () => {
+    let resolveOpen;
+    const close = vi.fn();
+    const opening = new Promise((resolve) => { resolveOpen = resolve; });
+    __setLibraryDatabasePromiseForTests(opening);
+    const controller = new AbortController();
+    const routine = __openDbWithAbortForTests(controller.signal);
+    controller.abort();
+    await expect(routine).rejects.toMatchObject({ name: "AbortError" });
+    const checkpointOwner = __openDbWithAbortForTests(null);
+    const sharedDb = { close };
+    resolveOpen(sharedDb);
+    await expect(checkpointOwner).resolves.toBe(sharedDb);
+    expect(close).not.toHaveBeenCalled();
   });
 
   it("releases an aborted queue waiter without running it after the predecessor settles", async () => {

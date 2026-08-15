@@ -222,8 +222,24 @@ request later. Only an exact on-time bundle unlocks import and playback. This
 wait is announced in a polite visible status; direct Deck starts, loads, and
 Party start actions stay locked while Pause and **Stop All Sound** remain
 available. Storage failures focus their persistent Retry or Reload alert. This
-does not yet bound the later paused-plan claim or routine analysis-row writes;
-those remain separate storage-liveness milestones.
+does not yet bound the later paused-plan claim; that remains a separate
+storage-liveness milestone.
+Routine local-analysis persistence is bounded independently from playback and
+party recovery. `library-routine-write-runtime/v1` keeps at most one active
+15-second storage batch and one merged latest pending batch; repeated analysis
+snapshots replace the pending snapshot, while exact manual timing patches are
+merged per track and retain priority. A timeout aborts the exact Web Lock,
+same-tab queue wait, and live IndexedDB transaction, drops pending work, and
+stops further analysis saves for this tab. A focused **Reload Mazzy** alert is
+shown, but already imported music, neutral trim, and Safe Fade remain usable.
+Import, Remove, and Remove All first acquire one exclusive handoff from this
+runtime so an old analysis write cannot race membership changes. Analysis
+publication advances a synchronous dirty generation before React renders; an
+exclusive or cross-tab membership change rebases that exact newest generation
+onto the surviving rows before it can be marked stored. Hydrated and clean,
+already-committed membership snapshots are not rewritten. This bounds runtime
+ownership and memory; it does not prove crash durability or browser storage
+performance.
 While Autopilot runs, **Energy Down** and **Energy Up** temporarily shift the
 next-song activity target by up to 30%. This remains a soft selection preference
 and cannot promote a weaker transition or bypass Safe Fade.
