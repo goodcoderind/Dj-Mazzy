@@ -149,6 +149,17 @@ song using the current planned transition,
 pause Autopilot, or stop an automatic transition. The technical mixer remains
 available under **Show Advanced Mixer**. Library tracks and queue ordering are
 keyboard operable, and preflight focus moves to its result when opened.
+Choosing that first song is decode-first: after the local file is successfully
+read and decoded, Mazzy freezes current cached facts or explicit neutral fallbacks
+used by Autopilot and makes the Deck ready without waiting behind background
+analysis. It never starts audio automatically. An in-memory exact owner keeps a
+visible **Opening first song locally** card and **Cancel Opening** action bound
+to that one load; cancellation, Stop All Sound, recovery, deletion, replacement,
+or unmount revokes the load before a late decode can publish. A slow-opening
+notice explains that the host may keep waiting or use Cancel instead of treating
+a large valid file as broken.
+Advanced Mixer and direct manual Deck loads retain their existing inline-analysis
+contract in this bounded slice.
 An always-enabled **Stop All Sound** action is kept in the ordinary Party Mode
 surface and inside the advanced timing dialog. It immediately revokes pending preload and transition starts, cancels
 automatic gain/EQ/filter automation, transition rehearsal, and timing clicks,

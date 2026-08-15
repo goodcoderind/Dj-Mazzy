@@ -2528,8 +2528,8 @@ These are the active backlog, not reasons to discard the prototype.
   Load generation, exact track identity, the opaque D-065 authority key,
   playback-recovery lock, and running AudioContext are rechecked before cached
   facts, trim, buffer publication, and the loaded settlement. The final trim
-  proof allows only 0.0001 dB for the AudioParam float32 gain round-trip, far
-  below the 0.1 dB policy step. Stop, Pause,
+  proof uses DeckEngine's accepted dB command and allows only 0.0001 dB of
+  representation tolerance, far below the 0.1 dB policy step. Stop, Pause,
   source replacement, expiry, recovery, deletion, clear, and unmount therefore
   leave late decode settlement inert. The readiness object is runtime-only; no
   IndexedDB, analysis, trace, transition, checkpoint, export, or network schema
@@ -2537,6 +2537,41 @@ These are the active backlog, not reasons to discard the prototype.
   cached and neutral decision matrices, authority loss before publication, and
   stale/removed/content-replaced background settlements. Browser decoding and
   sustained device behavior remain separate gates.
+
+- **D-070 — Make the mandatory Party first-song action decode-first and cancellable:**
+  `party-first-song-load/v1` gives Party Mode's **Choose First** path an exact,
+  runtime-only operation, Deck, track, and opaque load-authority key. This path
+  now shares `deck-load-readiness/v1`'s immutable post-decode facts with
+  Autopilot: valid current timing may be reused, missing timing forces Safe
+  Fade, valid current program level may be reused, and missing level freezes an
+  explicit 0 dB trim. Trim and timing policy are installed before buffer
+  publication. The path constructs no inline analysis client, while Advanced
+  Mixer and direct manual Deck loads retain the previous inline-analysis
+  contract.
+
+  App accepts readiness only after re-reading the exact owner, current Deck
+  track, idle/ready/1x transport, load-readiness key, and accepted-command trim
+  proof, running AudioContext, current library File, deletion state, and recovery
+  locks. Audio never starts automatically. Party Mode exposes a polite,
+  atomic **Opening first song locally** state, an always-reachable 44 px
+  **Cancel Opening** action, a truthful slow-opening notice after twelve seconds,
+  and a focused persistent read/decode or cleanup error. Success says that the
+  first song is ready and still requires **Play First Song**.
+
+  Cancel claims App ownership first, then uses the exact Deck authority to
+  abort FileReader, revoke the Deck generation, release isolated work, and
+  eject only that same idle load. Stop All Sound, output/audio recovery,
+  same-track deletion, library clear, remote destructive reconciliation, New
+  Party, and unmount use the same boundary or the Deck's audio-only teardown.
+  Unverifiable cleanup retains the existing playback lock and Stop All guidance;
+  a late decode or replaced load is inert. A wall timer changes only the visible
+  slow-opening copy and never decides transport authority. The owner/key is not
+  persisted, traced, exported, uploaded, or restored from a checkpoint. Tests
+  cover exact/stale settlement, all readiness postconditions, load invalidation
+  before revocation, post-start authority checks, deferred interaction loss, the
+  never-resolving inline-analysis factory trap, and manual-branch invariance.
+  Browser codec breadth, large-file timing, background-analysis liveness, and
+  physical-device behavior remain separate gates.
 
 ### Open questions
 

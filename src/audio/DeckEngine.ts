@@ -96,6 +96,7 @@ export class DeckEngine {
   private startTime = 0;
   private startOffset = 0;
   private playbackRate = 1;
+  private trackTrimDb = 0;
   private rateTimeline: PlaybackRateSegment[] = [];
   private error: string | null = null;
   private runtimeLoadRevision = 0;
@@ -753,11 +754,12 @@ export class DeckEngine {
     const now = this.audioEngine.clock.now();
     this.trackTrim.gain.cancelScheduledValues(now);
     this.trackTrim.gain.setValueAtTime(dbToGain(safeDb), now);
+    this.trackTrimDb = safeDb;
     return safeDb;
   }
 
   getTrackTrimDb() {
-    return 20 * Math.log10(Math.max(this.trackTrim.gain.value, 1e-6));
+    return this.trackTrimDb;
   }
 
   getEqSnapshot() {

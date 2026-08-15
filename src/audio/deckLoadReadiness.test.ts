@@ -6,7 +6,8 @@ import {
   commitDecodedDeckReadiness,
   decideDeckLoadReadiness,
   ownsDeckLoadReadiness,
-  runDeckPostDecodeLoad
+  runDeckPostDecodeLoad,
+  shouldAutoEjectDeckLoadFailure
 } from "./deckLoadReadiness";
 
 describe("deck load readiness", () => {
@@ -19,6 +20,46 @@ describe("deck load readiness", () => {
       version: DECK_LOAD_READINESS_VERSION,
       kind: "run-inline-analysis"
     });
+  });
+
+  it("leaves first-song failure cleanup to its exact owner", () => {
+    expect(shouldAutoEjectDeckLoadFailure({
+      purpose: DECK_LOAD_PURPOSE.partyFirstSong,
+      outcome: "unplayable-file"
+    })).toBe(false);
+    expect(shouldAutoEjectDeckLoadFailure({
+      purpose: DECK_LOAD_PURPOSE.manual,
+      outcome: "unplayable-file"
+    })).toBe(true);
+    expect(shouldAutoEjectDeckLoadFailure({
+      purpose: DECK_LOAD_PURPOSE.autoPilotPreload,
+      outcome: "cancelled"
+    })).toBe(false);
+  });
+
+  it("publishes the Party first song after decode without constructing inline analysis", () => {
+    const decision = decideDeckLoadReadiness({
+      purpose: DECK_LOAD_PURPOSE.partyFirstSong,
+      hasCurrentBasicAnalysis: false,
+      cachedTrimDb: null
+    });
+    expect(decision).toMatchObject({
+      kind: "publish-decoded",
+      timingFacts: "none",
+      levelTrim: "neutral",
+      safeFadeOnly: true,
+      trimDb: 0
+    });
+    let inlineFactoryCalls = 0;
+    expect(runDeckPostDecodeLoad({
+      decision,
+      publishDecoded: () => "ready",
+      runInlineAnalysis: () => {
+        inlineFactoryCalls += 1;
+        return new Promise(() => undefined);
+      }
+    })).toBe("ready");
+    expect(inlineFactoryCalls).toBe(0);
   });
 
   it("publishes a fully cached Autopilot load as analyzed", () => {
@@ -171,7 +212,7 @@ describe("deck load readiness", () => {
     expect(ownsDeckLoadReadiness({ ...input, value: { ...snapshot, safeFadeOnly: false } })).toBe(false);
   });
 
-  it.each([-6, -2.4, -0.1, 0.1, 3])("accepts real AudioParam float32 round-trip for %s dB", (trimDb) => {
+  it.each([-6, -2.4, -0.1, 0.1, 3])("retains a tight float32-compatible trim tolerance for %s dB", (trimDb) => {
     const appliedTrimDb = 20 * Math.log10(Math.fround(10 ** (trimDb / 20)));
     const snapshot = {
       version: DECK_LOAD_READINESS_VERSION,

@@ -211,9 +211,11 @@ describe("AudioEngine", () => {
     const { context, engine } = createEngine();
     const deckA = engine.getDeck("a");
     expect(deckA.setTrackTrimDb(8)).toBe(3);
+    expect(deckA.getTrackTrimDb()).toBe(3);
     expect(context.gains[3].gain.value).toBeCloseTo(10 ** (3 / 20));
     expect(engine.getDeckGain("a")).toBe(0);
     deckA.beginPreparing("next-track");
+    expect(deckA.getTrackTrimDb()).toBe(0);
     expect(context.gains[3].gain.value).toBe(1);
   });
 

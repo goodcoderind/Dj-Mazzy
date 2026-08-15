@@ -3,10 +3,19 @@ export const DECK_LOAD_TRIM_PROOF_TOLERANCE_DB = 0.0001;
 
 export const DECK_LOAD_PURPOSE = Object.freeze({
   manual: "manual",
+  partyFirstSong: "party-first-song",
   autoPilotPreload: "autopilot-preload"
 } as const);
 
 export type DeckLoadPurpose = typeof DECK_LOAD_PURPOSE[keyof typeof DECK_LOAD_PURPOSE];
+
+export const shouldAutoEjectDeckLoadFailure = ({
+  purpose,
+  outcome
+}: {
+  purpose: DeckLoadPurpose;
+  outcome: string;
+}) => outcome === "unplayable-file" && purpose !== DECK_LOAD_PURPOSE.partyFirstSong;
 type ReadinessInput = {
   purpose: DeckLoadPurpose;
   hasCurrentBasicAnalysis: boolean;
@@ -130,7 +139,7 @@ export const decideDeckLoadReadiness = ({
       kind: "run-inline-analysis"
     });
   }
-  if (purpose !== DECK_LOAD_PURPOSE.autoPilotPreload) {
+  if (purpose !== DECK_LOAD_PURPOSE.autoPilotPreload && purpose !== DECK_LOAD_PURPOSE.partyFirstSong) {
     throw new Error("Unsupported deck load purpose");
   }
 

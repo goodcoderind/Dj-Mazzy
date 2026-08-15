@@ -227,6 +227,23 @@ body {
 .party-mode-readiness > div { display: flex; gap: 8px; margin-top: 12px; }
 .party-mode-readiness button { min-width: 160px; padding: 8px 12px; font-size: 12px; }
 
+.party-first-song-load {
+  border-color: #8c7548;
+}
+
+.party-first-song-load.ready {
+  border-color: #587a62;
+}
+
+.party-first-song-load.error,
+.party-first-song-load.cleanup-error {
+  border-color: #a3485b;
+}
+
+.party-first-song-load button {
+  min-height: 44px;
+}
+
 .party-checkpoint-recovery {
   border-color: rgba(200, 169, 110, 0.65);
   background: #15120d;

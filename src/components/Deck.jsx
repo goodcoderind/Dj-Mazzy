@@ -3,6 +3,11 @@ import WaveSurfer from "wavesurfer.js";
 import { getAudioEngine } from "../audioContext";
 import { DECK_LOAD_OUTCOME } from "../audio/deckLoadOutcome";
 import {
+  commitDeckTransportStart,
+  ownsDeferredDeckInteraction,
+  runDeckLoadInvalidationBoundary
+} from "./deckInteractionLifecycle";
+import {
   DECK_LOAD_PURPOSE,
   DECK_LOAD_READINESS_VERSION,
   commitDecodedDeckReadiness,
@@ -116,6 +121,8 @@ const Deck = forwardRef(function Deck(
     onTimingReviewRemove,
     librarySaveStatus,
     onDeckPlayStart,
+    onDeckTransportStart,
+    onDeckLoadInvalidated,
     onAuxAudioStart,
     onStopAllSound,
     onDeckPlaybackCompletion,
@@ -124,7 +131,8 @@ const Deck = forwardRef(function Deck(
     playbackStartLockRef,
     flash,
     transitionLocked = false,
-    rehearsalLocked = false
+    rehearsalLocked = false,
+    partySetupLocked = false
   },
   ref
 ) {
@@ -141,6 +149,7 @@ const Deck = forwardRef(function Deck(
   const loadAbortControllerRef = useRef(null);
   const isolatedAnalysisClientRef = useRef(null);
   const loadReadinessRef = useRef(null);
+  const metronomeAuditionGenerationRef = useRef(0);
   const metronomeCancelRef = useRef(null);
   const metronomeUiTimerRef = useRef(0);
   const clickPulseTimersRef = useRef([]);
@@ -151,10 +160,11 @@ const Deck = forwardRef(function Deck(
   const timingWizardDescriptionId = useId();
   const deckEngineRef = useRef(null);
   const interactionLocked = transitionLocked || rehearsalLocked;
-  const startOrLoadLocked = interactionLocked || playbackStartLocked || playbackStartLockRef?.current;
-  const interactionLockedRef = useRef(interactionLocked);
+  const manualInteractionLocked = interactionLocked || partySetupLocked;
+  const startOrLoadLocked = manualInteractionLocked || playbackStartLocked || playbackStartLockRef?.current;
+  const interactionLockedRef = useRef(manualInteractionLocked);
   const onDeckPlaybackCompletionRef = useRef(onDeckPlaybackCompletion);
-  interactionLockedRef.current = interactionLocked;
+  interactionLockedRef.current = manualInteractionLocked;
   onDeckPlaybackCompletionRef.current = onDeckPlaybackCompletion;
   if (!deckEngineRef.current) {
     deckEngineRef.current = getAudioEngine().getDeck(channel);
@@ -280,7 +290,18 @@ const Deck = forwardRef(function Deck(
     const startAt = when == null ? getAudioEngine().clock.now() : when;
     if (!ownsDeckTransportAuthority(transportAuthorityRef.current, transportRevision) ||
       (startAuthority && !startAuthority())) return false;
-    deckEngine.play(offset ?? undefined, startAt);
+    const committedStart = commitDeckTransportStart({
+      start: () => deckEngine.play(offset ?? undefined, startAt),
+      ownsAuthority: () => ownsDeckTransportAuthority(transportAuthorityRef.current, transportRevision) &&
+        !playbackStartLockRef?.current && (!startAuthority || startAuthority()),
+      rollback: () => deckEngine.pause(),
+      notify: () => onDeckTransportStart?.(
+        channel,
+        currentTrackIdRef.current,
+        loadReadinessRef.current?.loadAuthorityKey ?? null
+      )
+    });
+    if (committedStart == null) return false;
     if (when == null) {
       if (notifyMaster) {
         onDeckPlayStart?.(
@@ -298,12 +319,18 @@ const Deck = forwardRef(function Deck(
     const before = deckEngine.getSnapshot();
     if (!ownsDeckTransportAuthority(transportAuthorityRef.current, transportRevision) ||
       (startAuthority && !startAuthority()) || before.status !== "ready" || !deckEngine.isReady()) return null;
-    const scheduledStart = deckEngine.play(offset, startTime);
-    if (!ownsDeckTransportAuthority(transportAuthorityRef.current, transportRevision) ||
-      playbackStartLockRef?.current || (startAuthority && !startAuthority())) {
-      deckEngine.pause();
-      return null;
-    }
+    const scheduledStart = commitDeckTransportStart({
+      start: () => deckEngine.play(offset, startTime),
+      ownsAuthority: () => ownsDeckTransportAuthority(transportAuthorityRef.current, transportRevision) &&
+        !playbackStartLockRef?.current && (!startAuthority || startAuthority()),
+      rollback: () => deckEngine.pause(),
+      notify: () => onDeckTransportStart?.(
+        channel,
+        currentTrackIdRef.current,
+        loadReadinessRef.current?.loadAuthorityKey ?? null
+      )
+    });
+    if (scheduledStart == null) return null;
     return Object.freeze({ scheduledStart, snapshot: deckEngine.getSnapshot() });
   };
 
@@ -314,7 +341,7 @@ const Deck = forwardRef(function Deck(
   };
 
   const seek = async (seconds) => {
-    if (interactionLocked || playbackStartLocked || playbackStartLockRef?.current) return false;
+    if (manualInteractionLocked || playbackStartLocked || playbackStartLockRef?.current) return false;
     stopMetronomeAudition();
     if (timingWizard?.step === 2) setTapTimes([]);
     const snapshot = deckEngine.getSnapshot();
@@ -364,6 +391,7 @@ const Deck = forwardRef(function Deck(
   };
 
   const stopMetronomeAudition = () => {
+    metronomeAuditionGenerationRef.current += 1;
     metronomeCancelRef.current?.();
     metronomeCancelRef.current = null;
     window.clearTimeout(metronomeUiTimerRef.current);
@@ -378,11 +406,14 @@ const Deck = forwardRef(function Deck(
       stopMetronomeAudition();
       return;
     }
-    if (playbackStartLocked || playbackStartLockRef?.current || !deckEngine.isActive() || !previewGrid.beatsSeconds.length) return;
+    if (interactionLockedRef.current || playbackStartLocked || playbackStartLockRef?.current ||
+      !deckEngine.isActive() || !previewGrid.beatsSeconds.length) return;
+    const auditionGeneration = ++metronomeAuditionGenerationRef.current;
     const transportRevision = captureDeckTransportAuthority(transportAuthorityRef.current);
     const engine = getAudioEngine();
     await engine.resume();
     if (!ownsDeckTransportAuthority(transportAuthorityRef.current, transportRevision) ||
+      auditionGeneration !== metronomeAuditionGenerationRef.current || interactionLockedRef.current ||
       playbackStartLocked || playbackStartLockRef?.current) return;
     const audition = startBeatGridAudition(engine, {
       beatsSeconds: previewGrid.beatsSeconds,
@@ -413,8 +444,17 @@ const Deck = forwardRef(function Deck(
     if (playbackStartLocked) stopMetronomeAudition();
   }, [playbackStartLocked]);
 
+  useEffect(() => {
+    if (!partySetupLocked) return;
+    invalidateDeckTransportAuthority(transportAuthorityRef.current);
+    stopMetronomeAudition();
+    setTapTimes([]);
+    setTimingWizard(null);
+    setTimingReviewSaveStatus("idle");
+  }, [partySetupLocked]);
+
   const openTimingWizard = () => {
-    if (!analysisRecord) return;
+    if (!analysisRecord || manualInteractionLocked) return;
     stopMetronomeAudition();
     setTapTimes([]);
     setTimingWizard({
@@ -439,10 +479,14 @@ const Deck = forwardRef(function Deck(
   };
 
   const playTimingCheckAt = async (positionSeconds) => {
-    if (playbackStartLocked || playbackStartLockRef?.current) return;
+    if (manualInteractionLocked || playbackStartLocked || playbackStartLockRef?.current) return;
+    const startAuthority = () => !interactionLockedRef.current &&
+      !playbackStartLockRef?.current;
     stopMetronomeAudition();
     if (!await seek(positionSeconds)) return;
-    if (!deckEngine.isActive()) await play(positionSeconds);
+    if (!startAuthority()) return;
+    if (!deckEngine.isActive() && !await play(positionSeconds, null, true, startAuthority)) return;
+    if (!startAuthority()) return;
     await auditionBeatGrid();
   };
 
@@ -454,6 +498,7 @@ const Deck = forwardRef(function Deck(
   };
 
   const updateTimingDraft = (draftOverrides, responses = {}) => {
+    if (manualInteractionLocked) return;
     setTimingWizard((current) => current ? {
       ...current,
       draftOverrides: normalizeBeatGridOverrides({ ...draftOverrides, autoMixDisabled: true }),
@@ -468,7 +513,7 @@ const Deck = forwardRef(function Deck(
     : analysisRecord;
 
   const chooseTempoInterpretation = (factor) => {
-    if (!analysisRecord || !timingWizard) return;
+    if (manualInteractionLocked || !analysisRecord || !timingWizard) return;
     const original = { ...analysisRecord, analysisOverrides: timingWizard.originalOverrides };
     updateTimingDraft({
       ...timingWizard.draftOverrides,
@@ -477,12 +522,13 @@ const Deck = forwardRef(function Deck(
   };
 
   const tapNaturalBeat = () => {
-    if (!timingWizard || !isPlaying) return;
+    if (manualInteractionLocked || !timingWizard || !isPlaying) return;
     const audioTime = getAudioEngine().clock.now();
     setTapTimes((current) => appendTap(current, deckEngine.getPosition(audioTime)));
   };
 
   const applyTappedPulse = () => {
+    if (manualInteractionLocked) return;
     const source = draftAnalysis();
     if (!source || !tapEstimate) return;
     updateTimingDraft(applyTapTempo(source, tapEstimate), {
@@ -493,7 +539,7 @@ const Deck = forwardRef(function Deck(
   };
 
   const saveTimingWizard = async () => {
-    if (!timingWizard || !analysisRecord) return;
+    if (manualInteractionLocked || !timingWizard || !analysisRecord) return;
     if (
       timingWizard.loadGeneration !== loadGenerationRef.current ||
       timingWizard.trackId !== currentTrackIdRef.current
@@ -505,6 +551,8 @@ const Deck = forwardRef(function Deck(
       ...timingWizard.draftOverrides,
       autoMixDisabled: true
     });
+    const expectedLoadGeneration = loadGenerationRef.current;
+    const expectedTrackId = currentTrackIdRef.current;
     let review;
     try {
       review = createTimingReview({
@@ -524,6 +572,13 @@ const Deck = forwardRef(function Deck(
         if (!onTimingReviewSave) throw new Error("Timing review storage is unavailable");
         await onTimingReviewSave(timingWizard.trackId, overrides, review);
       }
+      if (!ownsDeferredDeckInteraction({
+        locked: interactionLockedRef.current,
+        expectedLoadGeneration,
+        currentLoadGeneration: loadGenerationRef.current,
+        expectedTrackId,
+        currentTrackId: currentTrackIdRef.current
+      })) return;
       const nextRecord = { ...analysisRecord, analysisOverrides: overrides, timingReview: review };
       const grid = buildEffectiveBeatGrid(nextRecord);
       setAnalysisRecord(nextRecord);
@@ -538,14 +593,22 @@ const Deck = forwardRef(function Deck(
   };
 
   const removeTimingReview = async () => {
-    if (!analysisRecord?.timingReview) return;
+    if (manualInteractionLocked || !analysisRecord?.timingReview) return;
     const trackId = currentTrackIdRef.current;
+    const expectedLoadGeneration = loadGenerationRef.current;
     setTimingReviewSaveStatus("saving");
     try {
       if (trackId) {
         if (!onTimingReviewRemove) throw new Error("Timing review storage is unavailable");
         await onTimingReviewRemove(trackId);
       }
+      if (!ownsDeferredDeckInteraction({
+        locked: interactionLockedRef.current,
+        expectedLoadGeneration,
+        currentLoadGeneration: loadGenerationRef.current,
+        expectedTrackId: trackId,
+        currentTrackId: currentTrackIdRef.current
+      })) return;
       setAnalysisRecord((current) => current ? { ...current, timingReview: null } : current);
       setTimingReviewSaveStatus("saved");
     } catch (_error) {
@@ -663,15 +726,25 @@ const Deck = forwardRef(function Deck(
       purpose = DECK_LOAD_PURPOSE.manual
     } = {}
   ) => {
-    if (playbackStartLocked || playbackStartLockRef?.current) {
+    if ((partySetupLocked && purpose !== DECK_LOAD_PURPOSE.partyFirstSong) ||
+      playbackStartLocked || playbackStartLockRef?.current) {
       return DECK_LOAD_OUTCOME.cancelled;
     }
     if (!(file instanceof Blob)) return DECK_LOAD_OUTCOME.unplayableFile;
 
-    invalidateDeckTransportAuthority(transportAuthorityRef.current);
-    loadAbortControllerRef.current?.abort?.();
-    isolatedAnalysisClientRef.current?.dispose?.();
-    isolatedAnalysisClientRef.current = null;
+    runDeckLoadInvalidationBoundary({
+      notify: () => onDeckLoadInvalidated?.(
+        channel,
+        currentTrackIdRef.current,
+        loadReadinessRef.current?.loadAuthorityKey ?? null
+      ),
+      revoke: () => {
+        invalidateDeckTransportAuthority(transportAuthorityRef.current);
+        loadAbortControllerRef.current?.abort?.();
+        isolatedAnalysisClientRef.current?.dispose?.();
+        isolatedAnalysisClientRef.current = null;
+      }
+    });
     const loadAbortController = new AbortController();
     loadAbortControllerRef.current = loadAbortController;
     loadGenerationRef.current += 1;
@@ -796,7 +869,7 @@ const Deck = forwardRef(function Deck(
       });
       loadReadinessRef.current = readiness;
       setLoadReadiness(readiness);
-      onTrackLoaded?.(channel, trackId, file.name);
+      onTrackLoaded?.(channel, trackId, file.name, expectedLoadAuthorityKey);
       return DECK_LOAD_OUTCOME.loaded;
       },
       runInlineAnalysis: async () => {
@@ -908,7 +981,7 @@ const Deck = forwardRef(function Deck(
     });
     loadReadinessRef.current = inlineReadiness;
     setLoadReadiness(inlineReadiness);
-    onTrackLoaded?.(channel, trackId, file.name);
+    onTrackLoaded?.(channel, trackId, file.name, expectedLoadAuthorityKey);
     return DECK_LOAD_OUTCOME.loaded;
       }
     });
@@ -928,7 +1001,7 @@ const Deck = forwardRef(function Deck(
       pause();
       return;
     }
-    if (playbackStartLocked || playbackStartLockRef?.current) return;
+    if (startOrLoadLocked) return;
     await play();
   };
 
@@ -1283,7 +1356,7 @@ const Deck = forwardRef(function Deck(
           Mazzy checks timing automatically. You do not need to count beats, know BPM, or approve a grid before using Auto Mix.
         </p>
         <details className="automatic-timing-details" onToggle={(event) => {
-          if (interactionLocked && event.currentTarget.open) event.currentTarget.open = false;
+          if (manualInteractionLocked && event.currentTarget.open) event.currentTarget.open = false;
         }}>
           <summary>Timing details and advanced review</summary>
           <div className="grid-review-meta">
@@ -1303,17 +1376,17 @@ const Deck = forwardRef(function Deck(
           {savedTimingReview && (
             <div className="saved-timing-review" aria-live="polite">
               <span>{`ADVANCED REVIEW SAVED ${savedTimingReview.reviewedOn} · BEGINNING ${savedTimingReview.beginningVerdict.replace("_", " ")} · LATER ${savedTimingReview.laterVerdict.replace("_", " ")}`}</span>
-              <button type="button" onClick={() => void removeTimingReview()} disabled={timingReviewSaveStatus === "saving"}>REMOVE SAVED TIMING REVIEW</button>
+              <button type="button" onClick={() => void removeTimingReview()} disabled={manualInteractionLocked || timingReviewSaveStatus === "saving"}>REMOVE SAVED TIMING REVIEW</button>
             </div>
           )}
           {timingReviewSaveStatus === "error" && <p className="timing-review-error" role="alert">YOUR TIMING ANSWERS COULDN'T BE SAVED. TRY AGAIN.</p>}
-          <button ref={timingWizardTriggerRef} className="check-timing-button" type="button" onClick={openTimingWizard} disabled={!analysisRecord || interactionLocked}>
+          <button ref={timingWizardTriggerRef} className="check-timing-button" type="button" onClick={openTimingWizard} disabled={!analysisRecord || manualInteractionLocked}>
             REVIEW TIMING (ADVANCED)
           </button>
         </details>
       </div>
 
-      {timingWizard && (
+      {timingWizard && !partySetupLocked && (
         <div className="timing-wizard-backdrop" onMouseDown={(event) => {
           if (event.target === event.currentTarget) closeTimingWizard();
         }}>
@@ -1529,14 +1602,14 @@ const Deck = forwardRef(function Deck(
                 step="0.1"
                 value={eq[band]}
                 onChange={(event) => setEqBandGain(band, Number(event.target.value))}
-                disabled={!fileReady || interactionLocked}
+                disabled={!fileReady || manualInteractionLocked}
               />
             </div>
             <button
               type="button"
               className={`kill-btn ${eqKill[band] ? "kill-on" : ""}`}
               onClick={() => toggleEqKill(band)}
-              disabled={!fileReady || interactionLocked}
+              disabled={!fileReady || manualInteractionLocked}
             >
               K
             </button>
@@ -1552,7 +1625,7 @@ const Deck = forwardRef(function Deck(
           className={`secondary-btn ${syncActive ? "sync-active" : ""}`}
           type="button"
           onClick={onSync}
-          disabled={!fileReady || !originalBpm || !otherBpm || interactionLocked}
+          disabled={!fileReady || !originalBpm || !otherBpm || manualInteractionLocked}
         >
           SYNC
         </button>
@@ -1561,7 +1634,7 @@ const Deck = forwardRef(function Deck(
       {syncActive && syncTargetBpm && (
         <div className="sync-meta">
           <span>{`SYNCED TO ${Math.round(syncTargetBpm * 10) / 10} BPM`}</span>
-          <button type="button" className="sync-release-btn" onClick={() => void releaseSyncInstant()} disabled={interactionLocked}>
+          <button type="button" className="sync-release-btn" onClick={() => void releaseSyncInstant()} disabled={manualInteractionLocked}>
             X
           </button>
         </div>
@@ -1578,7 +1651,7 @@ const Deck = forwardRef(function Deck(
             step="0.01"
             value={tempo}
             onChange={onTempoChange}
-            disabled={!fileReady || interactionLocked}
+            disabled={!fileReady || manualInteractionLocked}
           />
         </div>
       </label>

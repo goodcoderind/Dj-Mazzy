@@ -101,11 +101,28 @@ import { createPartyWakeLockController } from "./power/partyWakeLock";
 import { audioRecoveryMessage, needsHostAudioRecovery } from "./audio/audioContextRecovery";
 import { OUTPUT_DEVICE_RECOVERY_MESSAGE, supportsOutputDeviceChangeMonitoring } from "./audio/outputDeviceRecovery";
 import { DECK_LOAD_OUTCOME, shouldQuarantineAutoPilotLoad } from "./audio/deckLoadOutcome";
-import { DECK_LOAD_PURPOSE, ownsDeckLoadReadiness } from "./audio/deckLoadReadiness";
+import {
+  DECK_LOAD_PURPOSE,
+  ownsDeckLoadReadiness,
+  shouldAutoEjectDeckLoadFailure
+} from "./audio/deckLoadReadiness";
 import { normalizeProgramLevel } from "./analysis/programLevel";
 import { applyQueuedAnalysisFailure } from "./analysis/analysisQueueSettlement";
 import { ownsQueuedAnalysisLibraryRow, shouldRequeueReplacementAnalysis } from "./analysis/analysisQueueOwnership";
 import { runPartyStopAllSound, verifyPartyStopAllSound } from "./planning/partyStopAllSound";
+import {
+  createPartyFirstSongLoadOwner,
+  decidePartyFirstSongLoadSettlement,
+  mayClearPartyFirstSongRecoveryStatus,
+  ownsPartyFirstSongLoad,
+  ownsPartyFirstSongTimer,
+  partyFirstSongBlocksAutopilotStart,
+  partyFirstSongReadyActionMessage,
+  shouldClearPartyFirstSongReadyForLoad,
+  shouldClearPartyFirstSongReadyForLoadInvalidation,
+  shouldClearPartyFirstSongReadyForTransportStart,
+  shouldClearPartyFirstSongStatusAfterStop
+} from "./planning/partyFirstSongLoad";
 
 const audioExt = [".mp3", ".wav", ".flac", ".aiff", ".m4a"];
 const stripExt = (name) => name.replace(/\.[^/.]+$/, "");
@@ -276,6 +293,7 @@ export default function App() {
   const [libraryTimingSaveErrors, setLibraryTimingSaveErrors] = useState({});
   const [libraryRestoreAttempt, setLibraryRestoreAttempt] = useState(0);
   const [importStorageStatus, setImportStorageStatus] = useState(null);
+  const [partyFirstSongLoadStatus, setPartyFirstSongLoadStatus] = useState(null);
   const [dragIndex, setDragIndex] = useState(null);
   const [masterMeter, setMasterMeter] = useState({ peakDb: -Infinity, limiterReductionDb: 0 });
   const contextReadyRef = useRef(false);
@@ -285,6 +303,13 @@ export default function App() {
   const deckARef = useRef(null);
   const deckBRef = useRef(null);
   const importRef = useRef(null);
+  const partyFirstSongLoadRef = useRef(null);
+  const partyFirstSongLoadOperationRef = useRef(0);
+  const partyFirstSongLoadTimerRef = useRef(null);
+  const partyFirstSongLoadTriggerRef = useRef(null);
+  const partyFirstSongLoadAlertRef = useRef(null);
+  const partyFirstSongCancelRef = useRef(null);
+  const partyFirstSongPlayButtonRef = useRef(null);
   const queuedAnalysisIdsRef = useRef(new Set());
   const pendingAnalysisQueueRef = useRef([]);
   const analysisPriorityRef = useRef({ loaded: [], queued: [] });
@@ -385,6 +410,8 @@ export default function App() {
     ...unavailableAutoPilotTrackIds,
     ...timedOutAutoPilotTrackIds
   ])];
+  const partyFirstSongOpening = partyFirstSongLoadStatus?.state === "opening" ||
+    partyFirstSongLoadStatus?.state === "slow";
 
   useEffect(() => {
     const controller = createPartyWakeLockController({ onStatus: setPartyWakeLockStatus });
@@ -407,6 +434,7 @@ export default function App() {
       outputDevicePendingRef.current = true;
       refreshPlaybackRecoveryLock();
       setOutputDeviceChanged(true);
+      cancelPartyFirstSongLoad({ keepStatus: false });
       const transitionWasActive = Boolean(activeTransitionScheduleRef.current);
       if (autoPilotEnabledRef.current && transitionWasActive) {
         advancePartyAutopilotCoordinatorEpoch();
@@ -460,14 +488,15 @@ export default function App() {
   }, [autoPilotEnabled]);
 
   useEffect(() => {
-    if (!autoPilotEnabled && !autoMixArming && !autoMixing && !rehearsalActive && !rehearsalPreparing) return;
+    if (!autoPilotEnabled && !autoMixArming && !autoMixing && !rehearsalActive &&
+      !rehearsalPreparing && !partyFirstSongOpening) return;
     const warnBeforeLeaving = (event) => {
       event.preventDefault();
       event.returnValue = "";
     };
     window.addEventListener("beforeunload", warnBeforeLeaving);
     return () => window.removeEventListener("beforeunload", warnBeforeLeaving);
-  }, [autoPilotEnabled, autoMixArming, autoMixing, rehearsalActive, rehearsalPreparing]);
+  }, [autoPilotEnabled, autoMixArming, autoMixing, rehearsalActive, rehearsalPreparing, partyFirstSongOpening]);
 
   useEffect(() => {
     const engine = getAudioEngine();
@@ -481,6 +510,7 @@ export default function App() {
       audioRecoveryPendingRef.current = true;
       refreshPlaybackRecoveryLock();
       setAudioRecoveryState(state);
+      cancelPartyFirstSongLoad({ keepStatus: false });
       const transitionWasActive = Boolean(activeTransitionScheduleRef.current);
       if (autoPilotEnabledRef.current && transitionWasActive) {
         advancePartyAutopilotCoordinatorEpoch();
@@ -527,6 +557,10 @@ export default function App() {
   }, []);
 
   const stopRemoteLibraryPlayback = () => {
+    const firstSongCleanupConfirmed = cancelPartyFirstSongLoad({ keepStatus: false });
+    if (mayClearPartyFirstSongRecoveryStatus(firstSongCleanupConfirmed)) {
+      setPartyFirstSongLoadStatus(null);
+    }
     advancePartyAutopilotCoordinatorEpoch();
     autoPilotEnabledRef.current = false;
     settleAutoPilotPreloadForPause("superseded");
@@ -1713,7 +1747,7 @@ export default function App() {
     return `${min}:${sec}`;
   };
 
-  const onTrackLoaded = (deck, trackId) => {
+  const onTrackLoaded = (deck, trackId, _fileName = null, loadAuthorityKey = null) => {
     const pending = partyPendingLoadByDeckRef.current[deck];
     if (trackId) {
       const identity = {
@@ -1727,6 +1761,30 @@ export default function App() {
     }
     partyPendingLoadByDeckRef.current = { ...partyPendingLoadByDeckRef.current, [deck]: null };
     setLoadedByDeck((prev) => ({ ...prev, [deck]: trackId }));
+    setPartyFirstSongLoadStatus((current) => shouldClearPartyFirstSongReadyForLoad({
+      readyOwner: current?.state === "ready" ? current.owner : null,
+      deck,
+      trackId,
+      loadAuthorityKey
+    }) ? null : current);
+  };
+
+  const onDeckTransportStart = (deck, trackId, loadAuthorityKey) => {
+    setPartyFirstSongLoadStatus((current) => shouldClearPartyFirstSongReadyForTransportStart({
+      readyOwner: current?.state === "ready" ? current.owner : null,
+      deck,
+      trackId,
+      loadAuthorityKey
+    }) ? null : current);
+  };
+
+  const onDeckLoadInvalidated = (deck, trackId, loadAuthorityKey) => {
+    setPartyFirstSongLoadStatus((current) => shouldClearPartyFirstSongReadyForLoadInvalidation({
+      readyOwner: current?.state === "ready" ? current.owner : null,
+      deck,
+      trackId,
+      loadAuthorityKey
+    }) ? null : current);
   };
 
   const onDeckPlayStart = (deck, playKind = "start") => {
@@ -2213,6 +2271,9 @@ export default function App() {
     }
     const track = library.find((candidate) => candidate.id === trackId);
     if (!track) return;
+    if (partyFirstSongLoadRef.current?.trackId === trackId &&
+      !cancelPartyFirstSongLoad({ keepStatus: false })) return;
+    if (partyFirstSongLoadStatus?.trackId === trackId) setPartyFirstSongLoadStatus(null);
     removedTrackIdsRef.current.add(trackId);
     queuedAnalysisIdsRef.current.delete(trackId);
     pendingAnalysisQueueRef.current = pendingAnalysisQueueRef.current.filter((candidate) => candidate.id !== trackId);
@@ -2263,6 +2324,8 @@ export default function App() {
       return;
     }
     if (!window.confirm("Remove every imported song, saved analysis, and saved party plan from this browser profile? Active enhanced timing may finish its current local step before memory is released.")) return;
+    if (!cancelPartyFirstSongLoad({ keepStatus: false })) return;
+    setPartyFirstSongLoadStatus(null);
     queuedAnalysisIdsRef.current.clear();
     pendingAnalysisQueueRef.current = [];
     for (const track of library) removedTrackIdsRef.current.add(track.id);
@@ -2306,7 +2369,71 @@ export default function App() {
     showToast("All imported music, saved analysis, and saved party recovery were removed");
   };
 
-  const loadTrackToDeck = async (deck, track, { autoPilotOwned = false, loadAuthorityKey = null } = {}) => {
+  const clearPartyFirstSongLoadTimer = (owner = null) => {
+    const timer = partyFirstSongLoadTimerRef.current;
+    if (!timer || (owner && !ownsPartyFirstSongTimer(timer, owner))) return;
+    window.clearTimeout(timer.id);
+    partyFirstSongLoadTimerRef.current = null;
+  };
+
+  const cancelPartyFirstSongLoad = ({
+    message = "Opening cancelled. Choose a first song when you're ready.",
+    keepStatus = true,
+    restoreFocus = false
+  } = {}) => {
+    const owner = partyFirstSongLoadRef.current;
+    if (!owner || !ownsPartyFirstSongLoad(partyFirstSongLoadRef.current, owner)) return true;
+    partyFirstSongLoadRef.current = null;
+    clearPartyFirstSongLoadTimer(owner);
+    const handle = owner.deck === "a" ? deckARef.current : deckBRef.current;
+    let cleanupConfirmed = false;
+    try {
+      const cancelled = handle?.cancelLoadIfOwned?.(owner.loadAuthorityKey);
+      let snapshot = handle?.getDeckSnapshot?.() ?? null;
+      if (cancelled?.owned && cancelled?.authorityRevoked && snapshot?.trackId === owner.trackId &&
+        !handle?.isPlaying?.()) {
+        handle?.eject?.();
+        snapshot = handle?.getDeckSnapshot?.() ?? null;
+        partyLoadByDeckRef.current = { ...partyLoadByDeckRef.current, [owner.deck]: null };
+        setLoadedByDeck((current) => ({ ...current, [owner.deck]: null }));
+      }
+      cleanupConfirmed = Boolean(cancelled?.owned && cancelled?.authorityRevoked &&
+        snapshot?.trackId !== owner.trackId && !handle?.isPlaying?.());
+    } catch {
+      cleanupConfirmed = false;
+    }
+    if (!cleanupConfirmed) {
+      transitionCompletionUncertainRef.current = true;
+      setTransitionCompletionUncertain(true);
+      refreshPlaybackRecoveryLock();
+      setPartyFirstSongLoadStatus({
+        state: "cleanup-error",
+        trackId: owner.trackId,
+        message: "Mazzy could not confirm that opening stopped. Use Stop All Sound, then choose a song again."
+      });
+      window.requestAnimationFrame(() => partyFirstSongLoadAlertRef.current?.focus?.());
+      return false;
+    }
+    setPartyFirstSongLoadStatus(keepStatus ? {
+      state: "cancelled",
+      trackId: owner.trackId,
+      message
+    } : null);
+    if (restoreFocus) window.requestAnimationFrame(() => partyFirstSongLoadTriggerRef.current?.focus?.());
+    return true;
+  };
+
+  const loadTrackToDeck = async (
+    deck,
+    track,
+    { autoPilotOwned = false, loadAuthorityKey = null, purpose = null } = {}
+  ) => {
+    const resolvedPurpose = purpose ?? (autoPilotOwned
+      ? DECK_LOAD_PURPOSE.autoPilotPreload
+      : DECK_LOAD_PURPOSE.manual);
+    if (partyFirstSongLoadRef.current && resolvedPurpose !== DECK_LOAD_PURPOSE.partyFirstSong) {
+      return DECK_LOAD_OUTCOME.cancelled;
+    }
     if (playbackRecoveryLockedRef.current || partyCheckpointBusyRef.current || partyCheckpointWriterLostRef.current || audioRecoveryState || outputDeviceChanged || libraryMutationBusyRef.current || autoMixing || autoMixArming || rehearsalActive || rehearsalPreparing) return DECK_LOAD_OUTCOME.cancelled;
     if (!autoPilotOwned) pauseAutoPilotForHostControl();
     const manuallyRestoringPlayability = !autoPilotOwned && autoPilotExcludedTrackIds.includes(track.id);
@@ -2318,7 +2445,7 @@ export default function App() {
       {
         isolatedAnalysis: autoPilotOwned,
         loadAuthorityKey,
-        purpose: autoPilotOwned ? DECK_LOAD_PURPOSE.autoPilotPreload : DECK_LOAD_PURPOSE.manual
+        purpose: resolvedPurpose
       }
     ) ?? DECK_LOAD_OUTCOME.cancelled;
     if (outcome === DECK_LOAD_OUTCOME.loaded) {
@@ -2340,12 +2467,118 @@ export default function App() {
           recordPartyEvent({ type: "track-playability-restored", trackOrdinal });
         }
       }
-    } else if (outcome === DECK_LOAD_OUTCOME.unplayableFile) {
+    } else if (shouldAutoEjectDeckLoadFailure({ purpose: resolvedPurpose, outcome })) {
       ref.current?.eject?.();
       setLoadedByDeck((current) => ({ ...current, [deck]: null }));
       partyLoadByDeckRef.current = { ...partyLoadByDeckRef.current, [deck]: null };
     }
     return outcome;
+  };
+
+  const openPartyFirstSong = async (track, trigger = null) => {
+    if (partyFirstSongLoadRef.current || partyCheckpointBusyRef.current ||
+      partyCheckpointWriterLostRef.current || libraryMutationBusyRef.current ||
+      playbackRecoveryLockedRef.current || audioRecoveryState || outputDeviceChanged) return;
+    const deck = masterDeck;
+    const owner = createPartyFirstSongLoadOwner({
+      operation: ++partyFirstSongLoadOperationRef.current,
+      deck,
+      trackId: track.id
+    });
+    partyFirstSongLoadRef.current = owner;
+    partyFirstSongLoadTriggerRef.current = trigger;
+    setPartyFirstSongLoadStatus({
+      state: "opening",
+      trackId: track.id,
+      message: "Opening the first song locally. Audio will not start until you press Play First Song."
+    });
+    window.requestAnimationFrame(() => {
+      if (ownsPartyFirstSongLoad(partyFirstSongLoadRef.current, owner)) {
+        partyFirstSongCancelRef.current?.focus?.();
+      }
+    });
+    clearPartyFirstSongLoadTimer();
+    const slowTimerId = window.setTimeout(() => {
+      if (!ownsPartyFirstSongLoad(partyFirstSongLoadRef.current, owner)) return;
+      setPartyFirstSongLoadStatus({
+        state: "slow",
+        trackId: track.id,
+        message: "Still opening this song locally. Large files can take longer; you can keep waiting or cancel."
+      });
+    }, 12_000);
+    partyFirstSongLoadTimerRef.current = { operation: owner.operation, id: slowTimerId };
+
+    const outcome = await loadTrackToDeck(deck, track, {
+      loadAuthorityKey: owner.loadAuthorityKey,
+      purpose: DECK_LOAD_PURPOSE.partyFirstSong
+    });
+    clearPartyFirstSongLoadTimer(owner);
+    const handle = deck === "a" ? deckARef.current : deckBRef.current;
+    const snapshot = handle?.getDeckSnapshot?.() ?? null;
+    const readinessCurrent = ownsDeckLoadReadiness({
+      value: handle?.getLoadReadiness?.(),
+      trackId: track.id,
+      loadAuthorityKey: owner.loadAuthorityKey,
+      appliedTrimDb: handle?.getDspSnapshot?.()?.trimDb
+    });
+    const currentRow = libraryRef.current.find((item) => item.id === track.id);
+    const settlement = decidePartyFirstSongLoadSettlement({
+      current: partyFirstSongLoadRef.current,
+      expected: owner,
+      outcome,
+      currentTrackId: snapshot?.trackId ?? null,
+      ready: Boolean(handle?.isReady?.()),
+      playing: Boolean(handle?.isPlaying?.()),
+      playbackRate: Number(snapshot?.playbackRate),
+      readinessCurrent,
+      contextRunning: getAudioEngine().context.state === "running",
+      libraryCurrent: Boolean(currentRow && currentRow.file === track.file &&
+        !removedTrackIdsRef.current.has(track.id)),
+      recoveryLocked: playbackRecoveryLockedRef.current || partyCheckpointBusyRef.current ||
+        partyCheckpointWriterLostRef.current || libraryMutationBusyRef.current
+    });
+    if (settlement === "ignore-stale") return;
+    if (settlement === "ready") {
+      partyFirstSongLoadRef.current = null;
+      setPartyFirstSongLoadStatus({
+        state: "ready",
+        trackId: track.id,
+        owner,
+        message: partyFirstSongReadyActionMessage(false)
+      });
+      window.requestAnimationFrame(() => partyFirstSongPlayButtonRef.current?.focus?.());
+      return;
+    }
+    if (settlement === "cancelled") {
+      cancelPartyFirstSongLoad({
+        message: "Opening stopped. Choose a first song when you're ready.",
+        keepStatus: true
+      });
+      return;
+    }
+    if (settlement === "read-failed" || settlement === "audio-blocked") {
+      const cleaned = cancelPartyFirstSongLoad({ keepStatus: false });
+      if (cleaned) {
+        setPartyFirstSongLoadStatus({
+          state: "error",
+          trackId: track.id,
+          message: settlement === "audio-blocked"
+            ? "Browser audio needs attention before this song can be opened. Resume audio, then try again."
+            : "This song could not be read or decoded. Choose another song or try this one again."
+        });
+        window.requestAnimationFrame(() => partyFirstSongLoadAlertRef.current?.focus?.());
+      }
+      return;
+    }
+    cancelPartyFirstSongLoad({ keepStatus: false });
+    if (!transitionCompletionUncertainRef.current) {
+      setPartyFirstSongLoadStatus({
+        state: "error",
+        trackId: track.id,
+        message: "Mazzy could not verify this first-song load. Choose another song and try again."
+      });
+      window.requestAnimationFrame(() => partyFirstSongLoadAlertRef.current?.focus?.());
+    }
   };
 
   const addToQueue = (trackId, playNext = false) => {
@@ -2356,7 +2589,7 @@ export default function App() {
     });
   };
 
-  const activateLibraryTrack = async (track) => {
+  const activateLibraryTrack = async (track, trigger = null) => {
     if (partyCheckpointBusyRef.current) return;
     if (autoPilotExcludedTrackIds.includes(track.id)) {
       showToast("Skipped earlier · pause Autopilot, then use More to try again");
@@ -2364,7 +2597,7 @@ export default function App() {
     }
     const sourceRef = masterDeck === "a" ? deckARef : deckBRef;
     if (!sourceRef.current?.isReady?.()) {
-      await loadTrackToDeck(masterDeck, track);
+      await openPartyFirstSong(track, trigger);
       return;
     }
     if (sourceRef.current?.getDeckSnapshot?.()?.trackId === track.id) return;
@@ -3419,6 +3652,9 @@ export default function App() {
           break;
         case "cancel-preload": { // Exact pending target only; committed plans stay intact.
           settleAutoPilotPreloadForPause("superseded");
+          if (!cancelPartyFirstSongLoad({ keepStatus: false })) {
+            throw new Error("first-song load cleanup is unverified");
+          }
           break;
         }
         case "cancel-transition-arm": {
@@ -3574,6 +3810,10 @@ export default function App() {
     if (verifiedStopped) {
       transitionCompletionUncertainRef.current = false;
       setTransitionCompletionUncertain(false);
+      setPartyFirstSongLoadStatus((current) => shouldClearPartyFirstSongStatusAfterStop({
+        verifiedStopped,
+        status: current?.state ?? null
+      }) ? null : current);
     }
     setPartySoundStopLocked(!verifiedStopped);
     refreshPlaybackRecoveryLock();
@@ -4065,6 +4305,9 @@ export default function App() {
       const activeSchedule = activeTransitionScheduleRef.current;
       const rehearsalCancel = rehearsalCancelRef.current;
       const runtime = transitionArmLeaseRef.current;
+      partyFirstSongLoadRef.current = null;
+      try { if (partyFirstSongLoadTimerRef.current) window.clearTimeout(partyFirstSongLoadTimerRef.current.id); } catch { /* Host teardown continues. */ }
+      partyFirstSongLoadTimerRef.current = null;
       transitionCompletionCancelRef.current = null;
       transitionCompletionRuntimeRef.current = null;
       activeTransitionScheduleRef.current = null;
@@ -4103,6 +4346,23 @@ export default function App() {
   const sourcePartyRef = masterDeck === "a" ? deckARef : deckBRef;
   const sourcePartyReady = !!sourcePartyRef.current?.isReady?.();
   const sourcePartyPlaying = !!sourcePartyRef.current?.isPlaying?.();
+  const partyFirstSongReadyOwner = partyFirstSongLoadStatus?.state === "ready"
+    ? partyFirstSongLoadStatus.owner
+    : null;
+  const partyFirstSongActionRef = partyFirstSongReadyOwner
+    ? partyFirstSongReadyOwner.deck === "a" ? deckARef : deckBRef
+    : sourcePartyRef;
+  const partyFirstSongActionReady = !!partyFirstSongActionRef.current?.isReady?.();
+  const partyFirstSongActionPlaying = !!partyFirstSongActionRef.current?.isPlaying?.();
+  const partyFirstSongOtherDeckPlaying = Boolean(partyFirstSongReadyOwner &&
+    (partyFirstSongReadyOwner.deck === "a" ? deckBRef : deckARef).current?.isPlaying?.());
+  const partyFirstSongActionTrack = partyFirstSongReadyOwner
+    ? library.find((track) => track.id === partyFirstSongReadyOwner.trackId) ?? null
+    : nowPlayingTrack;
+  const partyFirstSongAutopilotBlocked = partyFirstSongBlocksAutopilotStart({
+    openingOwned: Boolean(partyFirstSongLoadRef.current),
+    readyOwned: Boolean(partyFirstSongReadyOwner)
+  });
   const pausePartyAutopilot = () => {
     advancePartyAutopilotCoordinatorEpoch();
     autoPilotEnabledRef.current = false;
@@ -4120,6 +4380,14 @@ export default function App() {
   };
   const startPartyAutopilot = async () => {
     if (playbackRecoveryLockedRef.current || partyCheckpointBusyRef.current) return;
+    if (partyFirstSongBlocksAutopilotStart({
+      openingOwned: Boolean(partyFirstSongLoadRef.current),
+      readyOwned: Boolean(partyFirstSongReadyOwner)
+    })) {
+      setShowPartyReadiness(false);
+      window.requestAnimationFrame(() => partyFirstSongPlayButtonRef.current?.focus?.());
+      return;
+    }
     if (audioRecoveryState || outputDeviceChanged || getAudioEngine().context.state !== "running") return;
     if (partyCheckpointRecoveryRef.current?.status === "available" && !partyCheckpointSessionIdRef.current) {
       setPartyCheckpointCardVisible(true);
@@ -4152,6 +4420,7 @@ export default function App() {
       window.requestAnimationFrame(() => partyCheckpointAlertRef.current?.focus?.());
       return;
     }
+    if (!cancelPartyFirstSongLoad({ keepStatus: false })) return;
     advancePartyAutopilotCoordinatorEpoch();
     if (!await clearOwnedPartyCheckpoint("cleared")) return;
     cancelCurrentTransitionArm();
@@ -4194,7 +4463,7 @@ export default function App() {
   const restoreSavedPartyPlan = async () => {
     const recovery = partyCheckpointRecoveryRef.current;
     const checkpoint = recovery?.status === "available" ? recovery.checkpoint : null;
-    if (!checkpoint || partyCheckpointBusyRef.current) return;
+    if (!checkpoint || partyCheckpointBusyRef.current || partyFirstSongLoadRef.current) return;
     if (deckARef.current?.isPlaying?.() || deckBRef.current?.isPlaying?.() || autoMixing || autoMixArming ||
         transitionArmRef.current || activeTransitionScheduleRef.current || rehearsalActive ||
         rehearsalPreparing || rehearsalCancelRef.current) {
@@ -4284,6 +4553,7 @@ export default function App() {
   };
 
   const discardSavedPartyPlan = async () => {
+    if (partyFirstSongLoadRef.current) return;
     if (partyCheckpointBusyRef.current) return;
     partyCheckpointBusyRef.current = true;
     refreshPlaybackRecoveryLock();
@@ -4329,11 +4599,24 @@ export default function App() {
     }
   };
   const startCurrentSong = async () => {
-    if (playbackRecoveryLockedRef.current || partyCheckpointBusyRef.current || partyCheckpointWriterLostRef.current || audioRecoveryState || outputDeviceChanged || getAudioEngine().context.state === "closed" || !sourcePartyReady || sourcePartyPlaying || autoPilotEnabled) return;
-    const started = await sourcePartyRef.current?.play?.();
-    if (started) audioOutputWatchArmedRef.current = true;
+    const readyOwner = partyFirstSongReadyOwner;
+    const actionRef = partyFirstSongActionRef;
+    const otherDeckPlaying = Boolean(readyOwner &&
+      (readyOwner.deck === "a" ? deckBRef : deckARef).current?.isPlaying?.());
+    if (playbackRecoveryLockedRef.current || partyCheckpointBusyRef.current || partyCheckpointWriterLostRef.current ||
+      audioRecoveryState || outputDeviceChanged || getAudioEngine().context.state === "closed" ||
+      !actionRef.current?.isReady?.() || actionRef.current?.isPlaying?.() || otherDeckPlaying || autoPilotEnabled) return;
+    const actionSnapshot = actionRef.current?.getDeckSnapshot?.() ?? null;
+    const actionReadiness = actionRef.current?.getLoadReadiness?.() ?? null;
+    const exactReadyOwner = !readyOwner || (actionSnapshot?.trackId === readyOwner.trackId &&
+      actionReadiness?.loadAuthorityKey === readyOwner.loadAuthorityKey);
+    if (!exactReadyOwner || !actionRef.current?.isReady?.() || actionRef.current?.isPlaying?.()) return;
+    const started = await actionRef.current?.play?.();
+    if (started) {
+      audioOutputWatchArmedRef.current = true;
+    }
     if (playbackRecoveryLockedRef.current) {
-      sourcePartyRef.current?.pause?.();
+      actionRef.current?.pause?.();
       return;
     }
     if (!started && getAudioEngine().context.state !== "running") onAudioStartError(getAudioEngine().context.state);
@@ -4376,6 +4659,8 @@ export default function App() {
   };
   const partyModeStatus = partyEndingFinalTrack
     ? "Final song is playing. The session will finish when it ends."
+    : partyFirstSongOpening
+      ? partyFirstSongLoadStatus.message
     : autoMixing
     ? `Changing songs with ${transitionInfo?.template === "downbeat-cut" ? "a short timed handoff" : transitionInfo?.template === "filtered-fade" ? "an intentional filtered fade" : "a conservative fade"}.`
     : autoPilotEnabled
@@ -4425,6 +4710,51 @@ export default function App() {
             <button type="button" onClick={() => void confirmOutputDeviceAndResume()}>I CHECKED · CONTINUE</button>
           </div>
         )}
+        {partyFirstSongLoadStatus && (
+          <section
+            ref={partyFirstSongLoadAlertRef}
+            tabIndex={partyFirstSongLoadStatus.state === "error" || partyFirstSongLoadStatus.state === "cleanup-error" ? -1 : undefined}
+            className={`party-mode-readiness party-first-song-load ${partyFirstSongLoadStatus.state}`}
+            role={partyFirstSongLoadStatus.state === "error" || partyFirstSongLoadStatus.state === "cleanup-error" ? "alert" : undefined}
+            aria-live={partyFirstSongLoadStatus.state === "error" || partyFirstSongLoadStatus.state === "cleanup-error" ? "assertive" : undefined}
+            aria-atomic="true"
+            aria-busy={partyFirstSongOpening}
+          >
+            <h2>{partyFirstSongOpening ? "OPENING FIRST SONG LOCALLY" : partyFirstSongLoadStatus.state === "ready" ? "FIRST SONG READY" : partyFirstSongLoadStatus.state === "cancelled" ? "OPENING STOPPED" : "FIRST SONG NEEDS ATTENTION"}</h2>
+            <p
+              role={partyFirstSongLoadStatus.state === "error" || partyFirstSongLoadStatus.state === "cleanup-error" ? undefined : "status"}
+              aria-live={partyFirstSongLoadStatus.state === "error" || partyFirstSongLoadStatus.state === "cleanup-error" ? undefined : "polite"}
+              aria-atomic="true"
+            >{partyFirstSongLoadStatus.state === "ready"
+              ? partyFirstSongReadyActionMessage(partyFirstSongOtherDeckPlaying)
+              : partyFirstSongLoadStatus.message}</p>
+            <div>
+              {partyFirstSongOpening && (
+                <button ref={partyFirstSongCancelRef} type="button" onClick={() => cancelPartyFirstSongLoad({ restoreFocus: true })}>
+                  CANCEL OPENING
+                </button>
+              )}
+              {partyFirstSongLoadStatus.state === "error" && (
+                <button type="button" onClick={() => {
+                  const track = libraryRef.current.find((item) => item.id === partyFirstSongLoadStatus.trackId);
+                  if (track) void openPartyFirstSong(track, partyFirstSongLoadTriggerRef.current);
+                }}>
+                  TRY THIS SONG AGAIN
+                </button>
+              )}
+              {!partyFirstSongOpening && partyFirstSongLoadStatus.state !== "ready" &&
+                partyFirstSongLoadStatus.state !== "cleanup-error" && (
+                <button type="button" onClick={() => {
+                  setPartyFirstSongLoadStatus(null);
+                  document.querySelector(".library-section")?.scrollIntoView?.({ behavior: "smooth", block: "start" });
+                  window.requestAnimationFrame(() => partyFirstSongLoadTriggerRef.current?.focus?.());
+                }}>
+                  CHOOSE ANOTHER SONG
+                </button>
+              )}
+            </div>
+          </section>
+        )}
         {partyCheckpointError && (
           <div ref={partyCheckpointAlertRef} tabIndex={-1} className="library-storage-error" role="alert">
             <p>{partyCheckpointError}</p>
@@ -4463,15 +4793,15 @@ export default function App() {
               {partyCheckpointBusy ? "Updating the saved party plan." : ""}
             </p>
             <div>
-              <button type="button" disabled={partyCheckpointBusy} onClick={() => {
+              <button type="button" disabled={partyCheckpointBusy || partyFirstSongOpening} onClick={() => {
                 setPartyCheckpointCardVisible(false);
                 window.requestAnimationFrame(() => partyCheckpointShowButtonRef.current?.focus?.());
               }}>NOT NOW</button>
-              <button type="button" disabled={partyCheckpointBusy} onClick={() => void discardSavedPartyPlan()}>
+              <button type="button" disabled={partyCheckpointBusy || partyFirstSongOpening} onClick={() => void discardSavedPartyPlan()}>
                 DELETE SAVED PLAN
               </button>
               {recoverablePartyCheckpoint && (
-                <button type="button" disabled={partyCheckpointBusy} onClick={() => void restoreSavedPartyPlan()}>
+                <button type="button" disabled={partyCheckpointBusy || partyFirstSongOpening} onClick={() => void restoreSavedPartyPlan()}>
                   RESTORE PAUSED PLAN
                 </button>
               )}
@@ -4518,13 +4848,13 @@ export default function App() {
           </section>
         )}
         <div className="party-mode-flow" aria-label="Party setup steps">
-          <button type="button" disabled={partyCheckpointBusy || libraryMutationBusy} onClick={() => importRef.current?.click()}>
+          <button type="button" disabled={partyCheckpointBusy || libraryMutationBusy || partyFirstSongOpening} onClick={() => importRef.current?.click()}>
             <span>1</span><strong>IMPORT MUSIC</strong><small>Saved only in this browser</small>
           </button>
-          <button type="button" onClick={() => void startCurrentSong()} disabled={partySoundStopLocked || transitionCompletionUncertain || partyCheckpointBusy || partyCheckpointWriterLost || !!audioRecoveryState || outputDeviceChanged || !sourcePartyReady || sourcePartyPlaying || autoPilotEnabled}>
-            <span>2</span><strong>{sourcePartyPlaying ? "FIRST SONG PLAYING" : "PLAY FIRST SONG"}</strong><small>{sourcePartyReady ? nowPlayingTrack?.name ?? "Loaded track" : "Choose a song below"}</small>
+          <button ref={partyFirstSongPlayButtonRef} type="button" onClick={() => void startCurrentSong()} disabled={partySoundStopLocked || transitionCompletionUncertain || partyCheckpointBusy || partyCheckpointWriterLost || partyFirstSongOpening || !!audioRecoveryState || outputDeviceChanged || !partyFirstSongActionReady || partyFirstSongActionPlaying || partyFirstSongOtherDeckPlaying || autoPilotEnabled}>
+            <span>2</span><strong>{partyFirstSongActionPlaying ? "FIRST SONG PLAYING" : "PLAY FIRST SONG"}</strong><small>{partyFirstSongActionReady ? partyFirstSongActionTrack?.name ?? "Loaded track" : "Choose a song below"}</small>
           </button>
-          <button ref={partyStartButtonRef} type="button" onClick={() => autoPilotEnabled ? pausePartyAutopilot() : setShowPartyReadiness(true)} disabled={partySoundStopLocked || transitionCompletionUncertain || partyCheckpointBusy || partyCheckpointWriterLost || !!audioRecoveryState || outputDeviceChanged || (!sourcePartyPlaying && !autoPilotEnabled)}>
+          <button ref={partyStartButtonRef} type="button" onClick={() => autoPilotEnabled ? pausePartyAutopilot() : setShowPartyReadiness(true)} disabled={partySoundStopLocked || transitionCompletionUncertain || partyCheckpointBusy || partyCheckpointWriterLost || !!audioRecoveryState || outputDeviceChanged || (!!partyFirstSongReadyOwner && !autoPilotEnabled) || (!sourcePartyPlaying && !autoPilotEnabled)}>
             <span>3</span><strong>{autoPilotEnabled ? "PAUSE AUTOPILOT" : "START AUTOPILOT"}</strong><small>{autoPilotEnabled ? "Music keeps playing" : "Mazzy handles later songs"}</small>
           </button>
         </div>
@@ -4591,7 +4921,7 @@ export default function App() {
                 setShowPartyReadiness(false);
                 window.requestAnimationFrame(() => partyStartButtonRef.current?.focus?.());
               }}>NOT YET</button>
-              <button type="button" disabled={partySoundStopLocked || partyCheckpointBusy || !!audioRecoveryState || outputDeviceChanged || !partyReadiness.canStart} onClick={() => {
+              <button type="button" disabled={partySoundStopLocked || partyCheckpointBusy || partyFirstSongAutopilotBlocked || !!audioRecoveryState || outputDeviceChanged || !partyReadiness.canStart} onClick={() => {
                 void startPartyAutopilot();
                 window.requestAnimationFrame(() => partyStartButtonRef.current?.focus?.());
               }}>START PARTY AUTOPILOT</button>
@@ -4620,7 +4950,7 @@ export default function App() {
               }}>{autoPilotIntervention.reason === "unexpected-source-ended" ? "CHOOSE A SONG" : "CHOOSE ANOTHER SONG"}</button>
               <button
                 type="button"
-                disabled={partySoundStopLocked || transitionCompletionUncertain || !!audioRecoveryState || outputDeviceChanged || !sourcePartyReady || !sourcePartyPlaying}
+                disabled={partySoundStopLocked || transitionCompletionUncertain || partyFirstSongAutopilotBlocked || !!audioRecoveryState || outputDeviceChanged || !sourcePartyReady || !sourcePartyPlaying}
                 onClick={() => void startPartyAutopilot()}
               >RETRY AUTOPILOT</button>
             </div>
@@ -4686,6 +5016,8 @@ export default function App() {
             onTimingReviewRemove={onTimingReviewRemove}
             librarySaveStatus={librarySaveStatus}
             onDeckPlayStart={onDeckPlayStart}
+            onDeckTransportStart={onDeckTransportStart}
+            onDeckLoadInvalidated={onDeckLoadInvalidated}
             onAuxAudioStart={() => setPartySoundStopStatus(null)}
             onStopAllSound={stopAllSound}
             onDeckPlaybackCompletion={onDeckPlaybackCompletion}
@@ -4695,6 +5027,7 @@ export default function App() {
             flash={deckFlash.a}
             transitionLocked={autoMixing || autoMixArming || autoPilotEnabled}
             rehearsalLocked={rehearsalActive || rehearsalPreparing}
+            partySetupLocked={partyFirstSongOpening}
           />
 
           <section className="crossfader-panel">
@@ -4759,7 +5092,7 @@ export default function App() {
               className={`auto-pilot-toggle ${autoPilotEnabled ? "enabled" : ""}`}
               type="button"
               aria-pressed={autoPilotEnabled}
-              disabled={rehearsalActive || rehearsalPreparing}
+              disabled={rehearsalActive || rehearsalPreparing || partyFirstSongAutopilotBlocked}
               onClick={() => {
                 if (autoPilotEnabled) {
                   pausePartyAutopilot();
@@ -4900,7 +5233,7 @@ export default function App() {
                   <button type="button" onClick={() => setShowPartyReadiness(false)}>CANCEL</button>
                   <button
                     type="button"
-                    disabled={partySoundStopLocked || !partyReadiness.canStart}
+                    disabled={partySoundStopLocked || partyFirstSongAutopilotBlocked || !partyReadiness.canStart}
                     onClick={() => {
                       void startPartyAutopilot();
                     }}
@@ -4993,6 +5326,8 @@ export default function App() {
             onTimingReviewRemove={onTimingReviewRemove}
             librarySaveStatus={librarySaveStatus}
             onDeckPlayStart={onDeckPlayStart}
+            onDeckTransportStart={onDeckTransportStart}
+            onDeckLoadInvalidated={onDeckLoadInvalidated}
             onAuxAudioStart={() => setPartySoundStopStatus(null)}
             onStopAllSound={stopAllSound}
             onDeckPlaybackCompletion={onDeckPlaybackCompletion}
@@ -5002,6 +5337,7 @@ export default function App() {
             flash={deckFlash.b}
             transitionLocked={autoMixing || autoMixArming || autoPilotEnabled}
             rehearsalLocked={rehearsalActive || rehearsalPreparing}
+            partySetupLocked={partyFirstSongOpening}
           />
         </div>
       </section>
@@ -5011,7 +5347,7 @@ export default function App() {
           <div className="queue-header">
             <div className="queue-title">{`QUEUE (${queue.length} tracks)`}</div>
             <div className="library-top-spacer" />
-            <button className="library-top-btn" type="button" disabled={partyCheckpointBusy || libraryMutationBusy} onClick={() => importRef.current?.click()}>
+            <button className="library-top-btn" type="button" disabled={partyCheckpointBusy || libraryMutationBusy || partyFirstSongOpening} onClick={() => importRef.current?.click()}>
               IMPORT
             </button>
             <input ref={importRef} type="file" multiple accept=".mp3,.wav,.flac,.aiff,.m4a" onChange={handleImportFolder} hidden />
@@ -5208,7 +5544,7 @@ export default function App() {
                   } ${keyCompatible ? "key-compatible" : ""}`}
                   onContextMenu={(event) => {
                     event.preventDefault();
-                    if (partyCheckpointBusyRef.current) return;
+                    if (partyCheckpointBusyRef.current || partyFirstSongLoadRef.current) return;
                     contextMenuTriggerRef.current = null;
                     setContextMenu({ x: event.clientX, y: event.clientY, trackId: track.id });
                   }}
@@ -5230,9 +5566,9 @@ export default function App() {
                     <button
                       className="library-track-action"
                       type="button"
-                      disabled={partyCheckpointBusy || libraryMutationBusy || loadedA || loadedB || autoMixing || autoMixArming || rehearsalActive || rehearsalPreparing || autoPilotExcludedTrackIds.includes(track.id) || (partySoundStopLocked && !sourcePartyReady)}
+                      disabled={partyCheckpointBusy || libraryMutationBusy || partyFirstSongOpening || loadedA || loadedB || autoMixing || autoMixArming || rehearsalActive || rehearsalPreparing || autoPilotExcludedTrackIds.includes(track.id) || (partySoundStopLocked && !sourcePartyReady)}
                       aria-label={`${loadedA || loadedB ? "Ready" : unavailableAutoPilotTrackIds.includes(track.id) ? autoPilotEnabled ? "Couldn't open; pause Autopilot, then use More actions to retry" : "Couldn't open; use More actions to retry" : timedOutAutoPilotTrackIds.includes(track.id) ? autoPilotEnabled ? "Took too long to prepare; pause Autopilot, then use More actions to retry" : "Took too long to prepare; use More actions to retry" : !sourcePartyReady ? "Choose first song" : autoPilotEnabled || queuePositionMap.has(track.id) ? "Request next" : "Add to queue"}: ${track.name}`}
-                      onClick={() => void activateLibraryTrack(track)}
+                      onClick={(event) => void activateLibraryTrack(track, event.currentTarget)}
                     >
                       {loadedA || loadedB
                         ? "READY"
@@ -5249,7 +5585,7 @@ export default function App() {
                     <button
                       className="library-track-more"
                       type="button"
-                      disabled={partyCheckpointBusy || libraryMutationBusy}
+                      disabled={partyCheckpointBusy || libraryMutationBusy || partyFirstSongOpening}
                       aria-label={`More actions for ${track.name}`}
                       aria-haspopup="menu"
                       aria-expanded={contextMenu?.trackId === track.id}
