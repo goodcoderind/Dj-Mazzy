@@ -4,7 +4,9 @@ import { getAudioEngine } from "../audioContext";
 import { DECK_LOAD_OUTCOME } from "../audio/deckLoadOutcome";
 import {
   commitDeckTransportStart,
+  deckPlaybackStartIsLocked,
   ownsDeferredDeckInteraction,
+  partySetupRevokesDeckTransport,
   runDeckLoadInvalidationBoundary
 } from "./deckInteractionLifecycle";
 import {
@@ -129,6 +131,7 @@ const Deck = forwardRef(function Deck(
     onAudioStartError,
     playbackStartLocked = false,
     playbackStartLockRef,
+    playbackStartOwnerRef,
     flash,
     transitionLocked = false,
     rehearsalLocked = false,
@@ -161,7 +164,13 @@ const Deck = forwardRef(function Deck(
   const deckEngineRef = useRef(null);
   const interactionLocked = transitionLocked || rehearsalLocked;
   const manualInteractionLocked = interactionLocked || partySetupLocked;
-  const startOrLoadLocked = manualInteractionLocked || playbackStartLocked || playbackStartLockRef?.current;
+  const playbackStartIsLocked = (startAuthorityKey = null) => deckPlaybackStartIsLocked({
+    renderedLocked: playbackStartLocked,
+    mutableLocked: Boolean(playbackStartLockRef?.current),
+    activeOwnerKey: playbackStartOwnerRef?.current ?? null,
+    requestOwnerKey: startAuthorityKey
+  });
+  const startOrLoadLocked = manualInteractionLocked || playbackStartIsLocked();
   const interactionLockedRef = useRef(manualInteractionLocked);
   const onDeckPlaybackCompletionRef = useRef(onDeckPlaybackCompletion);
   interactionLockedRef.current = manualInteractionLocked;
@@ -271,8 +280,15 @@ const Deck = forwardRef(function Deck(
 
   const getCurrentTime = () => deckEngine.getPosition();
 
-  const play = async (offset = null, when = null, notifyMaster = true, startAuthority = null) => {
-    if (playbackStartLocked || playbackStartLockRef?.current) return false;
+  const play = async (
+    offset = null,
+    when = null,
+    notifyMaster = true,
+    startAuthority = null,
+    startAuthorityKey = null,
+    claimStartCommit = null
+  ) => {
+    if (playbackStartIsLocked(startAuthorityKey)) return false;
     const transportRevision = captureDeckTransportAuthority(transportAuthorityRef.current);
     try {
       await ensureGraphReady();
@@ -281,7 +297,7 @@ const Deck = forwardRef(function Deck(
       return false;
     }
     if (!ownsDeckTransportAuthority(transportAuthorityRef.current, transportRevision) ||
-      playbackStartLockRef?.current || (startAuthority && !startAuthority())) return false;
+      playbackStartIsLocked(startAuthorityKey) || (startAuthority && !startAuthority())) return false;
     if (!deckEngine.isReady()) {
       return false;
     }
@@ -293,7 +309,8 @@ const Deck = forwardRef(function Deck(
     const committedStart = commitDeckTransportStart({
       start: () => deckEngine.play(offset ?? undefined, startAt),
       ownsAuthority: () => ownsDeckTransportAuthority(transportAuthorityRef.current, transportRevision) &&
-        !playbackStartLockRef?.current && (!startAuthority || startAuthority()),
+        !playbackStartIsLocked(startAuthorityKey) && (!startAuthority || startAuthority()) &&
+        (!claimStartCommit || claimStartCommit()),
       rollback: () => deckEngine.pause(),
       notify: () => onDeckTransportStart?.(
         channel,
@@ -314,7 +331,7 @@ const Deck = forwardRef(function Deck(
   };
 
   const playReadyAtIfRunning = (startTime, offset = 0, startAuthority = null) => {
-    if (playbackStartLocked || playbackStartLockRef?.current || getAudioEngine().context.state !== "running") return null;
+    if (playbackStartIsLocked() || getAudioEngine().context.state !== "running") return null;
     const transportRevision = captureDeckTransportAuthority(transportAuthorityRef.current);
     const before = deckEngine.getSnapshot();
     if (!ownsDeckTransportAuthority(transportAuthorityRef.current, transportRevision) ||
@@ -322,7 +339,7 @@ const Deck = forwardRef(function Deck(
     const scheduledStart = commitDeckTransportStart({
       start: () => deckEngine.play(offset, startTime),
       ownsAuthority: () => ownsDeckTransportAuthority(transportAuthorityRef.current, transportRevision) &&
-        !playbackStartLockRef?.current && (!startAuthority || startAuthority()),
+        !playbackStartIsLocked() && (!startAuthority || startAuthority()),
       rollback: () => deckEngine.pause(),
       notify: () => onDeckTransportStart?.(
         channel,
@@ -341,7 +358,7 @@ const Deck = forwardRef(function Deck(
   };
 
   const seek = async (seconds) => {
-    if (manualInteractionLocked || playbackStartLocked || playbackStartLockRef?.current) return false;
+    if (manualInteractionLocked || playbackStartIsLocked()) return false;
     stopMetronomeAudition();
     if (timingWizard?.step === 2) setTapTimes([]);
     const snapshot = deckEngine.getSnapshot();
@@ -406,7 +423,7 @@ const Deck = forwardRef(function Deck(
       stopMetronomeAudition();
       return;
     }
-    if (interactionLockedRef.current || playbackStartLocked || playbackStartLockRef?.current ||
+    if (interactionLockedRef.current || playbackStartIsLocked() ||
       !deckEngine.isActive() || !previewGrid.beatsSeconds.length) return;
     const auditionGeneration = ++metronomeAuditionGenerationRef.current;
     const transportRevision = captureDeckTransportAuthority(transportAuthorityRef.current);
@@ -414,7 +431,7 @@ const Deck = forwardRef(function Deck(
     await engine.resume();
     if (!ownsDeckTransportAuthority(transportAuthorityRef.current, transportRevision) ||
       auditionGeneration !== metronomeAuditionGenerationRef.current || interactionLockedRef.current ||
-      playbackStartLocked || playbackStartLockRef?.current) return;
+      playbackStartIsLocked()) return;
     const audition = startBeatGridAudition(engine, {
       beatsSeconds: previewGrid.beatsSeconds,
       downbeatsSeconds: previewGrid.downbeatsSeconds,
@@ -445,13 +462,16 @@ const Deck = forwardRef(function Deck(
   }, [playbackStartLocked]);
 
   useEffect(() => {
-    if (!partySetupLocked) return;
+    if (!partySetupRevokesDeckTransport({
+      partySetupLocked,
+      activeStartOwnerKey: playbackStartOwnerRef?.current ?? null
+    })) return;
     invalidateDeckTransportAuthority(transportAuthorityRef.current);
     stopMetronomeAudition();
     setTapTimes([]);
     setTimingWizard(null);
     setTimingReviewSaveStatus("idle");
-  }, [partySetupLocked]);
+  }, [partySetupLocked, playbackStartOwnerRef]);
 
   const openTimingWizard = () => {
     if (!analysisRecord || manualInteractionLocked) return;
@@ -479,9 +499,9 @@ const Deck = forwardRef(function Deck(
   };
 
   const playTimingCheckAt = async (positionSeconds) => {
-    if (manualInteractionLocked || playbackStartLocked || playbackStartLockRef?.current) return;
+    if (manualInteractionLocked || playbackStartIsLocked()) return;
     const startAuthority = () => !interactionLockedRef.current &&
-      !playbackStartLockRef?.current;
+      !playbackStartIsLocked();
     stopMetronomeAudition();
     if (!await seek(positionSeconds)) return;
     if (!startAuthority()) return;
@@ -661,7 +681,7 @@ const Deck = forwardRef(function Deck(
     });
     wavesurferRef.current.on("click", (progress) => {
       const duration = deckEngine.getSnapshot().durationSeconds;
-      if (!duration || interactionLockedRef.current || playbackStartLockRef?.current) return;
+      if (!duration || interactionLockedRef.current || playbackStartIsLocked()) return;
       void seek(progress * duration);
     });
   };
@@ -727,7 +747,7 @@ const Deck = forwardRef(function Deck(
     } = {}
   ) => {
     if ((partySetupLocked && purpose !== DECK_LOAD_PURPOSE.partyFirstSong) ||
-      playbackStartLocked || playbackStartLockRef?.current) {
+      playbackStartIsLocked()) {
       return DECK_LOAD_OUTCOME.cancelled;
     }
     if (!(file instanceof Blob)) return DECK_LOAD_OUTCOME.unplayableFile;
@@ -757,7 +777,7 @@ const Deck = forwardRef(function Deck(
       loadGenerationRef.current === loadGeneration &&
       currentTrackIdRef.current === trackId &&
       loadAuthorityKeyRef.current === expectedLoadAuthorityKey &&
-      !playbackStartLockRef?.current;
+      !playbackStartIsLocked();
     let audioContext;
     try {
       audioContext = await ensureGraphReady();
@@ -765,7 +785,7 @@ const Deck = forwardRef(function Deck(
       onAudioStartError?.(getAudioEngine().context.state);
       return DECK_LOAD_OUTCOME.audioBlocked;
     }
-    if (loadGenerationRef.current !== loadGeneration || playbackStartLockRef?.current) return DECK_LOAD_OUTCOME.cancelled;
+    if (loadGenerationRef.current !== loadGeneration || playbackStartIsLocked()) return DECK_LOAD_OUTCOME.cancelled;
     try {
       const objectUrl = URL.createObjectURL(file);
       if (lastObjectUrlRef.current) URL.revokeObjectURL(lastObjectUrlRef.current);
@@ -802,7 +822,7 @@ const Deck = forwardRef(function Deck(
       if (!ownsLoad()) {
         return DECK_LOAD_OUTCOME.cancelled;
       }
-      if (playbackStartLockRef?.current) return DECK_LOAD_OUTCOME.cancelled;
+      if (playbackStartIsLocked()) return DECK_LOAD_OUTCOME.cancelled;
       if (audioContext.state !== "running") {
         onAudioStartError?.(audioContext.state);
         return DECK_LOAD_OUTCOME.audioBlocked;
@@ -1184,7 +1204,8 @@ const Deck = forwardRef(function Deck(
       isReady: () => deckEngine.isReady(),
       getTransportAnchorTime: () => deckEngine.getTransportAnchorTime(),
       getCurrentBpm: () => (originalBpm ? Math.round(originalBpm * tempo * 10) / 10 : null),
-      play: async () => play(),
+      play: async (startAuthority = null, startAuthorityKey = null, claimStartCommit = null) =>
+        play(null, null, true, startAuthority, startAuthorityKey, claimStartCommit),
       playAt: async (startTime, offset = 0, startAuthority = null) => play(offset, startTime, false, startAuthority),
       playReadyAtIfRunning: (startTime, offset = 0, startAuthority = null) =>
         playReadyAtIfRunning(startTime, offset, startAuthority),

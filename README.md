@@ -306,6 +306,25 @@ failure state remain tab-memory-only. The same exact owner feeds the Decks'
 mutable post-resume start/load gate, so a command already awaiting browser audio
 cannot cross into a newly claimed rehearsal.
 
+The primary **Play First Song** action is separately owned by
+`party-first-song-start/v1`. Mazzy allows one exact start attempt and gives the
+browser 10 seconds to resume audio and commit the still-ready Deck transport.
+Repeated clicks cannot create a second source. The Deck rechecks the exact
+track, load, transport, recovery, storage, and rehearsal authority after the
+browser wait and claims success synchronously—strictly before the deadline and
+before queue, played-history, or Party-trace callbacks run. A start accepted at
+that boundary cannot later be reclassified by a delayed Promise continuation.
+At or after the deadline, the Deck rolls back without publishing a start and
+Mazzy focuses fixed **Reload Mazzy** guidance; new playback remains locked while
+**Stop All Sound** stays available. Stop, load replacement, audio/output
+recovery, cross-tab destructive changes, page hide, and unmount revoke an
+uncommitted exact attempt. Checkpoint snapshots are withheld while the start is
+unresolved. The owner key, monotonic deadline, and fixed failure state exist
+only in this tab; no storage, analysis, transition, checkpoint, or trace schema
+changes. The existing D-079 full-App Chromium gate was rerun twice in fresh
+profiles and completed the generated import, first-song start, two automatic
+handoffs, and terminal cleanup in both runs.
+
 The diagnostics-only `transition-rehearsal-browser-check/v4` also routes a
 synthetic, deliberately hot correlated-stereo handoff through an offline graph
 configured by the same `mazzy-master/v1` settings as production, then applies

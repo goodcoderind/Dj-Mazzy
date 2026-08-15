@@ -510,11 +510,23 @@ const runOneJourney = async ({ chromePath, pageUrl, runOrdinal }) => {
       descendant: "input[type='checkbox']"
     });
     await trustedClick(cdp, sessionId, { selector: ".party-mode-flow button", text: "PLAY FIRST SONG" });
-    await waitFor(
-      () => evaluate(cdp, sessionId, `[...document.querySelectorAll(".party-mode-flow button")]
-        .some((node) => node.textContent?.includes("FIRST SONG PLAYING"))`),
-      { timeoutMs: 10_000, message: "The trusted first-song action did not start the Deck." }
-    );
+    try {
+      await waitFor(
+        () => evaluate(cdp, sessionId, `[...document.querySelectorAll(".party-mode-flow button")]
+          .some((node) => node.textContent?.includes("FIRST SONG PLAYING"))`),
+        { timeoutMs: 10_000, message: "The trusted first-song action did not start the Deck." }
+      );
+    } catch {
+      const firstSongState = await evaluate(cdp, sessionId, `({
+        starting: document.body.textContent?.includes("STARTING…") === true,
+        retryableFailure: document.body.textContent?.includes("The ready song did not start") === true,
+        browserTimeout: document.body.textContent?.includes("Browser audio did not respond") === true,
+        uncertainStart: document.body.textContent?.includes("could not confirm that the attempted start is silent") === true,
+        reloadRequired: document.body.textContent?.includes("Reload Mazzy") === true,
+        audioRecovery: document.body.textContent?.includes("RESUME AUDIO") === true
+      })`);
+      throw new Error(`The trusted first-song action did not start the Deck (${JSON.stringify(firstSongState)}).`);
+    }
     await trustedClick(cdp, sessionId, { selector: ".party-mode-flow button", text: "START AUTOPILOT" });
     await waitFor(
       () => evaluate(cdp, sessionId, `document.activeElement?.querySelector?.("#party-readiness-title") != null`),

@@ -3065,6 +3065,43 @@ These are the active backlog, not reasons to discard the prototype.
   checkpoint, and Party trace schemas remain unchanged. Real browser suspension
   and device contention remain external evidence gates.
 
+- **D-082 — Bound the exact first-song transport start before any Party state
+  may publish:** `party-first-song-start/v1` gives the primary non-DJ
+  **Play First Song** action one immutable Deck/track/load owner and a 10-second
+  absolute `performance.now()` deadline. A synchronous owner is installed
+  before the browser-audio await, rejects duplicate clicks, and is rechecked
+  after resume and at the Deck transport commit. Stop All Sound, Deck load
+  replacement, rehearsal ownership, audio/output recovery, destructive
+  cross-tab reconciliation, page hide, and unmount revoke an uncommitted owner.
+  A stale or late native continuation cannot start a source, clear readiness,
+  change the queue or played history, record a Party event, or arm output
+  monitoring.
+
+  The Deck claims the deadline synchronously after its exact source start and
+  final authority check but before transport and Party callbacks. This is the
+  acceptance boundary: a commit strictly before the deadline remains accepted
+  even if Promise delivery is delayed, while a commit at or after the deadline
+  rolls the exact source back and publishes nothing. The visible `STARTING…`
+  state disables host controls without blocking the matching owner key; null or
+  foreign imperative starts remain refused. The checkpoint stable-state
+  projector also excludes this unresolved owner.
+
+  A never-settling or deadline-edge start opens a tab-session reload circuit,
+  focuses fixed **Reload Mazzy** guidance, and keeps all new playback locked;
+  **Stop All Sound** remains available. Ordinary on-time failure is retryable,
+  and uncertain post-commit observation escalates to the existing Stop/device-
+  mute intervention instead of claiming silence. Tests cover duplicate
+  admission, exact and throttled deadlines, pre-deadline commit followed by
+  delayed settlement, exact-deadline rollback, revocation and late continuation,
+  rendered-busy versus matching-key projection, and thrown authority observation
+  rollback. A real rendered-App smoke additionally guards JSX/hook-order
+  composition, and the D-079 full-App generated-WAV acceptance passed twice in
+  fresh Chromium profiles after the final exact-owner fix. Owner keys,
+  track/load identity, deadline, and errors remain
+  tab-memory-only; IndexedDB, analysis, transition, checkpoint, diagnostic,
+  export, network, and Party trace schemas are unchanged. A page-level async
+  host-failure boundary remains the next separate safety milestone.
+
 ### Open questions
 
 - **Q-001:** Remain browser/PWA-first through launch, or package a desktop app

@@ -21,14 +21,16 @@ export const commitDeckTransportStart = <T>({
   notify: () => void;
 }): T | null => {
   const result = start();
-  if (!ownsAuthority()) {
-    rollback();
+  let owned = false;
+  try { owned = ownsAuthority(); } catch { /* A failed observer cannot publish a transport start. */ }
+  if (!owned) {
+    try { rollback(); } catch { /* The caller retains its recovery owner when rollback is uncertain. */ }
     return null;
   }
   try {
     notify();
   } catch {
-    rollback();
+    try { rollback(); } catch { /* The caller retains its recovery owner when rollback is uncertain. */ }
     return null;
   }
   return result;
@@ -48,3 +50,24 @@ export const ownsDeferredDeckInteraction = ({
   currentTrackId: string | null;
 }) => !locked && expectedLoadGeneration === currentLoadGeneration &&
   expectedTrackId === currentTrackId;
+
+export const deckPlaybackStartIsLocked = ({
+  renderedLocked,
+  mutableLocked,
+  activeOwnerKey,
+  requestOwnerKey
+}: {
+  renderedLocked: boolean;
+  mutableLocked: boolean;
+  activeOwnerKey: string | null;
+  requestOwnerKey: string | null;
+}) => renderedLocked || mutableLocked ||
+  (activeOwnerKey !== null && activeOwnerKey !== requestOwnerKey);
+
+export const partySetupRevokesDeckTransport = ({
+  partySetupLocked,
+  activeStartOwnerKey
+}: {
+  partySetupLocked: boolean;
+  activeStartOwnerKey: string | null;
+}) => partySetupLocked && activeStartOwnerKey === null;
