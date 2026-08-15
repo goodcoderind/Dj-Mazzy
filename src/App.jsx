@@ -59,6 +59,11 @@ import {
   startBoundedBackgroundStage
 } from "./analysis/backgroundAnalysisRuntime";
 import { deriveRehearsalSourceCueSeconds, renderTransitionRehearsal } from "./diagnostics/transitionRehearsal";
+import {
+  startTransitionRehearsalRuntime,
+  transitionRehearsalBlocksPlayback,
+  transitionRehearsalSettlementOpensCircuit
+} from "./diagnostics/transitionRehearsalRuntime";
 import { partyEnergyCurve, shiftEnergyCurve } from "./planning/energyProfiles";
 import { buildAutoPilotCandidateIds, buildAutoPilotPlanningIds } from "./planning/autoPilotCrate";
 import {
@@ -332,6 +337,7 @@ export default function App() {
   const [pairPreview, setPairPreview] = useState(null);
   const [rehearsalStatus, setRehearsalStatus] = useState(null);
   const [rehearsalActive, setRehearsalActive] = useState(false);
+  const [rehearsalCircuitOpen, setRehearsalCircuitOpen] = useState(false);
   const [showAdvancedMixer, setShowAdvancedMixer] = useState(false);
   const [partyEndingFinalTrack, setPartyEndingFinalTrack] = useState(false);
   const [partyDiagnosticEnabled, setPartyDiagnosticEnabled] = useState(false);
@@ -425,6 +431,11 @@ export default function App() {
   const autoPilotPreloadGenerationRef = useRef(0);
   const rehearsalCancelRef = useRef(null);
   const rehearsalGenerationRef = useRef(0);
+  const rehearsalRenderOperationRef = useRef(0);
+  const rehearsalRenderRuntimeRef = useRef(null);
+  const rehearsalPreparationOwnedRef = useRef(false);
+  const rehearsalCircuitOpenRef = useRef(false);
+  const rehearsalAlertRef = useRef(null);
   const activeTransitionScheduleRef = useRef(null);
   const transitionCompletionCancelRef = useRef(null);
   const transitionCompletionRuntimeRef = useRef(null);
@@ -511,13 +522,22 @@ export default function App() {
   const audioRecoveryPendingRef = useRef(false);
   const outputDevicePendingRef = useRef(false);
   const playbackRecoveryLockedRef = useRef(false);
+  const deckPlaybackStartLockedRef = useRef(false);
+  const rehearsalPlaybackLocked = () => transitionRehearsalBlocksPlayback({
+    preparationOwned: rehearsalPreparationOwnedRef.current,
+    renderOwned: Boolean(rehearsalRenderRuntimeRef.current),
+    previewOwned: Boolean(rehearsalCancelRef.current),
+    circuitOpen: rehearsalCircuitOpenRef.current
+  });
   const refreshPlaybackRecoveryLock = () => {
     playbackRecoveryLockedRef.current = audioRecoveryPendingRef.current ||
       outputDevicePendingRef.current ||
       partyCheckpointBusyRef.current ||
       partyCheckpointWriterLostRef.current ||
       partySoundStopInProgressRef.current ||
-      transitionCompletionUncertainRef.current;
+      transitionCompletionUncertainRef.current ||
+      rehearsalCircuitOpenRef.current;
+    deckPlaybackStartLockedRef.current = playbackRecoveryLockedRef.current || rehearsalPlaybackLocked();
   };
   const publishLibrary = (update, { routineDirty = false } = {}) => {
     const previous = libraryRef.current;
@@ -585,13 +605,7 @@ export default function App() {
           "output-change"
         );
       }
-      rehearsalGenerationRef.current += 1;
-      try { rehearsalCancelRef.current?.(); } catch { /* Recovery authority remains active. */ }
-      rehearsalCancelRef.current = null;
-      setRehearsalActive(false);
-      setRehearsalStatus((current) => current
-        ? { state: "stopped", message: "Preview stopped while the audio output is checked. Nothing was saved." }
-        : current);
+      stopOrCancelRehearsal("Preview cancellation is finishing while the audio output is checked. Nothing was saved.");
       autoPilotPreloadGenerationRef.current += 1;
       try { cancelCurrentTransitionArm(); } catch { /* Transition Rescue remains authoritative. */ }
       transitionArmGenerationRef.current += 1;
@@ -685,13 +699,7 @@ export default function App() {
           "audio-recovery"
         );
       }
-      rehearsalGenerationRef.current += 1;
-      try { rehearsalCancelRef.current?.(); } catch { /* Recovery authority remains active. */ }
-      rehearsalCancelRef.current = null;
-      setRehearsalActive(false);
-      setRehearsalStatus((current) => current
-        ? { state: "stopped", message: "Preview stopped because browser audio needs attention. Nothing was saved." }
-        : current);
+      stopOrCancelRehearsal("Preview cancellation is finishing because browser audio needs attention. Nothing was saved.");
       try { cancelCurrentTransitionArm(); } catch { /* Transition Rescue remains authoritative. */ }
       if (transitionWasActive && activeTransitionScheduleRef.current) {
         try {
@@ -724,13 +732,7 @@ export default function App() {
     setAutoPilotEnabled(false);
     try { cancelCurrentTransitionArm(); } catch { /* Playback remains locked if cleanup is uncertain. */ }
     transitionArmGenerationRef.current += 1;
-    rehearsalGenerationRef.current += 1;
-    try { rehearsalCancelRef.current?.(); } catch { /* Destructive authority is already revoked. */ }
-    rehearsalCancelRef.current = null;
-    setRehearsalActive(false);
-    setRehearsalStatus((current) => current
-      ? { state: "stopped", message: "Preview stopped because local playback authority changed in another Mazzy tab." }
-      : current);
+    stopOrCancelRehearsal("Preview cancellation is finishing because local playback authority changed in another Mazzy tab.");
     autoPilotTransitionKeyRef.current = null;
     let transitionCleanupConfirmed = true;
     try {
@@ -2339,19 +2341,40 @@ export default function App() {
 
   const stopRehearsal = (message = "Preview stopped. Nothing was saved.") => {
     rehearsalGenerationRef.current += 1;
-    rehearsalCancelRef.current?.();
+    const cancel = rehearsalCancelRef.current;
     rehearsalCancelRef.current = null;
+    try { cancel?.(); } catch { /* Rehearsal authority is already revoked. */ }
+    refreshPlaybackRecoveryLock();
     setRehearsalActive(false);
     setRehearsalStatus({ state: "stopped", message });
   };
 
+  const requestRehearsalPreparationCancellation = (
+    message = "Cancelling after the current local audio step…"
+  ) => {
+    const runtime = rehearsalRenderRuntimeRef.current;
+    if (!runtime) {
+      if (!rehearsalPreparationOwnedRef.current) return false;
+      rehearsalPreparationOwnedRef.current = false;
+      rehearsalGenerationRef.current += 1;
+      refreshPlaybackRecoveryLock();
+      setRehearsalStatus({ state: "stopped", message: "Preview preparation cancelled. Nothing was saved." });
+      return true;
+    }
+    runtime.requestCancel();
+    setRehearsalActive(false);
+    setRehearsalStatus({ state: "cancelling", message });
+    return true;
+  };
+
+  const stopOrCancelRehearsal = (message) => {
+    if (requestRehearsalPreparationCancellation(message)) return;
+    if (!rehearsalCancelRef.current) return;
+    stopRehearsal(message);
+  };
+
   const cancelRehearsalPreparation = () => {
-    if (!rehearsalPreparing) return;
-    rehearsalGenerationRef.current += 1;
-    setRehearsalStatus({
-      state: "cancelling",
-      message: "Cancelling after the current local audio step…"
-    });
+    requestRehearsalPreparationCancellation();
   };
 
   const pauseAutoPilotForHostControl = (
@@ -4117,7 +4140,7 @@ export default function App() {
     if (partyFirstSongLoadRef.current && resolvedPurpose !== DECK_LOAD_PURPOSE.partyFirstSong) {
       return DECK_LOAD_OUTCOME.cancelled;
     }
-    if (playbackRecoveryLockedRef.current || partyCheckpointBusyRef.current || partyCheckpointWriterLostRef.current || audioRecoveryState || outputDeviceChanged || libraryMutationBusyRef.current || autoMixing || autoMixArming || rehearsalActive || rehearsalPreparing) return DECK_LOAD_OUTCOME.cancelled;
+    if (playbackRecoveryLockedRef.current || partyCheckpointBusyRef.current || partyCheckpointWriterLostRef.current || audioRecoveryState || outputDeviceChanged || libraryMutationBusyRef.current || autoMixing || autoMixArming || rehearsalActive || rehearsalPreparing || rehearsalPlaybackLocked()) return DECK_LOAD_OUTCOME.cancelled;
     if (!autoPilotOwned) pauseAutoPilotForHostControl();
     const manuallyRestoringPlayability = !autoPilotOwned && autoPilotExcludedTrackIds.includes(track.id);
     const ref = deck === "a" ? deckARef : deckBRef;
@@ -4161,7 +4184,8 @@ export default function App() {
   const openPartyFirstSong = async (track, trigger = null) => {
     if (partyFirstSongLoadRef.current || partyCheckpointBusyRef.current ||
       partyCheckpointWriterLostRef.current || libraryMutationBusyRef.current ||
-      playbackRecoveryLockedRef.current || audioRecoveryState || outputDeviceChanged) return;
+      playbackRecoveryLockedRef.current || rehearsalPlaybackLocked() ||
+      audioRecoveryState || outputDeviceChanged) return;
     const deck = masterDeck;
     const owner = createPartyFirstSongLoadOwner({
       operation: ++partyFirstSongLoadOperationRef.current,
@@ -4359,6 +4383,10 @@ export default function App() {
       partyCheckpointBusyRef.current
       || partyCheckpointWriterLostRef.current
       || playbackRecoveryLockedRef.current
+      || rehearsalCircuitOpenRef.current
+      || rehearsalPreparationOwnedRef.current
+      || rehearsalRenderRuntimeRef.current
+      || rehearsalCancelRef.current
       || autoMixing
       || autoMixArming
       || deckARef.current?.isPlaying?.()
@@ -4378,6 +4406,8 @@ export default function App() {
     rehearsalGenerationRef.current = generation;
     rehearsalCancelRef.current?.();
     rehearsalCancelRef.current = null;
+    rehearsalPreparationOwnedRef.current = true;
+    refreshPlaybackRecoveryLock();
     setRehearsalActive(false);
     setRehearsalStatus({ state: "rendering", message: "Preparing a short local preview…" });
     try {
@@ -4396,7 +4426,7 @@ export default function App() {
       };
       const sourceBuffer = sourceDeckRef.current?.getDecodedBufferForRehearsal?.();
       if (!sourceBuffer) throw new Error("The source deck buffer is unavailable");
-      if (!pairStillCurrent()) return;
+      if (!pairStillCurrent()) throw new DOMException("Rehearsal pair changed", "AbortError");
       const sourceSnapshot = sourceDeckRef.current?.getDeckSnapshot?.();
       const sourceCueSeconds = deriveRehearsalSourceCueSeconds(
         Number(sourceSnapshot?.positionSeconds ?? 0),
@@ -4408,7 +4438,7 @@ export default function App() {
       const postRollSeconds = 2;
       const targetBuffer = targetDeckRef.current?.getDecodedBufferForRehearsal?.();
       if (!targetBuffer) throw new Error("The target deck buffer is unavailable");
-      if (!pairStillCurrent()) return;
+      if (!pairStillCurrent()) throw new DOMException("Rehearsal pair changed", "AbortError");
       const sourceDspSnapshot = sourceDeckRef.current?.getDspSnapshot?.()
         ?? { trimDb: 0, eqDb: { low: 0, mid: 0, high: 0 } };
       const targetDspSnapshot = targetDeckRef.current?.getDspSnapshot?.()
@@ -4419,21 +4449,72 @@ export default function App() {
         sourceEqDb: sourceDspSnapshot.eqDb,
         targetEqDb: targetDspSnapshot.eqDb
       });
-      const rendered = await renderTransitionRehearsal(sourceBuffer, targetBuffer, rehearsalDsp, {
-        sourceCueSeconds,
-        preRollSeconds,
-        postRollSeconds,
-        outputSampleRate: sampleRate
+      const runtime = startTransitionRehearsalRuntime({
+        operation: ++rehearsalRenderOperationRef.current,
+        task: async (control) => {
+          const rendered = await renderTransitionRehearsal(sourceBuffer, targetBuffer, rehearsalDsp, {
+            sourceCueSeconds,
+            preRollSeconds,
+            postRollSeconds,
+            outputSampleRate: sampleRate
+          });
+          if (!control.mayContinue()) return rendered;
+          if (!pairStillCurrent() || playbackRecoveryLockedRef.current) {
+            throw new DOMException("Rehearsal authority changed", "AbortError");
+          }
+          await engine.resume();
+          if (!control.mayContinue()) return rendered;
+          if (!pairStillCurrent() || playbackRecoveryLockedRef.current) {
+            throw new DOMException("Rehearsal authority changed", "AbortError");
+          }
+          return rendered;
+        }
       });
-      if (playbackRecoveryLockedRef.current) return;
-      await engine.resume();
-      if (!pairStillCurrent() || playbackRecoveryLockedRef.current) return;
+      rehearsalRenderRuntimeRef.current = runtime;
+      const settlement = await runtime.settlement;
+      if (rehearsalRenderRuntimeRef.current !== runtime) return;
+      rehearsalRenderRuntimeRef.current = null;
+      rehearsalPreparationOwnedRef.current = false;
+      if (transitionRehearsalSettlementOpensCircuit(settlement.outcome)) {
+        rehearsalGenerationRef.current += 1;
+        rehearsalCircuitOpenRef.current = true;
+        setRehearsalCircuitOpen(true);
+        refreshPlaybackRecoveryLock();
+        setRehearsalActive(false);
+        setRehearsalStatus({
+          state: "blocked",
+          message: "The local rehearsal preparation did not finish. New playback is locked until Mazzy reloads."
+        });
+        window.requestAnimationFrame(() => rehearsalAlertRef.current?.focus?.());
+        return;
+      }
+      if (settlement.outcome === "cancelled") {
+        rehearsalGenerationRef.current += 1;
+        refreshPlaybackRecoveryLock();
+        setRehearsalActive(false);
+        setRehearsalStatus({ state: "stopped", message: "Preview preparation cancelled. Nothing was saved." });
+        return;
+      }
+      if (settlement.outcome === "failed") {
+        refreshPlaybackRecoveryLock();
+        setRehearsalActive(false);
+        setRehearsalStatus({ state: "error", message: "The transition preview could not be rendered." });
+        return;
+      }
+      const rendered = settlement.value;
+      if (!pairStillCurrent() || playbackRecoveryLockedRef.current) {
+        refreshPlaybackRecoveryLock();
+        setRehearsalStatus({ state: "stopped", message: "Preview preparation stopped because playback authority changed." });
+        return;
+      }
       rehearsalCancelRef.current = engine.playProtectedPreview(rendered.preview, () => {
         if (rehearsalGenerationRef.current !== generation) return;
         rehearsalCancelRef.current = null;
+        refreshPlaybackRecoveryLock();
         setRehearsalActive(false);
         setRehearsalStatus({ state: "complete", message: "Stereo transition rehearsal finished. Nothing was saved." });
       });
+      refreshPlaybackRecoveryLock();
       setPartySoundStopStatus(null);
       audioOutputWatchArmedRef.current = true;
       setRehearsalActive(true);
@@ -4445,9 +4526,15 @@ export default function App() {
       });
     } catch {
       if (rehearsalGenerationRef.current !== generation) return;
+      rehearsalPreparationOwnedRef.current = false;
+      rehearsalRenderRuntimeRef.current = null;
+      refreshPlaybackRecoveryLock();
       setRehearsalActive(false);
       setRehearsalStatus({ state: "error", message: "The transition preview could not be rendered." });
     } finally {
+      if (rehearsalRenderRuntimeRef.current == null && rehearsalGenerationRef.current === generation) {
+        rehearsalPreparationOwnedRef.current = false;
+      }
       if (rehearsalGenerationRef.current !== generation) {
         setRehearsalStatus((current) => current?.state === "cancelling"
           ? { state: "stopped", message: "Preview preparation cancelled. Nothing was saved." }
@@ -4667,7 +4754,8 @@ export default function App() {
 
   const startAutoMix = async (origin = "host") => {
     if (playbackRecoveryLockedRef.current || libraryMutationBusyRef.current || partyCheckpointBusyRef.current || partyCheckpointWriterLostRef.current || audioRecoveryState || outputDeviceChanged || getAudioEngine().context.state !== "running") return;
-    if (autoMixing || transitionArmRef.current || rehearsalActive) {
+    if (autoMixing || transitionArmRef.current || rehearsalActive || rehearsalPreparing ||
+        rehearsalPlaybackLocked()) {
       return;
     }
     const engine = getAudioEngine();
@@ -5440,13 +5528,7 @@ export default function App() {
           break;
         }
         case "cancel-auxiliary-audio":
-          rehearsalGenerationRef.current += 1;
-          rehearsalCancelRef.current?.();
-          rehearsalCancelRef.current = null;
-          setRehearsalActive(false);
-          setRehearsalStatus((current) => current
-            ? { state: "stopped", message: "Preview stopped with all other sound. Nothing was saved." }
-            : current);
+          stopOrCancelRehearsal("Preview cancellation is finishing after Stop All Sound. Nothing was saved.");
           break;
         case "stop-deck-a":
           if (!deckARef.current?.stopAllSound) throw new Error("Deck A stop owner is unavailable");
@@ -6007,6 +6089,7 @@ export default function App() {
       const completionCancel = transitionCompletionCancelRef.current;
       const activeSchedule = activeTransitionScheduleRef.current;
       const rehearsalCancel = rehearsalCancelRef.current;
+      const rehearsalRenderRuntime = rehearsalRenderRuntimeRef.current;
       const runtime = transitionArmLeaseRef.current;
       analysisGenerationRef.current += 1;
       partyCheckpointClearOperationRef.current += 1;
@@ -6046,6 +6129,8 @@ export default function App() {
       activeTransitionScheduleRef.current = null;
       autoPilotTransitionKeyRef.current = null;
       rehearsalCancelRef.current = null;
+      rehearsalRenderRuntimeRef.current = null;
+      rehearsalPreparationOwnedRef.current = false;
       rehearsalGenerationRef.current += 1;
       transitionArmLeaseRef.current = null;
       transitionArmRef.current = false;
@@ -6061,6 +6146,7 @@ export default function App() {
       try { cancelAnimationFrame(autoMixCountdownFrameRef.current); } catch { /* Host teardown continues. */ }
       try { advancePartyAutopilotCoordinatorEpoch(); } catch { /* Exact refs above are already revoked. */ }
       try { completionCancel?.(); } catch { /* Exact runtime is already revoked. */ }
+      try { rehearsalRenderRuntime?.revoke?.(); } catch { /* Late offline rendering is inert after unmount. */ }
       try { rehearsalCancel?.(); } catch { /* Exact rehearsal authority is already revoked. */ }
       try { if (runtime?.timeoutId) window.clearTimeout(runtime.timeoutId); } catch { /* Continue cleanup. */ }
       const deadlineCancel = runtime?.clockDeadlineCancel;
@@ -6112,7 +6198,8 @@ export default function App() {
     void partyWakeLockRef.current?.release?.();
   };
   const startPartyAutopilot = async () => {
-    if (playbackRecoveryLockedRef.current || libraryMutationBusyRef.current || partyCheckpointBusyRef.current) return;
+    if (playbackRecoveryLockedRef.current || libraryMutationBusyRef.current || partyCheckpointBusyRef.current ||
+        rehearsalPlaybackLocked()) return;
     if (partyFirstSongBlocksAutopilotStart({
       openingOwned: Boolean(partyFirstSongLoadRef.current),
       readyOwned: Boolean(partyFirstSongReadyOwner)
@@ -6156,7 +6243,7 @@ export default function App() {
     setShowPartyReadiness(false);
   };
   const resetPartyAutopilot = async () => {
-    if (partyCheckpointBusyRef.current || libraryMutationBusyRef.current) return;
+    if (partyCheckpointBusyRef.current || libraryMutationBusyRef.current || rehearsalPlaybackLocked()) return;
     if (libraryMembershipOwnerRef.current) {
       if (libraryMembershipOwnerRef.current.kind === "import" && libraryMutationModeRef.current === "idle") {
         cancelLibraryMembershipPreparation();
@@ -6233,8 +6320,8 @@ export default function App() {
         transitionArmRef.current || transitionArmLeaseRef.current || activeTransitionScheduleRef.current ||
         transitionCompletionRuntimeRef.current || transitionCompletionCancelRef.current ||
         transitionCompletionUncertainRef.current || autoPilotPreloadLeaseRef.current ||
-        partyFallbackContinuationRef.current || rehearsalActive || rehearsalPreparing ||
-        rehearsalCancelRef.current || partySoundStopInProgressRef.current || audioRecoveryPendingRef.current ||
+        partyFallbackContinuationRef.current || rehearsalPlaybackLocked() ||
+        partySoundStopInProgressRef.current || audioRecoveryPendingRef.current ||
         outputDevicePendingRef.current) {
       setPartyCheckpointError("Stop current audio or the transition preview before restoring the saved party plan.");
       return;
@@ -6265,8 +6352,8 @@ export default function App() {
       !transitionArmLeaseRef.current && !activeTransitionScheduleRef.current &&
       !transitionCompletionRuntimeRef.current && !transitionCompletionCancelRef.current &&
       !transitionCompletionUncertainRef.current && !autoPilotPreloadLeaseRef.current &&
-      !partyFallbackContinuationRef.current && !rehearsalActive && !rehearsalPreparing &&
-      !rehearsalCancelRef.current && !partySoundStopInProgressRef.current &&
+      !partyFallbackContinuationRef.current && !rehearsalPlaybackLocked() &&
+      !partySoundStopInProgressRef.current &&
       !audioRecoveryPendingRef.current && !outputDevicePendingRef.current;
     try {
       const boundedClaim = startBoundedPartyCheckpointOperation({
@@ -6429,6 +6516,7 @@ export default function App() {
       (readyOwner.deck === "a" ? deckBRef : deckARef).current?.isPlaying?.());
     if (playbackRecoveryLockedRef.current || libraryMutationBusyRef.current ||
       partyCheckpointBusyRef.current || partyCheckpointWriterLostRef.current ||
+      rehearsalPlaybackLocked() ||
       audioRecoveryState || outputDeviceChanged || getAudioEngine().context.state === "closed" ||
       !actionRef.current?.isReady?.() || actionRef.current?.isPlaying?.() || otherDeckPlaying || autoPilotEnabled) return;
     const actionSnapshot = actionRef.current?.getDeckSnapshot?.() ?? null;
@@ -6437,12 +6525,12 @@ export default function App() {
       actionReadiness?.loadAuthorityKey === readyOwner.loadAuthorityKey);
     if (!exactReadyOwner || !actionRef.current?.isReady?.() || actionRef.current?.isPlaying?.()) return;
     const started = await actionRef.current?.play?.();
-    if (started) {
-      audioOutputWatchArmedRef.current = true;
-    }
-    if (playbackRecoveryLockedRef.current) {
+    if (playbackRecoveryLockedRef.current || rehearsalPlaybackLocked()) {
       actionRef.current?.pause?.();
       return;
+    }
+    if (started) {
+      audioOutputWatchArmedRef.current = true;
     }
     if (!started && getAudioEngine().context.state !== "running") onAudioStartError(getAudioEngine().context.state);
   };
@@ -6732,10 +6820,10 @@ export default function App() {
           <button type="button" disabled={transitionCompletionUncertain || partyCheckpointBusy || libraryMutationBusy || !!libraryMembershipStatus || partyFirstSongOpening} onClick={openLibraryImportPicker}>
             <span>1</span><strong>IMPORT MUSIC</strong><small>Saved only in this browser</small>
           </button>
-          <button ref={partyFirstSongPlayButtonRef} type="button" onClick={() => void startCurrentSong()} disabled={partySoundStopLocked || transitionCompletionUncertain || partyCheckpointBusy || libraryMutationBusy || partyCheckpointWriterLost || partyFirstSongOpening || !!audioRecoveryState || outputDeviceChanged || !partyFirstSongActionReady || partyFirstSongActionPlaying || partyFirstSongOtherDeckPlaying || autoPilotEnabled}>
+          <button ref={partyFirstSongPlayButtonRef} type="button" onClick={() => void startCurrentSong()} disabled={partySoundStopLocked || transitionCompletionUncertain || partyCheckpointBusy || libraryMutationBusy || partyCheckpointWriterLost || rehearsalActive || rehearsalPreparing || rehearsalCircuitOpen || partyFirstSongOpening || !!audioRecoveryState || outputDeviceChanged || !partyFirstSongActionReady || partyFirstSongActionPlaying || partyFirstSongOtherDeckPlaying || autoPilotEnabled}>
             <span>2</span><strong>{partyFirstSongActionPlaying ? "FIRST SONG PLAYING" : "PLAY FIRST SONG"}</strong><small>{partyFirstSongActionReady ? partyFirstSongActionTrack?.name ?? "Loaded track" : "Choose a song below"}</small>
           </button>
-          <button ref={partyStartButtonRef} type="button" onClick={() => autoPilotEnabled ? pausePartyAutopilot() : setShowPartyReadiness(true)} disabled={partySoundStopLocked || transitionCompletionUncertain || partyCheckpointBusy || (libraryMutationBusy && !autoPilotEnabled) || partyCheckpointWriterLost || !!audioRecoveryState || outputDeviceChanged || (!!partyFirstSongReadyOwner && !autoPilotEnabled) || (!sourcePartyPlaying && !autoPilotEnabled)}>
+          <button ref={partyStartButtonRef} type="button" onClick={() => autoPilotEnabled ? pausePartyAutopilot() : setShowPartyReadiness(true)} disabled={partySoundStopLocked || transitionCompletionUncertain || partyCheckpointBusy || (libraryMutationBusy && !autoPilotEnabled) || partyCheckpointWriterLost || (!autoPilotEnabled && (rehearsalActive || rehearsalPreparing || rehearsalCircuitOpen)) || !!audioRecoveryState || outputDeviceChanged || (!!partyFirstSongReadyOwner && !autoPilotEnabled) || (!sourcePartyPlaying && !autoPilotEnabled)}>
             <span>3</span><strong>{autoPilotEnabled ? "PAUSE AUTOPILOT" : "START AUTOPILOT"}</strong><small>{autoPilotEnabled ? "Music keeps playing" : "Mazzy handles later songs"}</small>
           </button>
         </div>
@@ -6802,7 +6890,7 @@ export default function App() {
                 setShowPartyReadiness(false);
                 window.requestAnimationFrame(() => partyStartButtonRef.current?.focus?.());
               }}>NOT YET</button>
-              <button type="button" disabled={partySoundStopLocked || partyCheckpointBusy || libraryMutationBusy || partyFirstSongAutopilotBlocked || !!audioRecoveryState || outputDeviceChanged || !partyReadiness.canStart} onClick={() => {
+              <button type="button" disabled={partySoundStopLocked || partyCheckpointBusy || libraryMutationBusy || rehearsalActive || rehearsalPreparing || rehearsalCircuitOpen || partyFirstSongAutopilotBlocked || !!audioRecoveryState || outputDeviceChanged || !partyReadiness.canStart} onClick={() => {
                 void startPartyAutopilot();
                 window.requestAnimationFrame(() => partyStartButtonRef.current?.focus?.());
               }}>START PARTY AUTOPILOT</button>
@@ -6831,7 +6919,7 @@ export default function App() {
               }}>{autoPilotIntervention.reason === "unexpected-source-ended" ? "CHOOSE A SONG" : "CHOOSE ANOTHER SONG"}</button>
               <button
                 type="button"
-                disabled={partySoundStopLocked || transitionCompletionUncertain || libraryMutationBusy || partyFirstSongAutopilotBlocked || !!audioRecoveryState || outputDeviceChanged || !sourcePartyReady || !sourcePartyPlaying}
+                disabled={partySoundStopLocked || transitionCompletionUncertain || libraryMutationBusy || rehearsalActive || rehearsalPreparing || rehearsalCircuitOpen || partyFirstSongAutopilotBlocked || !!audioRecoveryState || outputDeviceChanged || !sourcePartyReady || !sourcePartyPlaying}
                 onClick={() => void startPartyAutopilot()}
               >RETRY AUTOPILOT</button>
             </div>
@@ -6849,7 +6937,7 @@ export default function App() {
             <button type="button" onClick={() => setPartyEnergyShift((value) => Math.max(-0.3, value - 0.1))} disabled={!autoPilotEnabled || partyEnergyShift <= -0.3}>PREFER CALMER LATER SONGS</button>
             <button type="button" onClick={() => setPartyEnergyShift((value) => Math.min(0.3, value + 0.1))} disabled={!autoPilotEnabled || partyEnergyShift >= 0.3}>PREFER MORE ENERGETIC LATER SONGS</button>
             <span className="sr-only" role="status">{`Later-song activity preference ${Math.round(partyEnergyShift * 100)} percent`}</span>
-            <button type="button" onClick={() => void startAutoMix()} disabled={partySoundStopLocked || transitionCompletionUncertain || libraryMutationBusy || !autoPilotEnabled || autoMixing || autoMixArming || !pairPreview?.plan}>CHANGE SONG NOW</button>
+            <button type="button" onClick={() => void startAutoMix()} disabled={partySoundStopLocked || transitionCompletionUncertain || libraryMutationBusy || rehearsalActive || rehearsalPreparing || rehearsalCircuitOpen || !autoPilotEnabled || autoMixing || autoMixArming || !pairPreview?.plan}>CHANGE SONG NOW</button>
             {autoMixing && <button className="party-emergency" type="button" disabled={partySoundStopLocked} onClick={rescueTransition}>STOP AUTOMATIC TRANSITION</button>}
           </div>
         )}
@@ -6875,6 +6963,17 @@ export default function App() {
           </p>
         )}
       </section>
+
+      {rehearsalCircuitOpen && (
+        <section className="rehearsal-control" ref={rehearsalAlertRef} tabIndex={-1}
+          role="alert" aria-labelledby="rehearsal-timeout-title">
+          <strong id="rehearsal-timeout-title">LOCAL REHEARSAL NEEDS A RELOAD</strong>
+          <small>
+            The browser did not finish the local rehearsal preparation. No preview was started or saved. New playback is locked; Stop All Sound remains available.
+          </small>
+          <button type="button" onClick={() => window.location.reload()}>RELOAD MAZZY</button>
+        </section>
+      )}
 
       <section id="advanced-mixer" className={`decks-section ${showAdvancedMixer ? "" : "advanced-hidden"}`} aria-hidden={!showAdvancedMixer}>
         <div className="mixer-layout">
@@ -6903,8 +7002,8 @@ export default function App() {
             onStopAllSound={stopAllSound}
             onDeckPlaybackCompletion={onDeckPlaybackCompletion}
             onAudioStartError={onAudioStartError}
-            playbackStartLocked={partySoundStopLocked || transitionCompletionUncertain || libraryMutationBusy || partyCheckpointBusy || partyCheckpointWriterLost || !!audioRecoveryState || outputDeviceChanged}
-            playbackStartLockRef={playbackRecoveryLockedRef}
+            playbackStartLocked={partySoundStopLocked || transitionCompletionUncertain || libraryMutationBusy || partyCheckpointBusy || partyCheckpointWriterLost || rehearsalActive || rehearsalPreparing || rehearsalCircuitOpen || !!audioRecoveryState || outputDeviceChanged}
+            playbackStartLockRef={deckPlaybackStartLockedRef}
             flash={deckFlash.a}
             transitionLocked={autoMixing || autoMixArming || autoPilotEnabled}
             rehearsalLocked={rehearsalActive || rehearsalPreparing}
@@ -6940,7 +7039,7 @@ export default function App() {
               onChange={onCrossFade}
               disabled={autoMixing || autoMixArming || autoPilotEnabled || rehearsalActive || rehearsalPreparing}
             />
-            <button className="auto-mix-btn" type="button" onClick={startAutoMix} disabled={partySoundStopLocked || libraryMutationBusy || !!audioRecoveryState || outputDeviceChanged || autoMixing || autoMixArming || autoPilotEnabled || rehearsalActive || rehearsalPreparing}>
+            <button className="auto-mix-btn" type="button" onClick={startAutoMix} disabled={partySoundStopLocked || libraryMutationBusy || !!audioRecoveryState || outputDeviceChanged || autoMixing || autoMixArming || autoPilotEnabled || rehearsalActive || rehearsalPreparing || rehearsalCircuitOpen}>
               {autoMixArming
                 ? "ARMING SAFE TRANSITION…"
                 : autoMixing
@@ -6973,7 +7072,7 @@ export default function App() {
               className={`auto-pilot-toggle ${autoPilotEnabled ? "enabled" : ""}`}
               type="button"
               aria-pressed={autoPilotEnabled}
-              disabled={rehearsalActive || rehearsalPreparing || (libraryMutationBusy && !autoPilotEnabled) || partyFirstSongAutopilotBlocked}
+              disabled={rehearsalActive || rehearsalPreparing || rehearsalCircuitOpen || (libraryMutationBusy && !autoPilotEnabled) || partyFirstSongAutopilotBlocked}
               onClick={() => {
                 if (autoPilotEnabled) {
                   pausePartyAutopilot();
@@ -7084,7 +7183,7 @@ export default function App() {
               <button
                 className="skip-current-btn"
                 type="button"
-                disabled={partySoundStopLocked || libraryMutationBusy || autoMixing || autoMixArming || !pairPreview?.plan}
+                disabled={partySoundStopLocked || libraryMutationBusy || rehearsalActive || rehearsalPreparing || rehearsalCircuitOpen || autoMixing || autoMixArming || !pairPreview?.plan}
                 onClick={() => void startAutoMix()}
               >
                 SKIP CURRENT SONG SAFELY
@@ -7097,7 +7196,7 @@ export default function App() {
                 {!autoPilotEnabled && (
                   <button
                     type="button"
-                    disabled={partyCheckpointBusy || libraryMutationBusy || partyCheckpointWriteCircuitOpen || partyCheckpointWriterLost}
+                    disabled={partyCheckpointBusy || libraryMutationBusy || partyCheckpointWriteCircuitOpen || partyCheckpointWriterLost || rehearsalActive || rehearsalPreparing || rehearsalCircuitOpen}
                     onClick={() => {
                       void resetPartyAutopilot();
                     }}
@@ -7115,7 +7214,7 @@ export default function App() {
                   <button type="button" onClick={() => setShowPartyReadiness(false)}>CANCEL</button>
                   <button
                     type="button"
-                    disabled={partySoundStopLocked || libraryMutationBusy || partyFirstSongAutopilotBlocked || !partyReadiness.canStart}
+                    disabled={partySoundStopLocked || libraryMutationBusy || rehearsalActive || rehearsalPreparing || rehearsalCircuitOpen || partyFirstSongAutopilotBlocked || !partyReadiness.canStart}
                     onClick={() => {
                       void startPartyAutopilot();
                     }}
@@ -7139,7 +7238,7 @@ export default function App() {
                 </small>
               </div>
             )}
-            {!autoPilotEnabled && !autoMixing && pairPreview?.plan && (
+            {!rehearsalCircuitOpen && !autoPilotEnabled && !autoMixing && pairPreview?.plan && (
               <div className="rehearsal-control" aria-live="polite">
                 {rehearsalActive ? (
                   <button type="button" onClick={() => stopRehearsal()}>STOP PREVIEW</button>
@@ -7151,7 +7250,9 @@ export default function App() {
                   <button
                     type="button"
                     onClick={() => void rehearseCurrentPair()}
-                    disabled={partySoundStopLocked || transitionCompletionUncertain || !!audioRecoveryState || outputDeviceChanged || autoMixArming || deckARef.current?.isPlaying?.() || deckBRef.current?.isPlaying?.()}
+                    disabled={partySoundStopLocked || transitionCompletionUncertain || partyCheckpointBusy || libraryMutationBusy ||
+                      !!audioRecoveryState || outputDeviceChanged || autoMixArming || rehearsalCircuitOpen ||
+                      deckARef.current?.isPlaying?.() || deckBRef.current?.isPlaying?.()}
                   >
                     {rehearsalPreparing ? "PREPARING REHEARSAL…" : "HEAR TRANSITION REHEARSAL"}
                   </button>
@@ -7214,8 +7315,8 @@ export default function App() {
             onStopAllSound={stopAllSound}
             onDeckPlaybackCompletion={onDeckPlaybackCompletion}
             onAudioStartError={onAudioStartError}
-            playbackStartLocked={partySoundStopLocked || transitionCompletionUncertain || libraryMutationBusy || partyCheckpointBusy || partyCheckpointWriterLost || !!audioRecoveryState || outputDeviceChanged}
-            playbackStartLockRef={playbackRecoveryLockedRef}
+            playbackStartLocked={partySoundStopLocked || transitionCompletionUncertain || libraryMutationBusy || partyCheckpointBusy || partyCheckpointWriterLost || rehearsalActive || rehearsalPreparing || rehearsalCircuitOpen || !!audioRecoveryState || outputDeviceChanged}
+            playbackStartLockRef={deckPlaybackStartLockedRef}
             flash={deckFlash.b}
             transitionLocked={autoMixing || autoMixArming || autoPilotEnabled}
             rehearsalLocked={rehearsalActive || rehearsalPreparing}
@@ -7479,7 +7580,7 @@ export default function App() {
                     <button
                       className="library-track-action"
                       type="button"
-                      disabled={partyCheckpointBusy || libraryMutationBusy || partyFirstSongOpening || loadedA || loadedB || autoMixing || autoMixArming || rehearsalActive || rehearsalPreparing || autoPilotExcludedTrackIds.includes(track.id) || (partySoundStopLocked && !sourcePartyReady)}
+                      disabled={partyCheckpointBusy || libraryMutationBusy || partyFirstSongOpening || loadedA || loadedB || autoMixing || autoMixArming || rehearsalActive || rehearsalPreparing || rehearsalCircuitOpen || autoPilotExcludedTrackIds.includes(track.id) || (partySoundStopLocked && !sourcePartyReady)}
                       aria-label={`${loadedA || loadedB ? "Ready" : unavailableAutoPilotTrackIds.includes(track.id) ? autoPilotEnabled ? "Couldn't open; pause Autopilot, then use More actions to retry" : "Couldn't open; use More actions to retry" : timedOutAutoPilotTrackIds.includes(track.id) ? autoPilotEnabled ? "Took too long to prepare; pause Autopilot, then use More actions to retry" : "Took too long to prepare; use More actions to retry" : !sourcePartyReady ? "Choose first song" : autoPilotEnabled || queuePositionMap.has(track.id) ? "Request next" : "Add to queue"}: ${track.name}`}
                       onClick={(event) => void activateLibraryTrack(track, event.currentTarget)}
                     >
@@ -7569,7 +7670,7 @@ export default function App() {
           <button
             type="button"
             role="menuitem"
-            disabled={partySoundStopLocked || partyCheckpointBusy || autoMixing || autoMixArming || autoPilotEnabled || rehearsalActive || rehearsalPreparing || deckAPlaying}
+            disabled={partySoundStopLocked || partyCheckpointBusy || autoMixing || autoMixArming || autoPilotEnabled || rehearsalActive || rehearsalPreparing || rehearsalCircuitOpen || deckAPlaying}
             onClick={() => {
               const track = library.find((t) => t.id === contextMenu.trackId);
               if (track && !libraryMutationBusy) {
@@ -7583,7 +7684,7 @@ export default function App() {
           <button
             type="button"
             role="menuitem"
-            disabled={partySoundStopLocked || partyCheckpointBusy || autoMixing || autoMixArming || autoPilotEnabled || rehearsalActive || rehearsalPreparing || deckBPlaying}
+            disabled={partySoundStopLocked || partyCheckpointBusy || autoMixing || autoMixArming || autoPilotEnabled || rehearsalActive || rehearsalPreparing || rehearsalCircuitOpen || deckBPlaying}
             onClick={() => {
               const track = library.find((t) => t.id === contextMenu.trackId);
               if (track && !libraryMutationBusy) {

@@ -53,6 +53,31 @@ describe("Deck host interaction lifecycle", () => {
     expect(callbackRollback).toHaveBeenCalledOnce();
   });
 
+  it("refuses a transport start when a synchronous host lock is claimed across an await", async () => {
+    let releasePreparation!: () => void;
+    const preparation = new Promise<void>((resolve) => { releasePreparation = resolve; });
+    const mutableStartLock = { current: false };
+    const start = vi.fn(() => 18);
+    const notify = vi.fn();
+    const attemptedStart = (async () => {
+      await preparation;
+      if (mutableStartLock.current) return null;
+      return commitDeckTransportStart({
+        start,
+        ownsAuthority: () => !mutableStartLock.current,
+        rollback: vi.fn(),
+        notify
+      });
+    })();
+
+    mutableStartLock.current = true;
+    releasePreparation();
+
+    await expect(attemptedStart).resolves.toBeNull();
+    expect(start).not.toHaveBeenCalled();
+    expect(notify).not.toHaveBeenCalled();
+  });
+
   it("rejects deferred timing settlement after lock, load replacement, or track replacement", () => {
     const owned = {
       locked: false,

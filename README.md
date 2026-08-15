@@ -294,6 +294,18 @@ discontinuities; they do not certify musical quality, true-peak compliance,
 device stability, or human preference. No rehearsal audio or feedback is
 persisted.
 
+Rehearsal preparation is owned by `transition-rehearsal-runtime/v1` with a
+30-second monotonic liveness boundary covering the unabortable offline render
+and the subsequent browser-audio resume. Cancel keeps new playback locked until
+that local step settles. If it never settles, Mazzy shows a focused persistent
+**Reload Mazzy** alert, starts no preview, and keeps every new Deck, first-song,
+and automatic start locked; **Stop All Sound** remains available. A late render
+cannot resume audio or start the preview. This boundary is a conservative
+liveness policy, not a rendering-performance claim, and its owner, timer, and
+failure state remain tab-memory-only. The same exact owner feeds the Decks'
+mutable post-resume start/load gate, so a command already awaiting browser audio
+cannot cross into a newly claimed rehearsal.
+
 The diagnostics-only `transition-rehearsal-browser-check/v4` also routes a
 synthetic, deliberately hot correlated-stereo handoff through an offline graph
 configured by the same `mazzy-master/v1` settings as production, then applies

@@ -325,6 +325,23 @@ describe("AudioEngine", () => {
     expect(source.stopCalls.at(-1)).toBeUndefined();
   });
 
+  it("releases preview completion authority even when source disconnection throws", () => {
+    const { context, engine } = createEngine();
+    let ended = 0;
+    engine.playProtectedPreview(
+      { kind: "pre-master-stereo/v1", requiredMasterVersion: MASTER_DSP_V1.version, sampleRate: 8_000, channels: [
+        Float32Array.from([0, 0.2, -0.2, 0]),
+        Float32Array.from([0, -0.2, 0.2, 0])
+      ] },
+      () => { ended += 1; }
+    );
+    const source = context.sources.at(-1)!;
+    source.disconnect = () => { throw new Error("detached graph"); };
+
+    expect(() => source.onended?.()).not.toThrow();
+    expect(ended).toBe(1);
+  });
+
   it("owns crossfade completion on the audio clock instead of animation frames", () => {
     const { context, engine } = createEngine();
     const schedule = engine.scheduleCrossfade("a", "b", 11, 2);

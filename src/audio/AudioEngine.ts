@@ -696,7 +696,7 @@ export class AudioEngine {
       if (ended) return;
       ended = true;
       this.audibleAuxiliarySources.delete(source);
-      source.disconnect();
+      try { source.disconnect(); } catch { /* Completion still releases exact preview authority. */ }
       onEnded?.();
     };
     source.start(this.clock.now());
@@ -709,7 +709,7 @@ export class AudioEngine {
       if (!ended) {
         ended = true;
         this.audibleAuxiliarySources.delete(source);
-        source.disconnect();
+        try { source.disconnect(); } catch { /* Cancellation already revoked exact preview authority. */ }
       }
     };
   }

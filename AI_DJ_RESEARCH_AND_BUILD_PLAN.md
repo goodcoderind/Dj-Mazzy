@@ -1724,7 +1724,8 @@ These are the active backlog, not reasons to discard the prototype.
   UI uses local system fonts rather than making an unsolicited third-party font
   request. Rehearsal cancellation keeps live transport locked until the active
   local decode/render step settles, because browser decoding and
-  `OfflineAudioContext` rendering are not reliably abortable.
+  `OfflineAudioContext` rendering are not reliably abortable. D-081 supersedes
+  the formerly unbounded wait with an exact liveness owner and reload circuit.
 - **D-030 — Device acceptance uses post-limiter evidence, not UI polling:** A
   local wall-clock runner uses the production audio/deck engine and synthetic
   stereo buffers. `audio-health/v2` counts render quanta, non-finite and clipped
@@ -3027,6 +3028,42 @@ These are the active backlog, not reasons to discard the prototype.
   enhanced artifacts. This proves the double-reload generated-WAV path in the
   tested Chromium environment, not process-crash durability, physical speaker
   state, real-music quality, or Firefox/Safari support.
+
+- **D-081 — Bound unabortable transition-rehearsal preparation and fail closed
+  before any preview may start:** `transition-rehearsal-runtime/v1` owns one
+  exact host-requested preparation from the real offline stereo render through
+  the browser AudioContext resume. Its 30-second `performance.now()` deadline is
+  a conservative liveness ceiling, not a speed target. The runtime rechecks the
+  absolute deadline on task fulfillment/rejection, so a throttled timer cannot
+  convert a late render into success. One Cancel request remains attached to the
+  same owner: on-time settlement becomes cancelled, while a render that remains
+  unresolved through the deadline becomes a timeout instead of leaving the UI
+  in `CANCELLING` forever. Late values are inert and cannot reach resume or the
+  protected preview start.
+
+  App holds a synchronous preparation owner before rendering, rejects duplicate
+  rehearsal actions, and gates the exact imperative first-song, Deck load/play,
+  Auto Mix, and Autopilot command boundaries as well as their visible controls.
+  Both Decks recheck the mutable rehearsal start/load gate after browser-audio
+  waits and again at transport publication, so an older pending command cannot
+  cross a newly claimed rehearsal owner.
+  Stop All Sound, cross-tab reconciliation, audio/output recovery, and explicit
+  Cancel request cancellation without pretending that browser-internal offline
+  work stopped. If the offline render or resume reaches the deadline, Mazzy
+  opens a tab-session rehearsal circuit, focuses fixed **Reload Mazzy** guidance,
+  starts no preview, and keeps new playback locked while the global Stop action
+  stays available. Ordinary failure before the deadline remains retryable; a
+  cancelled operation that settles before the deadline releases the preparation
+  lock. Unmount revokes the exact owner before teardown.
+
+  Deterministic tests cover success before the boundary, cancellation followed
+  by settlement, cancellation followed by a never-settling timeout, settlement
+  at a throttled exact deadline, late-value inertness, unmount revocation, every
+  playback-owner projection, and prevention of a post-timeout resume/start
+  phase. No audio, filename, track identity, error, deadline, or owner is stored,
+  exported, traced, or sent over a network. IndexedDB, analysis, transition,
+  checkpoint, and Party trace schemas remain unchanged. Real browser suspension
+  and device contention remain external evidence gates.
 
 ### Open questions
 
