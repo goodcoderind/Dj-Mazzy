@@ -111,8 +111,22 @@ import {
   evaluatePartyAutopilotTrace
 } from "./diagnostics/partyAutopilotTrace";
 import { assessImportCapacity, formatStorageSize } from "./storage/importCapacity";
-import { identifyLocalFile, normalizeContentIdentity } from "./storage/contentIdentity";
+import { identifyLocalFile, normalizeContentIdentity, readLocalFileBytes } from "./storage/contentIdentity";
 import { ownsLibraryHydration, startLibraryHydration } from "./storage/libraryHydrationRuntime";
+import {
+  createLibraryImportPickerOwner,
+  createLibraryMembershipMutationOwner,
+  libraryMembershipRevocationDisposition,
+  mayCancelLibraryMembershipPreparation,
+  mayClaimPreparedImportCommit,
+  mayContinueLibraryMembershipAfterExclusive,
+  membershipFailureHasDefiniteRollback,
+  ownsLibraryImportPicker,
+  ownsLibraryMembershipMutation,
+  retryExactDeckMembershipCleanup,
+  startBoundedLibraryMembershipStage,
+  verifyDeckMembershipCleanup
+} from "./storage/libraryMembershipMutationRuntime";
 import {
   createLibraryRoutinePatchBatch,
   createLibraryRoutineMembershipBatch,
@@ -130,6 +144,7 @@ import {
   createLibraryReconciliationRuntime,
   libraryReconciliationResultCovers,
   mergeLibraryReconciliationRequirements,
+  settleLibraryReconciliationWaiters,
   shouldQuiescePartyForRemoteCheckpoint
 } from "./storage/libraryReconciliationRuntime";
 import {
@@ -337,6 +352,8 @@ export default function App() {
   const [libraryHydrationCircuitOpen, setLibraryHydrationCircuitOpen] = useState(false);
   const [libraryReconcileBusy, setLibraryReconcileBusy] = useState(false);
   const [libraryReconcileCircuitOpen, setLibraryReconcileCircuitOpen] = useState(false);
+  const [libraryMembershipStatus, setLibraryMembershipStatus] = useState(null);
+  const [libraryMembershipCircuitOpen, setLibraryMembershipCircuitOpen] = useState(false);
   const [libraryRoutineWriteCircuitOpen, setLibraryRoutineWriteCircuitOpen] = useState(false);
   const [libraryAnalysisSaveError, setLibraryAnalysisSaveError] = useState("");
   const [backgroundAnalysisNotice, setBackgroundAnalysisNotice] = useState(null);
@@ -353,6 +370,25 @@ export default function App() {
   const deckARef = useRef(null);
   const deckBRef = useRef(null);
   const importRef = useRef(null);
+  const libraryImportPickerOperationRef = useRef(0);
+  const libraryImportPickerOwnerRef = useRef(null);
+  const libraryImportPickerReleaseTimerRef = useRef(null);
+  const libraryImportPickerFocusDeferredRef = useRef(false);
+  const libraryImportPickerBlurredRef = useRef(false);
+  const libraryImportPickerTriggerRef = useRef(null);
+  const libraryImportPickerReconcileConsumedRef = useRef(false);
+  const libraryMembershipAlertRef = useRef(null);
+  const libraryMembershipStatusRef = useRef(null);
+  const libraryHeadingRef = useRef(null);
+  const libraryMembershipCancelButtonRef = useRef(null);
+  const libraryMembershipCancelRef = useRef(null);
+  const libraryMembershipTriggerRef = useRef(null);
+  const libraryMembershipOwnerRef = useRef(null);
+  const libraryMembershipEpochRef = useRef(1);
+  const libraryMembershipOperationRef = useRef(0);
+  const libraryMembershipStageOperationRef = useRef(0);
+  const libraryMembershipPhaseRef = useRef("idle");
+  const libraryMembershipDeckCleanupRef = useRef(null);
   const partyFirstSongLoadRef = useRef(null);
   const partyFirstSongLoadOperationRef = useRef(0);
   const partyFirstSongLoadTimerRef = useRef(null);
@@ -393,6 +429,8 @@ export default function App() {
   const queueRef = useRef([]);
   const libraryRef = useRef([]);
   const libraryReconcileRuntimeRef = useRef(null);
+  const libraryReconcileRequestRef = useRef(null);
+  const libraryReconcileWaitersRef = useRef(new Set());
   const playedTrackIdsRef = useRef([]);
   const partySessionClockRef = useRef(createPartySessionClock(180 * 60));
   const libraryStateRef = useRef({ epoch: 0, revision: 0 });
@@ -574,14 +612,37 @@ export default function App() {
 
   useEffect(() => {
     if (!autoPilotEnabled && !autoMixArming && !autoMixing && !rehearsalActive &&
-      !rehearsalPreparing && !partyFirstSongOpening) return;
+      !rehearsalPreparing && !partyFirstSongOpening && !libraryMembershipStatus) return;
     const warnBeforeLeaving = (event) => {
       event.preventDefault();
       event.returnValue = "";
     };
     window.addEventListener("beforeunload", warnBeforeLeaving);
     return () => window.removeEventListener("beforeunload", warnBeforeLeaving);
-  }, [autoPilotEnabled, autoMixArming, autoMixing, rehearsalActive, rehearsalPreparing, partyFirstSongOpening]);
+  }, [autoPilotEnabled, autoMixArming, autoMixing, rehearsalActive, rehearsalPreparing, partyFirstSongOpening, libraryMembershipStatus]);
+
+  useEffect(() => {
+    const onPageHide = () => {
+      const owner = libraryMembershipOwnerRef.current;
+      if (!owner) return;
+      if (libraryMembershipRevocationDisposition(libraryMembershipPhaseRef.current) === "cancelled") {
+        libraryMembershipOwnerRef.current = null;
+        libraryMembershipEpochRef.current += 1;
+        try { libraryMembershipCancelRef.current?.(); } catch { /* Preparation authority is revoked. */ }
+        libraryMembershipCancelRef.current = null;
+        libraryMembershipTriggerRef.current = null;
+        libraryMembershipPhaseRef.current = "idle";
+        setLibraryMembershipStatus(null);
+        if (["importing", "destructive"].includes(libraryMutationModeRef.current)) {
+          setLibraryMutationLock(false);
+        }
+        return;
+      }
+      failLibraryMembershipCommitClosed(owner);
+    };
+    window.addEventListener("pagehide", onPageHide);
+    return () => window.removeEventListener("pagehide", onPageHide);
+  }, []);
 
   useEffect(() => {
     const engine = getAudioEngine();
@@ -713,6 +774,16 @@ export default function App() {
     return true;
   };
 
+  const waitForLibraryReconciliationSettlement = () => {
+    const snapshot = libraryReconcileRuntimeRef.current?.snapshot?.();
+    if (!snapshot?.active && !snapshot?.pending) return Promise.resolve();
+    return new Promise((resolve) => libraryReconcileWaitersRef.current.add(resolve));
+  };
+
+  const settleReconciliationWaiters = () => {
+    settleLibraryReconciliationWaiters(libraryReconcileWaitersRef.current);
+  };
+
   useEffect(() => {
     autoPilotEnabledRef.current = autoPilotEnabled;
     queueRef.current = queue;
@@ -722,6 +793,17 @@ export default function App() {
 
   useEffect(() => {
     const failReconciliationClosed = () => {
+      const membershipOwner = libraryMembershipOwnerRef.current;
+      if (membershipOwner &&
+          libraryMembershipRevocationDisposition(libraryMembershipPhaseRef.current) === "cancelled") {
+        libraryMembershipOwnerRef.current = null;
+        libraryMembershipEpochRef.current += 1;
+        try { libraryMembershipCancelRef.current?.(); } catch { /* Reconciliation failure is authoritative. */ }
+        libraryMembershipCancelRef.current = null;
+        libraryMembershipTriggerRef.current = null;
+        libraryMembershipPhaseRef.current = "idle";
+        setLibraryMembershipStatus(null);
+      }
       quiescePartyForReconciliationFailure();
       partyCheckpointTerminalClearPendingRef.current = null;
       libraryMutationBusyRef.current = true;
@@ -832,6 +914,7 @@ export default function App() {
       },
       onCompleted: (trigger, bundle) => {
         applyReconciledBundle(trigger, bundle);
+        if (trigger.kind === "membership-stale") setLibraryStorageError("");
         libraryMutationBusyRef.current = false;
         libraryMutationModeRef.current = "idle";
         setLibraryMutationBusy(false);
@@ -841,7 +924,7 @@ export default function App() {
           partyCheckpointTerminalClearPendingRef.current = null;
           const stored = partyCheckpointStoredRecordRef.current;
           const stillOwned = stored &&
-            (stored.recordStatus === "available" || stored.recordStatus === "claimed") &&
+            ["available", "claimed", "invalidated"].includes(stored.recordStatus) &&
             stored.sessionId === terminalClear.sessionId &&
             stored.writerToken === terminalClear.writerToken &&
             stored.revision >= terminalClear.minimumRevision;
@@ -858,9 +941,16 @@ export default function App() {
             pauseForCheckpointOwnershipLoss();
           }
         }
+        settleReconciliationWaiters();
       },
-      onFailed: failReconciliationClosed,
-      onTimedOut: failReconciliationClosed
+      onFailed: () => {
+        failReconciliationClosed();
+        settleReconciliationWaiters();
+      },
+      onTimedOut: () => {
+        failReconciliationClosed();
+        settleReconciliationWaiters();
+      }
     });
     libraryReconcileRuntimeRef.current = runtime;
     const requestReconciliation = (kind = "focus", message = null, { quiesceSession = false } = {}) => {
@@ -880,17 +970,19 @@ export default function App() {
           (libraryMutationBusyRef.current && libraryMutationModeRef.current !== "reconciling")) {
         runtime.pause();
         runtime.request(trigger);
-        return;
+        return true;
       }
       const wasPaused = runtime.snapshot().mode === "paused";
       const admitted = runtime.request(trigger);
-      if (admitted === "blocked") return;
+      if (admitted === "blocked") return false;
       if (wasPaused) runtime.resume();
       libraryMutationBusyRef.current = true;
       libraryMutationModeRef.current = "reconciling";
       setLibraryMutationBusy(true);
       setLibraryReconcileBusy(true);
+      return true;
     };
+    libraryReconcileRequestRef.current = requestReconciliation;
     const unsubscribe = subscribeToLibraryMutations((message) => {
       invalidatePartyCheckpointClaim("The saved party plan changed in another tab while it was being restored. Reload Mazzy to review recovery before continuing.");
       const newerRemoteCheckpoint = shouldQuiescePartyForRemoteCheckpoint({
@@ -920,6 +1012,16 @@ export default function App() {
       } else if (message.type === "library-cleared") {
         stopRemoteLibraryPlayback();
         libraryImportGenerationRef.current += 1;
+        libraryMembershipEpochRef.current += 1;
+        libraryMembershipOwnerRef.current = null;
+        try { libraryMembershipCancelRef.current?.(); } catch { /* Remote membership is authoritative. */ }
+        libraryMembershipCancelRef.current = null;
+        libraryMembershipTriggerRef.current = null;
+        libraryMembershipPhaseRef.current = "idle";
+        setLibraryMembershipStatus(null);
+        if (["importing", "destructive"].includes(libraryMutationModeRef.current)) {
+          setLibraryMutationLock(false);
+        }
         analysisGenerationRef.current += 1;
         cancelActiveBackgroundAnalysis({ resetEnhanced: true });
         queuedAnalysisIdsRef.current.clear();
@@ -938,19 +1040,51 @@ export default function App() {
       }
     });
     const onReturn = () => {
+      const pickerOwner = libraryImportPickerOwnerRef.current;
+      if (pickerOwner) {
+        if (libraryImportPickerReconcileConsumedRef.current) return;
+        if (!libraryImportPickerBlurredRef.current) return;
+        libraryImportPickerFocusDeferredRef.current = true;
+        if (libraryImportPickerReleaseTimerRef.current != null) {
+          window.clearTimeout(libraryImportPickerReleaseTimerRef.current);
+        }
+        libraryImportPickerReleaseTimerRef.current = window.setTimeout(() => {
+          if (ownsLibraryImportPicker(libraryImportPickerOwnerRef.current, pickerOwner)) {
+            libraryImportPickerOwnerRef.current = null;
+          }
+          libraryImportPickerTriggerRef.current = null;
+          libraryImportPickerBlurredRef.current = false;
+          libraryImportPickerReleaseTimerRef.current = null;
+          if (libraryImportPickerFocusDeferredRef.current) {
+            libraryImportPickerFocusDeferredRef.current = false;
+            libraryImportPickerReconcileConsumedRef.current = true;
+            libraryReconcileRequestRef.current?.("focus");
+          }
+        }, 250);
+        return;
+      }
       if (document.visibilityState === "visible") requestReconciliation("focus");
     };
+    const onBlur = () => {
+      if (libraryImportPickerOwnerRef.current) libraryImportPickerBlurredRef.current = true;
+    };
+    window.addEventListener("blur", onBlur);
     window.addEventListener("focus", onReturn);
     window.addEventListener("pageshow", onReturn);
     document.addEventListener("visibilitychange", onReturn);
     return () => {
       runtime.halt();
+      if (libraryReconcileRequestRef.current === requestReconciliation) {
+        libraryReconcileRequestRef.current = null;
+      }
       partyCheckpointTerminalClearPendingRef.current = null;
       if (libraryReconcileRuntimeRef.current === runtime) libraryReconcileRuntimeRef.current = null;
       unsubscribe();
+      window.removeEventListener("blur", onBlur);
       window.removeEventListener("focus", onReturn);
       window.removeEventListener("pageshow", onReturn);
       document.removeEventListener("visibilitychange", onReturn);
+      settleReconciliationWaiters();
     };
   }, []);
 
@@ -1221,6 +1355,214 @@ export default function App() {
     }
   };
 
+  const beginLibraryMembershipMutation = (kind) => {
+    if (libraryMembershipOwnerRef.current || libraryMembershipCircuitOpen ||
+        libraryMutationBusyRef.current || partyCheckpointBusyRef.current ||
+        playbackRecoveryLockedRef.current || libraryMembershipDeckCleanupRef.current) return null;
+    const owner = createLibraryMembershipMutationOwner({
+      epoch: libraryMembershipEpochRef.current,
+      operation: ++libraryMembershipOperationRef.current,
+      kind,
+      expectedLibraryEpoch: libraryStateRef.current.epoch,
+      expectedLibraryRevision: libraryStateRef.current.revision
+    });
+    libraryMembershipOwnerRef.current = owner;
+    libraryMembershipPhaseRef.current = kind === "import" ? "preparing" : "waiting-exclusive";
+    libraryMembershipTriggerRef.current = kind === "import"
+      ? libraryImportPickerTriggerRef.current ?? document.activeElement
+      : document.activeElement;
+    if (kind === "import") libraryImportPickerTriggerRef.current = null;
+    setLibraryMembershipStatus({ kind, state: kind === "import" ? "preparing" : "committing", completed: 0, total: 0 });
+    if (kind !== "import") window.requestAnimationFrame(() => libraryMembershipStatusRef.current?.focus?.());
+    return owner;
+  };
+
+  const ownsLibraryMembership = (owner) =>
+    ownsLibraryMembershipMutation(libraryMembershipOwnerRef.current, owner);
+
+  const runLibraryMembershipStage = async (owner, stage, task) => {
+    if (!ownsLibraryMembership(owner)) return { outcome: "cancelled" };
+    const run = startBoundedLibraryMembershipStage({
+      mutation: owner,
+      stage,
+      stageOperation: ++libraryMembershipStageOperationRef.current,
+      task,
+      ownsAuthority: () => ownsLibraryMembership(owner)
+    });
+    libraryMembershipCancelRef.current = run.cancel;
+    const settlement = await run.settlement;
+    if (libraryMembershipCancelRef.current === run.cancel) libraryMembershipCancelRef.current = null;
+    return settlement;
+  };
+
+  const finishLibraryMembershipMutation = (owner, { restoreFocus = false } = {}) => {
+    if (!ownsLibraryMembership(owner)) return false;
+    const trigger = libraryMembershipTriggerRef.current;
+    libraryMembershipOwnerRef.current = null;
+    libraryMembershipCancelRef.current = null;
+    libraryMembershipPhaseRef.current = "idle";
+    setLibraryMembershipStatus(null);
+    libraryMembershipTriggerRef.current = null;
+    if (restoreFocus) window.requestAnimationFrame(() => trigger?.focus?.());
+    queueMicrotask(() => drainPendingTerminalCheckpointAfterMembership());
+    return true;
+  };
+
+  const cancelLibraryMembershipPreparation = () => {
+    const owner = libraryMembershipOwnerRef.current;
+    if (!owner || owner.kind !== "import" ||
+        !mayCancelLibraryMembershipPreparation(libraryMembershipPhaseRef.current)) return;
+    const trigger = libraryMembershipTriggerRef.current;
+    libraryMembershipOwnerRef.current = null;
+    try { libraryMembershipCancelRef.current?.(); } catch { /* Preparation authority is already revoked. */ }
+    libraryMembershipCancelRef.current = null;
+    libraryMembershipPhaseRef.current = "idle";
+    libraryMembershipTriggerRef.current = null;
+    setLibraryMembershipStatus(null);
+    showToast("Import preparation cancelled · nothing was saved");
+    window.requestAnimationFrame(() => trigger?.focus?.());
+    queueMicrotask(() => drainPendingTerminalCheckpointAfterMembership());
+  };
+
+  const releaseLibraryImportPickerSoon = () => {
+    const owner = libraryImportPickerOwnerRef.current;
+    if (!owner) return;
+    if (libraryImportPickerReleaseTimerRef.current != null) {
+      window.clearTimeout(libraryImportPickerReleaseTimerRef.current);
+    }
+    libraryImportPickerReleaseTimerRef.current = window.setTimeout(() => {
+      if (ownsLibraryImportPicker(libraryImportPickerOwnerRef.current, owner)) {
+        libraryImportPickerOwnerRef.current = null;
+      }
+      libraryImportPickerTriggerRef.current = null;
+      libraryImportPickerBlurredRef.current = false;
+      libraryImportPickerReleaseTimerRef.current = null;
+      if (libraryImportPickerFocusDeferredRef.current) {
+        libraryImportPickerFocusDeferredRef.current = false;
+        libraryReconcileRequestRef.current?.("focus");
+      }
+    }, 250);
+  };
+
+  const requestDeferredLibraryPickerReconciliation = () => {
+    if (!libraryImportPickerFocusDeferredRef.current) return;
+    libraryImportPickerFocusDeferredRef.current = false;
+    libraryImportPickerReconcileConsumedRef.current = true;
+    if (!libraryMembershipOwnerRef.current) {
+      libraryImportPickerOwnerRef.current = null;
+      libraryImportPickerBlurredRef.current = false;
+      if (libraryImportPickerReleaseTimerRef.current != null) {
+        window.clearTimeout(libraryImportPickerReleaseTimerRef.current);
+        libraryImportPickerReleaseTimerRef.current = null;
+      }
+    }
+    libraryReconcileRequestRef.current?.("focus");
+  };
+
+  const openLibraryImportPicker = () => {
+    if (!importRef.current || libraryMembershipOwnerRef.current || libraryMembershipCircuitOpen ||
+        libraryMutationBusyRef.current || partyCheckpointBusyRef.current ||
+        playbackRecoveryLockedRef.current) return;
+    const owner = createLibraryImportPickerOwner(++libraryImportPickerOperationRef.current);
+    libraryImportPickerOwnerRef.current = owner;
+    libraryImportPickerTriggerRef.current = document.activeElement;
+    libraryImportPickerFocusDeferredRef.current = true;
+    libraryImportPickerReconcileConsumedRef.current = false;
+    libraryImportPickerBlurredRef.current = false;
+    if (libraryImportPickerReleaseTimerRef.current != null) {
+      window.clearTimeout(libraryImportPickerReleaseTimerRef.current);
+      libraryImportPickerReleaseTimerRef.current = null;
+    }
+    try {
+      importRef.current.click();
+    } catch {
+      if (ownsLibraryImportPicker(libraryImportPickerOwnerRef.current, owner)) {
+        libraryImportPickerOwnerRef.current = null;
+      }
+      libraryImportPickerTriggerRef.current = null;
+      libraryImportPickerFocusDeferredRef.current = false;
+      libraryImportPickerReconcileConsumedRef.current = false;
+      libraryImportPickerBlurredRef.current = false;
+    }
+  };
+
+  const failLibraryMembershipCommitClosed = (owner) => {
+    if (ownsLibraryMembership(owner)) libraryMembershipOwnerRef.current = null;
+    try { libraryMembershipCancelRef.current?.(); } catch { /* Commit authority is already revoked. */ }
+    libraryMembershipCancelRef.current = null;
+    libraryMembershipPhaseRef.current = "circuit-open";
+    libraryMembershipTriggerRef.current = null;
+    setLibraryMembershipStatus(null);
+    setLibraryMembershipCircuitOpen(true);
+    setLibrarySaveStatus("error");
+    setLibraryMutationLock(true, "membership-circuit");
+    if (partyCheckpointTerminalClearPendingRef.current) {
+      partyCheckpointTerminalClearPendingRef.current = null;
+      partyCheckpointTerminalRef.current = true;
+      getPartyCheckpointWriteRuntime().openCircuit();
+      setPartyCheckpointWriteCircuitOpen(true);
+      setPartyCheckpointError("The party finished, but local music storage became uncertain before saved recovery could be cleared. Reload Mazzy before starting another party.");
+    }
+    pauseAutoPilotForHostControl("Party Autopilot paused · local music storage needs review");
+    setLibraryStorageError("Mazzy could not confirm whether the local music change finished. New playback and library changes are locked. Reload local music before continuing.");
+    window.requestAnimationFrame(() => libraryMembershipAlertRef.current?.focus?.());
+  };
+
+  const focusLibraryAfterMembershipSuccess = () => {
+    window.requestAnimationFrame(() => {
+      if (!libraryMembershipOwnerRef.current) libraryHeadingRef.current?.focus?.();
+    });
+  };
+
+  const retainPlaybackLockAfterMembershipCleanupFailure = (entries) => {
+    libraryMembershipDeckCleanupRef.current = Object.freeze({
+      version: "library-membership-deck-cleanup/v1",
+      entries: Object.freeze(entries.map((entry) => Object.freeze({ ...entry })))
+    });
+    transitionCompletionUncertainRef.current = true;
+    setTransitionCompletionUncertain(true);
+    refreshPlaybackRecoveryLock();
+    showAutoPilotArmIntervention("library-membership-cleanup");
+  };
+
+  const retryMembershipDeckCleanupAfterStop = () => {
+    const pending = libraryMembershipDeckCleanupRef.current;
+    if (!pending) return true;
+    let allConfirmed = true;
+    for (const entry of pending.entries) {
+      if (!entry.exact) {
+        allConfirmed = false;
+        continue;
+      }
+      const handle = entry.deck === "a" ? deckARef.current : deckBRef.current;
+      const cleanup = retryExactDeckMembershipCleanup(handle, entry);
+      if (!cleanup.confirmed) {
+        allConfirmed = false;
+      } else if (cleanup.clearLoadedIdentity) {
+        setLoadedByDeck((current) => ({ ...current, [entry.deck]: null }));
+      }
+    }
+    if (allConfirmed) libraryMembershipDeckCleanupRef.current = null;
+    return allConfirmed;
+  };
+
+  const requestLibraryMembershipReconciliation = (result = null) => {
+    const libraryState = result?.libraryState ?? libraryStateRef.current;
+    const requested = libraryReconcileRequestRef.current?.("membership-stale", {
+      libraryEpoch: libraryState.epoch,
+      libraryRevision: libraryState.revision,
+      checkpointRevision: result?.checkpointRevision ?? partyCheckpointRevisionRef.current
+    });
+    if (requested) return true;
+    libraryMembershipPhaseRef.current = "circuit-open";
+    setLibraryMembershipCircuitOpen(true);
+    setLibraryMutationLock(true, "membership-circuit");
+    pauseAutoPilotForHostControl("Party Autopilot paused · local music changed in another tab");
+    setLibraryStorageError("Mazzy could not refresh local music after another tab changed it. New playback and library changes are locked. Reload local music before continuing.");
+    window.requestAnimationFrame(() => libraryMembershipAlertRef.current?.focus?.());
+    return false;
+  };
+
   const libraryWritesBlocked = () => !["idle", "importing"].includes(libraryMutationModeRef.current);
 
   const getLibraryRoutineWriteRuntime = () => {
@@ -1414,7 +1756,9 @@ export default function App() {
     partyCheckpointPauseReasonRef.current = "safety";
     setAutoPilotIntervention({
       reason,
-      message: reason === "transition-completion-late"
+      message: reason === "library-membership-cleanup"
+        ? "Mazzy saved the local music change but could not confirm that every removed song was ejected. New playback is locked. Use Stop All Sound; use system/device mute if sound remains."
+        : reason === "transition-completion-late"
         ? "The next song was kept, but the song-change confirmation arrived late. Autopilot is paused so the host can check playback before continuing."
         : reason === "transition-completion-cleanup"
           ? "The next song was kept, but Mazzy could not confirm every transition cleanup step. Autopilot is paused so the host can check playback."
@@ -1633,6 +1977,30 @@ export default function App() {
     recordStatus = "cleared",
     { terminalOnFailure = false, expectedCheckpoint = null } = {}
   ) => {
+    const membershipMode = libraryMutationModeRef.current;
+    const membershipBlocked = Boolean(libraryMembershipOwnerRef.current) ||
+      ["importing", "destructive", "membership-circuit"].includes(membershipMode);
+    if (membershipBlocked) {
+      if (terminalOnFailure) {
+        partyCheckpointTerminalRef.current = true;
+        if (membershipMode === "membership-circuit" || libraryMembershipCircuitOpen) {
+          partyCheckpointTerminalClearPendingRef.current = null;
+          getPartyCheckpointWriteRuntime().openCircuit();
+          setPartyCheckpointWriteCircuitOpen(true);
+          setPartyCheckpointError("The party finished, but saved recovery cleanup could not be confirmed while local music storage needs review. Reload Mazzy before starting another party.");
+          window.requestAnimationFrame(() => partyCheckpointAlertRef.current?.focus?.());
+        } else {
+          const stored = partyCheckpointStoredRecordRef.current;
+          partyCheckpointTerminalClearPendingRef.current = Object.freeze({
+            recordStatus,
+            sessionId: stored?.sessionId ?? partyCheckpointSessionIdRef.current,
+            writerToken: stored?.writerToken ?? partyCheckpointWriterTokenRef.current,
+            minimumRevision: stored?.revision ?? partyCheckpointRevisionRef.current
+          });
+        }
+      }
+      return false;
+    }
     const reconcileSnapshot = libraryReconcileRuntimeRef.current?.snapshot?.();
     if (libraryMutationModeRef.current === "reconciling" ||
         libraryMutationModeRef.current === "reconcile-circuit" ||
@@ -1756,6 +2124,31 @@ export default function App() {
         resumeLibraryReconciliationAfterCheckpointOperation();
       }
     }
+  };
+
+  const drainPendingTerminalCheckpointAfterMembership = () => {
+    const pending = partyCheckpointTerminalClearPendingRef.current;
+    if (!pending || libraryMembershipOwnerRef.current ||
+        ["importing", "destructive", "membership-circuit"].includes(libraryMutationModeRef.current)) return false;
+    const stored = partyCheckpointStoredRecordRef.current;
+    const stillOwned = stored &&
+      ["available", "claimed", "invalidated"].includes(stored.recordStatus) &&
+      stored.sessionId === pending.sessionId && stored.writerToken === pending.writerToken &&
+      stored.revision >= pending.minimumRevision;
+    partyCheckpointTerminalClearPendingRef.current = null;
+    if (!stillOwned) {
+      pauseForCheckpointOwnershipLoss();
+      return false;
+    }
+    void clearOwnedPartyCheckpoint(pending.recordStatus, {
+      terminalOnFailure: true,
+      expectedCheckpoint: {
+        revision: stored.revision,
+        sessionId: stored.sessionId,
+        writerToken: stored.writerToken
+      }
+    });
+    return true;
   };
 
   const partyTrackOrdinal = (trackId) => {
@@ -2461,12 +2854,16 @@ export default function App() {
   }, [library, enhancedTimingAvailable]);
 
   const handleImportFolder = async (event) => {
-    if (libraryMutationBusyRef.current || partyCheckpointBusyRef.current) {
+    releaseLibraryImportPickerSoon();
+    if (libraryMembershipOwnerRef.current || libraryMembershipCircuitOpen ||
+        libraryMutationBusyRef.current || partyCheckpointBusyRef.current ||
+        playbackRecoveryLockedRef.current) {
       if (importRef.current) importRef.current.value = "";
       showToast("Local music is still updating · try again in a moment");
       return;
     }
     const files = Array.from(event.target.files || []);
+    if (importRef.current) importRef.current.value = "";
     const audioFiles = files.filter((file) => {
       const lower = file.name.toLowerCase();
       return audioExt.some((ext) => lower.endsWith(ext));
@@ -2477,23 +2874,40 @@ export default function App() {
       return;
     }
 
-    setLibraryMutationLock(true, "importing");
+    const mutationOwner = beginLibraryMembershipMutation("import");
+    if (!mutationOwner) return;
+    requestDeferredLibraryPickerReconciliation();
     const importGeneration = ++libraryImportGenerationRef.current;
     let routineWriteExclusive = false;
     let routineMembershipChanged = false;
-    setLibrarySaveStatus("saving");
+    let commitStarted = false;
     setLibraryStorageError("");
     try {
-      routineWriteExclusive = await prepareLibraryRoutineWriteExclusive();
-      if (!routineWriteExclusive) return;
       const importLibraryState = { ...libraryStateRef.current };
       const existingIdentities = new Set();
       const legacyIdentityById = new Map();
+      const totalFiles = libraryRef.current.filter((track) => !normalizeContentIdentity(track.contentIdentity) && track.file?.arrayBuffer).length + audioFiles.length;
+      let completedFiles = 0;
+      setLibraryMembershipStatus({ kind: "import", state: "preparing", completed: 0, total: totalFiles });
+      window.requestAnimationFrame(() => libraryMembershipCancelButtonRef.current?.focus?.());
+      const identifyForImport = async (file) => {
+        const read = await runLibraryMembershipStage(mutationOwner, "reading", (signal) =>
+          readLocalFileBytes(file, { signal }));
+        if (read.outcome !== "completed") throw Object.assign(new Error("Import preparation did not finish"), { membershipOutcome: read.outcome });
+        const digest = await runLibraryMembershipStage(mutationOwner, "digesting", (signal) =>
+          identifyLocalFile(file, { signal, bytes: read.value }));
+        if (digest.outcome !== "completed") throw Object.assign(new Error("Import preparation did not finish"), { membershipOutcome: digest.outcome });
+        completedFiles += 1;
+        if (ownsLibraryMembership(mutationOwner)) {
+          setLibraryMembershipStatus({ kind: "import", state: "preparing", completed: completedFiles, total: totalFiles });
+        }
+        return digest.value;
+      };
       for (const track of libraryRef.current) {
-        if (importGeneration !== libraryImportGenerationRef.current) return;
+        if (!ownsLibraryMembership(mutationOwner) || importGeneration !== libraryImportGenerationRef.current) return;
         let identity = normalizeContentIdentity(track.contentIdentity);
         if (!identity && track.file?.arrayBuffer) {
-          identity = await identifyLocalFile(track.file);
+          identity = await identifyForImport(track.file);
           if (!existingIdentities.has(identity)) legacyIdentityById.set(track.id, identity);
         }
         if (identity) existingIdentities.add(identity);
@@ -2502,8 +2916,8 @@ export default function App() {
       const uniqueFiles = [];
       let duplicatesSkipped = 0;
       for (const file of audioFiles) {
-        if (importGeneration !== libraryImportGenerationRef.current) return;
-        const contentIdentity = await identifyLocalFile(file);
+        if (!ownsLibraryMembership(mutationOwner) || importGeneration !== libraryImportGenerationRef.current) return;
+        const contentIdentity = await identifyForImport(file);
         if (existingIdentities.has(contentIdentity)) {
           duplicatesSkipped += 1;
           continue;
@@ -2511,43 +2925,24 @@ export default function App() {
         existingIdentities.add(contentIdentity);
         uniqueFiles.push({ file, contentIdentity });
       }
-      if (!uniqueFiles.length) {
-        if (legacyIdentityById.size) {
-          const identityCommit = await saveImportedTracksToDb(
-            [],
-            [...legacyIdentityById].map(([id, contentIdentity]) => ({ id, contentIdentity })),
-            importLibraryState
-          );
-          if (identityCommit.status !== "saved") throw new DOMException("The local library changed in another tab", "InvalidStateError");
-          routineMembershipChanged = identityCommit.libraryState.revision !== importLibraryState.revision ||
-            identityCommit.libraryState.epoch !== importLibraryState.epoch;
-          libraryStateRef.current = identityCommit.libraryState;
-          publishLibrary((current) => {
-            const next = current.map((track) => legacyIdentityById.has(track.id)
-              ? { ...track, contentIdentity: legacyIdentityById.get(track.id) }
-              : track);
-            libraryRef.current = next;
-            libraryRoutineSkipSnapshotRef.current = next;
-            return next;
-          });
-        }
+      if (!uniqueFiles.length && !legacyIdentityById.size) {
         setLibrarySaveStatus("saved");
         showToast(`${duplicatesSkipped} duplicate ${duplicatesSkipped === 1 ? "track was" : "tracks were"} already in this library`);
+        finishLibraryMembershipMutation(mutationOwner, { restoreFocus: true });
         return;
       }
 
       let storageEstimate = null;
-      try {
-        storageEstimate = await navigator.storage?.estimate?.();
-      } catch {
-        // Import remains available when the browser withholds a quota estimate.
-      }
-      if (libraryMutationModeRef.current !== "importing" || importGeneration !== libraryImportGenerationRef.current) return;
+      const estimate = await runLibraryMembershipStage(mutationOwner, "estimating", async () =>
+        await navigator.storage?.estimate?.() ?? null);
+      if (estimate.outcome === "completed") storageEstimate = estimate.value;
+      if (!ownsLibraryMembership(mutationOwner) || importGeneration !== libraryImportGenerationRef.current) return;
       const capacity = assessImportCapacity(uniqueFiles.map(({ file }) => file.size), storageEstimate);
       setImportStorageStatus(capacity);
       if (capacity.status === "too-large") {
         showToast("Not enough browser storage · choose a smaller folder or remove saved music");
         setLibrarySaveStatus("idle");
+        finishLibraryMembershipMutation(mutationOwner, { restoreFocus: true });
         return;
       }
 
@@ -2589,22 +2984,84 @@ export default function App() {
         loaded: false
       }));
 
-      const importCommit = await saveImportedTracksToDb(
-        tracks.map(persistedTrack),
-        [...legacyIdentityById].map(([id, contentIdentity]) => ({ id, contentIdentity })),
-        importLibraryState
-      );
+      await waitForLibraryReconciliationSettlement();
+      if (!ownsLibraryMembership(mutationOwner) ||
+          importGeneration !== libraryImportGenerationRef.current) return;
+      if (!ownsLibraryMembership(mutationOwner) ||
+          importLibraryState.epoch !== libraryStateRef.current.epoch ||
+          importLibraryState.revision !== libraryStateRef.current.revision) {
+        throw Object.assign(new Error("The local library changed during import preparation"), { staleLibrary: true });
+      }
+      const reconcileSnapshot = libraryReconcileRuntimeRef.current?.snapshot?.() ?? {
+        mode: "running",
+        active: false,
+        pending: false
+      };
+      if (!mayClaimPreparedImportCommit({
+        phase: libraryMembershipPhaseRef.current,
+        globalMutationMode: libraryMutationModeRef.current,
+        reconciliationMode: reconcileSnapshot.mode,
+        reconciliationActive: reconcileSnapshot.active,
+        reconciliationPending: reconcileSnapshot.pending,
+        checkpointBusy: partyCheckpointBusyRef.current,
+        checkpointClaimOwned: Boolean(partyCheckpointClaimOwnerRef.current),
+        checkpointClearOwned: Boolean(partyCheckpointClearOwnerRef.current)
+      })) {
+        finishLibraryMembershipMutation(mutationOwner, { restoreFocus: true });
+        if (reconcileSnapshot.mode === "circuit-open" || libraryMutationModeRef.current === "reconcile-circuit") return;
+        showToast("Mazzy is checking local changes · choose the folder again when that finishes");
+        return;
+      }
+      setLibraryMutationLock(true, "importing");
+      libraryMembershipPhaseRef.current = "waiting-exclusive";
+      setLibraryMembershipStatus({ kind: "import", state: "committing", completed: completedFiles, total: totalFiles });
+      window.requestAnimationFrame(() => {
+        if (ownsLibraryMembership(mutationOwner) &&
+            libraryMembershipPhaseRef.current !== "preparing") {
+          libraryMembershipStatusRef.current?.focus?.();
+        }
+      });
+      setLibrarySaveStatus("saving");
+      routineWriteExclusive = await prepareLibraryRoutineWriteExclusive();
+      if (!routineWriteExclusive) {
+        throw new Error("Routine local storage did not become available");
+      }
+      if (!mayContinueLibraryMembershipAfterExclusive({
+        ownerCurrent: ownsLibraryMembership(mutationOwner),
+        expectedLibraryEpoch: mutationOwner.expectedLibraryEpoch,
+        expectedLibraryRevision: mutationOwner.expectedLibraryRevision,
+        currentLibraryEpoch: libraryStateRef.current.epoch,
+        currentLibraryRevision: libraryStateRef.current.revision
+      })) {
+        if (!ownsLibraryMembership(mutationOwner)) return;
+        throw Object.assign(new Error("The local library changed before import commit"), { staleLibrary: true });
+      }
+      commitStarted = true;
+      libraryMembershipPhaseRef.current = "committing";
+      const commitSettlement = await runLibraryMembershipStage(mutationOwner, "committing", (signal) =>
+        saveImportedTracksToDb(
+          tracks.map(persistedTrack),
+          [...legacyIdentityById].map(([id, contentIdentity]) => ({ id, contentIdentity })),
+          importLibraryState,
+          { signal }
+        ));
+      if (commitSettlement.outcome !== "completed") {
+        throw Object.assign(new Error("Import commit did not finish"), {
+          membershipOutcome: commitSettlement.outcome,
+          membershipError: commitSettlement.outcome === "failed" ? commitSettlement.error : null
+        });
+      }
+      const importCommit = commitSettlement.value;
       if (importCommit.status !== "saved") {
-        throw new DOMException("The local library changed in another tab", "InvalidStateError");
+        throw Object.assign(new Error("The local library changed in another tab"), {
+          staleLibrary: true,
+          staleResult: importCommit
+        });
       }
       routineMembershipChanged = importCommit.libraryState.revision !== importLibraryState.revision ||
         importCommit.libraryState.epoch !== importLibraryState.epoch;
       libraryStateRef.current = importCommit.libraryState;
-      if (importGeneration !== libraryImportGenerationRef.current) {
-        await Promise.all(importCommit.savedTrackIds.map(deleteTrackFromDb));
-        routineMembershipChanged = routineMembershipChanged || importCommit.savedTrackIds.length > 0;
-        return;
-      }
+      if (!ownsLibraryMembership(mutationOwner) || importGeneration !== libraryImportGenerationRef.current) return;
       const committedTrackIds = new Set(importCommit.savedTrackIds);
       const committedTracks = tracks.filter((track) => committedTrackIds.has(track.id));
       duplicatesSkipped += tracks.length - committedTracks.length;
@@ -2624,18 +3081,35 @@ export default function App() {
       showToast(capacity.status === "fits"
         ? `Saved ${committedTracks.length} ${committedTracks.length === 1 ? "track" : "tracks"}${duplicatesSkipped ? ` · skipped ${duplicatesSkipped} duplicate${duplicatesSkipped === 1 ? "" : "s"}` : ""} · ${formatStorageSize(capacity.importBytes)} selected`
         : `Saved ${committedTracks.length} ${committedTracks.length === 1 ? "track" : "tracks"}${duplicatesSkipped ? ` · skipped ${duplicatesSkipped} duplicate${duplicatesSkipped === 1 ? "" : "s"}` : ""} · storage estimate unavailable`);
+      finishLibraryMembershipMutation(mutationOwner, { restoreFocus: true });
     } catch (error) {
-      setLibrarySaveStatus("error");
+      if (!ownsLibraryMembership(mutationOwner)) return;
+      if (commitStarted && !error?.staleLibrary &&
+          !membershipFailureHasDefiniteRollback(error?.membershipError)) {
+        failLibraryMembershipCommitClosed(mutationOwner);
+        return;
+      }
+      setLibrarySaveStatus("idle");
       setImportStorageStatus((current) => current ? { ...current, status: "unknown" } : current);
-      const message = error?.name === "QuotaExceededError"
+      const message = error?.staleLibrary
+        ? "Local music changed in another Mazzy tab. Nothing was changed here; choose the folder again after Mazzy finishes checking storage."
+        : error?.membershipOutcome === "timed-out"
+          ? "Import preparation took too long. Nothing was saved; choose a smaller folder or try again."
+          : error?.membershipOutcome === "cancelled"
+            ? "Import preparation was cancelled. Nothing was saved."
+        : error?.membershipError?.name === "QuotaExceededError" || error?.name === "QuotaExceededError"
         ? "Browser storage filled up. Nothing was added; remove saved music or choose a smaller folder."
         : "Music couldn't be saved. Nothing was added; try again or check this browser's site-storage settings.";
       setLibraryStorageError(message);
       showToast(message);
+      finishLibraryMembershipMutation(mutationOwner, { restoreFocus: true });
+      if (error?.staleLibrary) requestLibraryMembershipReconciliation(error.staleResult);
+      window.requestAnimationFrame(() => libraryStorageAlertRef.current?.focus?.());
     } finally {
-      if (importRef.current) importRef.current.value = "";
       if (routineWriteExclusive) completeLibraryRoutineWriteExclusive({ membershipChanged: routineMembershipChanged });
-      if (importGeneration === libraryImportGenerationRef.current) setLibraryMutationLock(false);
+      if (libraryMutationModeRef.current === "importing") {
+        setLibraryMutationLock(false);
+      }
     }
   };
 
@@ -2846,7 +3320,9 @@ export default function App() {
       void clearOwnedPartyCheckpoint("cleared", { terminalOnFailure: true }).then((cleared) => {
         showToast(cleared
           ? "Party finished · no unplayed tracks remain"
-          : "Party finished · saved recovery still needs attention");
+          : partyCheckpointTerminalClearPendingRef.current
+            ? "Party finished · finishing saved recovery cleanup"
+            : "Party finished · saved recovery still needs attention");
       });
       return;
     }
@@ -3174,37 +3650,98 @@ export default function App() {
   };
 
   const removeLibraryTrack = async (trackId) => {
-    if (libraryMutationBusyRef.current || partyCheckpointBusyRef.current) return;
+    if (libraryMembershipOwnerRef.current || libraryMembershipCircuitOpen ||
+        libraryMutationBusyRef.current || partyCheckpointBusyRef.current ||
+        playbackRecoveryLockedRef.current) return;
     if (autoMixing || autoMixArming || rehearsalActive || rehearsalPreparing) {
       showToast("Stop the transition or preview before removing music");
       return;
     }
     const track = library.find((candidate) => candidate.id === trackId);
     if (!track) return;
+    const mutationOwner = beginLibraryMembershipMutation("delete");
+    if (!mutationOwner) return;
+    if (contextMenuTriggerRef.current) libraryMembershipTriggerRef.current = contextMenuTriggerRef.current;
+    let routineWriteExclusive = false;
+    let commitStarted = false;
     const analysisDeferralsBeforeRemoval = new Map(
       [...backgroundAnalysisDeferredRef.current].filter(([, deferred]) => deferred.trackId === trackId)
     );
     const analysisWorkWasOwned = activeBackgroundAnalysisRef.current?.trackId === trackId ||
       pendingAnalysisQueueRef.current.some((job) => job.id === trackId);
+    try {
     if (partyFirstSongLoadRef.current?.trackId === trackId &&
-      !cancelPartyFirstSongLoad({ keepStatus: false })) return;
+      !cancelPartyFirstSongLoad({ keepStatus: false })) {
+      finishLibraryMembershipMutation(mutationOwner);
+      return;
+    }
     if (partyFirstSongLoadStatus?.trackId === trackId) setPartyFirstSongLoadStatus(null);
     setLibraryMutationLock(true);
-    const routineWriteExclusive = await prepareLibraryRoutineWriteExclusive();
+    routineWriteExclusive = await prepareLibraryRoutineWriteExclusive();
     if (!routineWriteExclusive) {
+      finishLibraryMembershipMutation(mutationOwner);
       setLibraryMutationLock(false);
+      return;
+    }
+    if (!mayContinueLibraryMembershipAfterExclusive({
+      ownerCurrent: ownsLibraryMembership(mutationOwner),
+      expectedLibraryEpoch: mutationOwner.expectedLibraryEpoch,
+      expectedLibraryRevision: mutationOwner.expectedLibraryRevision,
+      currentLibraryEpoch: libraryStateRef.current.epoch,
+      currentLibraryRevision: libraryStateRef.current.revision
+    })) {
+      completeLibraryRoutineWriteExclusive();
+      if (ownsLibraryMembership(mutationOwner)) finishLibraryMembershipMutation(mutationOwner, { restoreFocus: true });
+      if (libraryMutationModeRef.current === "destructive") setLibraryMutationLock(false);
       return;
     }
     removedTrackIdsRef.current.add(trackId);
     cancelBackgroundAnalysisForTrack(trackId);
     pauseAutoPilotForHostControl("Party Autopilot paused · library changed");
-    let deletion;
-    try {
-      deletion = await deleteTrackFromDb(trackId);
-    } catch {
+    commitStarted = true;
+    libraryMembershipPhaseRef.current = "committing";
+    const deletionSettlement = await runLibraryMembershipStage(mutationOwner, "committing", (signal) =>
+      deleteTrackFromDb(trackId, {
+        signal,
+        expectedLibraryState: {
+          epoch: mutationOwner.expectedLibraryEpoch,
+          revision: mutationOwner.expectedLibraryRevision
+        }
+      }));
+    if (!ownsLibraryMembership(mutationOwner)) {
+      completeLibraryRoutineWriteExclusive();
+      if (libraryMutationModeRef.current === "destructive") setLibraryMutationLock(false);
+      return;
+    }
+    if (deletionSettlement.outcome !== "completed") {
+      if (deletionSettlement.outcome === "failed" &&
+          membershipFailureHasDefiniteRollback(deletionSettlement.error)) {
+        removedTrackIdsRef.current.delete(trackId);
+        restoreBackgroundAnalysisDeferrals(analysisDeferralsBeforeRemoval);
+        queueMicrotask(() => {
+          const surviving = backgroundAnalysisRowsAfterMutationRollback(
+            libraryRef.current.filter((candidate) => candidate.id === trackId),
+            removedTrackIdsRef.current
+          )[0];
+          if (surviving && analysisWorkWasOwned && analysisDeferralsBeforeRemoval.size === 0) {
+            queueBackgroundAnalysis(surviving);
+          }
+        });
+        completeLibraryRoutineWriteExclusive();
+        finishLibraryMembershipMutation(mutationOwner, { restoreFocus: true });
+        setLibraryMutationLock(false);
+        setLibraryStorageError("This song was not removed because browser storage rejected the change. Review the library and try again.");
+        window.requestAnimationFrame(() => libraryStorageAlertRef.current?.focus?.());
+        return;
+      }
+      completeLibraryRoutineWriteExclusive();
+      failLibraryMembershipCommitClosed(mutationOwner);
+      return;
+    }
+    const deletion = deletionSettlement.value;
+    if (deletion.status === "stale-library") {
       removedTrackIdsRef.current.delete(trackId);
       restoreBackgroundAnalysisDeferrals(analysisDeferralsBeforeRemoval);
-      showToast("Removal failed · this track is still stored · try again");
       queueMicrotask(() => {
         const surviving = backgroundAnalysisRowsAfterMutationRollback(
           libraryRef.current.filter((candidate) => candidate.id === trackId),
@@ -3215,7 +3752,10 @@ export default function App() {
         }
       });
       completeLibraryRoutineWriteExclusive();
+      finishLibraryMembershipMutation(mutationOwner, { restoreFocus: true });
       setLibraryMutationLock(false);
+      showToast("Local music changed in another Mazzy tab · review the library and remove the song again");
+      requestLibraryMembershipReconciliation(deletion);
       return;
     }
     libraryStateRef.current = deletion.libraryState;
@@ -3240,34 +3780,97 @@ export default function App() {
       libraryRoutineSkipSnapshotRef.current = next;
       return next;
     });
-    completeLibraryRoutineWriteExclusive({ membershipChanged: true });
-    setLibraryMutationLock(false);
     setQueue((current) => current.filter((id) => id !== trackId));
-    if (deckARef.current?.getTrackId?.() === trackId) {
-      deckARef.current?.eject?.();
+    const deckACleanup = verifyDeckMembershipCleanup(deckARef.current, trackId);
+    const deckBCleanup = verifyDeckMembershipCleanup(deckBRef.current, trackId);
+    if (deckACleanup.affected && deckACleanup.confirmed) {
       setLoadedByDeck((current) => ({ ...current, a: null }));
     }
-    if (deckBRef.current?.getTrackId?.() === trackId) {
-      deckBRef.current?.eject?.();
+    if (deckBCleanup.affected && deckBCleanup.confirmed) {
       setLoadedByDeck((current) => ({ ...current, b: null }));
     }
+    const deckCleanupConfirmed = deckACleanup.confirmed && deckBCleanup.confirmed;
+    if (!deckCleanupConfirmed) retainPlaybackLockAfterMembershipCleanupFailure([
+      ...(!deckACleanup.confirmed ? [{ deck: "a", trackId, exact: true }] : []),
+      ...(!deckBCleanup.confirmed ? [{ deck: "b", trackId, exact: true }] : [])
+    ]);
+    completeLibraryRoutineWriteExclusive({ membershipChanged: true });
+    finishLibraryMembershipMutation(mutationOwner);
+    setLibraryMutationLock(false);
     showToast("Removed track and its saved analysis · saved party recovery cleared");
+    if (deckCleanupConfirmed) focusLibraryAfterMembershipSuccess();
+    } catch {
+      if (!ownsLibraryMembership(mutationOwner)) return;
+      if (routineWriteExclusive) completeLibraryRoutineWriteExclusive();
+      if (commitStarted) {
+        failLibraryMembershipCommitClosed(mutationOwner);
+        return;
+      }
+      removedTrackIdsRef.current.delete(trackId);
+      restoreBackgroundAnalysisDeferrals(analysisDeferralsBeforeRemoval);
+      queueMicrotask(() => {
+        const surviving = backgroundAnalysisRowsAfterMutationRollback(
+          libraryRef.current.filter((candidate) => candidate.id === trackId),
+          removedTrackIdsRef.current
+        )[0];
+        if (surviving && analysisWorkWasOwned && analysisDeferralsBeforeRemoval.size === 0) {
+          queueBackgroundAnalysis(surviving);
+        }
+      });
+      finishLibraryMembershipMutation(mutationOwner, { restoreFocus: true });
+      if (libraryMutationModeRef.current === "destructive") setLibraryMutationLock(false);
+      setLibraryStorageError("This song was not removed because local storage preparation failed. Review the library and try again.");
+      window.requestAnimationFrame(() => libraryStorageAlertRef.current?.focus?.());
+    }
   };
 
   const clearLocalLibrary = async () => {
-    if (libraryMutationBusyRef.current || partyCheckpointBusyRef.current) return;
+    if (libraryMembershipOwnerRef.current || libraryMembershipCircuitOpen ||
+        libraryMutationBusyRef.current || partyCheckpointBusyRef.current ||
+        playbackRecoveryLockedRef.current) return;
     if (autoMixing || autoMixArming || autoPilotEnabled || rehearsalActive || rehearsalPreparing) {
       showToast("Stop Party Autopilot and any preview before clearing music");
       return;
     }
     if (!window.confirm("Remove every imported song, saved analysis, and saved party plan from this browser profile? Active enhanced timing may finish its current local step before memory is released.")) return;
+    const mutationOwner = beginLibraryMembershipMutation("clear");
+    if (!mutationOwner) return;
+    let routineWriteExclusive = false;
+    let commitStarted = false;
     const analysisDeferralsBeforeClear = new Map(backgroundAnalysisDeferredRef.current);
-    if (!cancelPartyFirstSongLoad({ keepStatus: false })) return;
+    const clearDeckOwners = [
+      { deck: "a", handle: deckARef.current },
+      { deck: "b", handle: deckBRef.current }
+    ].map(({ deck, handle }) => {
+      try {
+        return Object.freeze({ deck, trackId: handle?.getTrackId?.() ?? null, exact: Boolean(handle) });
+      } catch {
+        return Object.freeze({ deck, trackId: null, exact: false });
+      }
+    });
+    try {
+    if (!cancelPartyFirstSongLoad({ keepStatus: false })) {
+      finishLibraryMembershipMutation(mutationOwner);
+      return;
+    }
     setPartyFirstSongLoadStatus(null);
     setLibraryMutationLock(true);
-    const routineWriteExclusive = await prepareLibraryRoutineWriteExclusive();
+    routineWriteExclusive = await prepareLibraryRoutineWriteExclusive();
     if (!routineWriteExclusive) {
+      finishLibraryMembershipMutation(mutationOwner);
       setLibraryMutationLock(false);
+      return;
+    }
+    if (!mayContinueLibraryMembershipAfterExclusive({
+      ownerCurrent: ownsLibraryMembership(mutationOwner),
+      expectedLibraryEpoch: mutationOwner.expectedLibraryEpoch,
+      expectedLibraryRevision: mutationOwner.expectedLibraryRevision,
+      currentLibraryEpoch: libraryStateRef.current.epoch,
+      currentLibraryRevision: libraryStateRef.current.revision
+    })) {
+      completeLibraryRoutineWriteExclusive();
+      if (ownsLibraryMembership(mutationOwner)) finishLibraryMembershipMutation(mutationOwner, { restoreFocus: true });
+      if (libraryMutationModeRef.current === "destructive") setLibraryMutationLock(false);
       return;
     }
     queuedAnalysisIdsRef.current.clear();
@@ -3279,16 +3882,52 @@ export default function App() {
     cancelActiveBackgroundAnalysis({ resetEnhanced: true });
     disposeAnalysisClient();
     disposeEnhancedRhythmClient();
-    deckARef.current?.eject?.();
-    deckBRef.current?.eject?.();
-    setLoadedByDeck({ a: null, b: null });
-    let cleared;
-    try {
-      cleared = await clearTracksFromDb();
-    } catch {
+    commitStarted = true;
+    libraryMembershipPhaseRef.current = "committing";
+    const clearSettlement = await runLibraryMembershipStage(mutationOwner, "committing", (signal) =>
+      clearTracksFromDb({
+        signal,
+        expectedLibraryState: {
+          epoch: mutationOwner.expectedLibraryEpoch,
+          revision: mutationOwner.expectedLibraryRevision
+        }
+      }));
+    if (!ownsLibraryMembership(mutationOwner)) {
+      completeLibraryRoutineWriteExclusive();
+      if (libraryMutationModeRef.current === "destructive") setLibraryMutationLock(false);
+      return;
+    }
+    if (clearSettlement.outcome !== "completed") {
+      if (clearSettlement.outcome === "failed" &&
+          membershipFailureHasDefiniteRollback(clearSettlement.error)) {
+        for (const track of library) removedTrackIdsRef.current.delete(track.id);
+        restoreBackgroundAnalysisDeferrals(analysisDeferralsBeforeClear);
+        queueMicrotask(() => {
+          for (const track of backgroundAnalysisRowsAfterMutationRollback(
+            libraryRef.current,
+            removedTrackIdsRef.current
+          )) {
+            const hasRestoredDeferral = backgroundAnalysisDeferredRef.current.has(
+              backgroundAnalysisJobKey(track.id, "basic-program")
+            ) || backgroundAnalysisDeferredRef.current.has(backgroundAnalysisJobKey(track.id, "enhanced"));
+            if (!hasRestoredDeferral) queueBackgroundAnalysis(track);
+          }
+        });
+        completeLibraryRoutineWriteExclusive();
+        finishLibraryMembershipMutation(mutationOwner, { restoreFocus: true });
+        setLibraryMutationLock(false);
+        setLibraryStorageError("Local music was not removed because browser storage rejected the change. Review the library and try again.");
+        window.requestAnimationFrame(() => libraryStorageAlertRef.current?.focus?.());
+        return;
+      }
+      completeLibraryRoutineWriteExclusive();
+      failLibraryMembershipCommitClosed(mutationOwner);
+      return;
+    }
+    const cleared = clearSettlement.value;
+    if (cleared.status === "stale-library") {
       for (const track of library) removedTrackIdsRef.current.delete(track.id);
       restoreBackgroundAnalysisDeferrals(analysisDeferralsBeforeClear);
-      showToast("Removal failed · your music is still stored · try again");
       queueMicrotask(() => {
         for (const track of backgroundAnalysisRowsAfterMutationRollback(
           libraryRef.current,
@@ -3301,7 +3940,10 @@ export default function App() {
         }
       });
       completeLibraryRoutineWriteExclusive();
+      finishLibraryMembershipMutation(mutationOwner, { restoreFocus: true });
       setLibraryMutationLock(false);
+      showToast("Local music changed in another Mazzy tab · review it and choose Remove All again");
+      requestLibraryMembershipReconciliation(cleared);
       return;
     }
     libraryStateRef.current = cleared.libraryState;
@@ -3319,17 +3961,52 @@ export default function App() {
     partyCheckpointRecoveryRef.current = null;
     setPartyCheckpointRecovery(null);
     setRestoredPartyPlan(null);
-    deckARef.current?.eject?.();
-    deckBRef.current?.eject?.();
+    const deckACleanup = verifyDeckMembershipCleanup(deckARef.current);
+    const deckBCleanup = verifyDeckMembershipCleanup(deckBRef.current);
+    if (deckACleanup.confirmed) setLoadedByDeck((current) => ({ ...current, a: null }));
+    if (deckBCleanup.confirmed) setLoadedByDeck((current) => ({ ...current, b: null }));
+    const deckCleanupConfirmed = deckACleanup.confirmed && deckBCleanup.confirmed;
+    if (!deckCleanupConfirmed) retainPlaybackLockAfterMembershipCleanupFailure(
+      clearDeckOwners.filter((entry) => entry.deck === "a"
+        ? !deckACleanup.confirmed
+        : !deckBCleanup.confirmed)
+    );
     setQueue([]);
     setPlayedTrackIds([]);
     libraryRef.current = [];
     libraryRoutineSkipSnapshotRef.current = libraryRef.current;
     publishLibrary(libraryRef.current);
     completeLibraryRoutineWriteExclusive({ membershipChanged: true });
+    finishLibraryMembershipMutation(mutationOwner);
     setLibraryMutationLock(false);
     setAutoPilotChoice(null);
     showToast("All imported music, saved analysis, and saved party recovery were removed");
+    if (deckCleanupConfirmed) focusLibraryAfterMembershipSuccess();
+    } catch {
+      if (!ownsLibraryMembership(mutationOwner)) return;
+      if (routineWriteExclusive) completeLibraryRoutineWriteExclusive();
+      if (commitStarted) {
+        failLibraryMembershipCommitClosed(mutationOwner);
+        return;
+      }
+      for (const track of library) removedTrackIdsRef.current.delete(track.id);
+      restoreBackgroundAnalysisDeferrals(analysisDeferralsBeforeClear);
+      queueMicrotask(() => {
+        for (const track of backgroundAnalysisRowsAfterMutationRollback(
+          libraryRef.current,
+          removedTrackIdsRef.current
+        )) {
+          const hasRestoredDeferral = backgroundAnalysisDeferredRef.current.has(
+            backgroundAnalysisJobKey(track.id, "basic-program")
+          ) || backgroundAnalysisDeferredRef.current.has(backgroundAnalysisJobKey(track.id, "enhanced"));
+          if (!hasRestoredDeferral) queueBackgroundAnalysis(track);
+        }
+      });
+      finishLibraryMembershipMutation(mutationOwner, { restoreFocus: true });
+      if (libraryMutationModeRef.current === "destructive") setLibraryMutationLock(false);
+      setLibraryStorageError("Local music was not removed because browser storage preparation failed. Review the library and try again.");
+      window.requestAnimationFrame(() => libraryStorageAlertRef.current?.focus?.());
+    }
   };
 
   const clearPartyFirstSongLoadTimer = (owner = null) => {
@@ -4603,6 +5280,7 @@ export default function App() {
 
   const stopAllSound = () => {
     invalidatePartyCheckpointClaim("Stop All Sound cancelled the saved-plan restore. Reload Mazzy to review recovery before continuing.");
+    const membershipCleanupPendingAtStart = Boolean(libraryMembershipDeckCleanupRef.current);
     const engine = getAudioEngine();
     let deckAStopConfirmed = false;
     let deckBStopConfirmed = false;
@@ -4751,7 +5429,8 @@ export default function App() {
           break;
       }
     });
-    const verifiedStopped = result.passed && verifyPartyStopAllSound({
+    const membershipDeckCleanupConfirmed = retryMembershipDeckCleanupAfterStop();
+    const verifiedStopped = result.passed && membershipDeckCleanupConfirmed && verifyPartyStopAllSound({
       deckAStopped: deckAStopConfirmed && Boolean(deckARef.current?.stopAllSound && !deckARef.current?.isPlaying?.()),
       deckBStopped: deckBStopConfirmed && Boolean(deckBRef.current?.stopAllSound && !deckBRef.current?.isPlaying?.()),
       crossfadeCleared: !engine.getActiveCrossfade(),
@@ -4773,9 +5452,12 @@ export default function App() {
       updatePartyDiagnosticEvaluation();
     }
     partySoundStopInProgressRef.current = !verifiedStopped;
-    if (verifiedStopped) {
+    if (verifiedStopped && !libraryMembershipDeckCleanupRef.current) {
       transitionCompletionUncertainRef.current = false;
       setTransitionCompletionUncertain(false);
+      if (membershipCleanupPendingAtStart) {
+        setAutoPilotIntervention((current) => current?.reason === "library-membership-cleanup" ? null : current);
+      }
       setPartyFirstSongLoadStatus((current) => shouldClearPartyFirstSongStatusAfterStop({
         verifiedStopped,
         status: current?.state ?? null
@@ -4784,7 +5466,9 @@ export default function App() {
     setPartySoundStopLocked(!verifiedStopped);
     refreshPlaybackRecoveryLock();
     setPartySoundStopStatus(verifiedStopped
-      ? { type: "success", message: "All sound stopped. The party plan is paused and nothing was deleted." }
+      ? { type: "success", message: membershipCleanupPendingAtStart
+        ? "All sound stopped. Removed-song cleanup is confirmed; the saved local music change remains."
+        : "All sound stopped. The party plan is paused. Stop All Sound did not change saved local music." }
       : { type: "error", message: "Mazzy could not confirm every sound stopped; retry and use system/device mute if sound remains." });
   };
 
@@ -5284,6 +5968,22 @@ export default function App() {
       partyCheckpointClaimOwnerRef.current = null;
       try { partyCheckpointClaimCancelRef.current?.(); } catch { /* Storage owner is already revoked. */ }
       partyCheckpointClaimCancelRef.current = null;
+      libraryMembershipEpochRef.current += 1;
+      libraryMembershipOwnerRef.current = null;
+      try { libraryMembershipCancelRef.current?.(); } catch { /* Membership authority is already revoked. */ }
+      libraryMembershipCancelRef.current = null;
+      libraryMembershipTriggerRef.current = null;
+      libraryMembershipPhaseRef.current = "idle";
+      libraryMembershipDeckCleanupRef.current = null;
+      libraryImportPickerOwnerRef.current = null;
+      libraryImportPickerFocusDeferredRef.current = false;
+      libraryImportPickerBlurredRef.current = false;
+      libraryImportPickerTriggerRef.current = null;
+      libraryImportPickerReconcileConsumedRef.current = false;
+      if (libraryImportPickerReleaseTimerRef.current != null) {
+        try { window.clearTimeout(libraryImportPickerReleaseTimerRef.current); } catch { /* Host teardown continues. */ }
+      }
+      libraryImportPickerReleaseTimerRef.current = null;
       partyCheckpointWriteRuntimeRef.current?.halt?.();
       libraryRoutineWriteRuntimeRef.current?.halt?.();
       cancelActiveBackgroundAnalysis({ resetEnhanced: true, announceUnabortable: false });
@@ -5408,6 +6108,13 @@ export default function App() {
   };
   const resetPartyAutopilot = async () => {
     if (partyCheckpointBusyRef.current || libraryMutationBusyRef.current) return;
+    if (libraryMembershipOwnerRef.current) {
+      if (libraryMembershipOwnerRef.current.kind === "import" && libraryMutationModeRef.current === "idle") {
+        cancelLibraryMembershipPreparation();
+      } else {
+        return;
+      }
+    }
     if (partyCheckpointWriterLostRef.current) {
       setPartyCheckpointError("Reload this tab to review the current saved party plan before starting a new party here.");
       window.requestAnimationFrame(() => partyCheckpointAlertRef.current?.focus?.());
@@ -5464,6 +6171,7 @@ export default function App() {
     const recovery = partyCheckpointRecoveryRef.current;
     const checkpoint = recovery?.status === "available" ? recovery.checkpoint : null;
     if (!checkpoint || partyCheckpointBusyRef.current || partyCheckpointClaimOwnerRef.current ||
+        libraryMembershipOwnerRef.current ||
         partyFirstSongLoadRef.current || libraryMutationBusyRef.current) return;
     if (partyCheckpointWriterLostRef.current ||
         (partyCheckpointWriteRuntimeRef.current?.snapshot?.().mode ?? "running") !== "running") {
@@ -5630,7 +6338,8 @@ export default function App() {
   };
 
   const discardSavedPartyPlan = async () => {
-    if (partyFirstSongLoadRef.current || libraryMutationBusyRef.current) return;
+    if (partyFirstSongLoadRef.current || libraryMutationBusyRef.current ||
+        libraryMembershipOwnerRef.current) return;
     setPartyCheckpointError("");
     const recovery = partyCheckpointRecoveryRef.current;
     const checkpoint = recovery?.status === "available" ? recovery.checkpoint : null;
@@ -5772,6 +6481,23 @@ export default function App() {
             <span>New playback and library changes wait while Mazzy checks browser storage. Audio already playing may continue; Stop All Sound stays available.</span>
           </div>
         )}
+        {libraryMembershipStatus && !libraryMembershipCircuitOpen && (
+          <div ref={libraryMembershipStatusRef} tabIndex={-1} className="party-mode-readiness" role="status" aria-live="polite" aria-atomic="true" aria-busy="true">
+            <strong>{libraryMembershipStatus.state === "preparing" ? "CHECKING SELECTED LOCAL MUSIC" : "SAVING LOCAL MUSIC CHANGE"}</strong>
+            <span>{libraryMembershipStatus.state === "preparing"
+              ? `${libraryMembershipStatus.completed} of ${libraryMembershipStatus.total} local files checked. Music already playing may continue.`
+              : "New playback and library changes wait while browser storage finishes. Audio already playing may continue; Stop All Sound stays available."}</span>
+            {libraryMembershipStatus.kind === "import" && libraryMembershipStatus.state === "preparing" && (
+              <button ref={libraryMembershipCancelButtonRef} type="button" onClick={cancelLibraryMembershipPreparation}>CANCEL IMPORT</button>
+            )}
+          </div>
+        )}
+        {libraryMembershipCircuitOpen && (
+          <div ref={libraryMembershipAlertRef} tabIndex={-1} className="library-storage-error" role="alert">
+            <p>{libraryStorageError}</p>
+            <button type="button" onClick={() => window.location.reload()}>RELOAD LOCAL MUSIC</button>
+          </div>
+        )}
         {partyCheckpointBusy && (
           <div className="party-mode-readiness" role="status" aria-live="polite" aria-atomic="true">
             <strong>UPDATING SAVED PARTY RECOVERY</strong>
@@ -5879,11 +6605,11 @@ export default function App() {
                 setPartyCheckpointCardVisible(false);
                 window.requestAnimationFrame(() => partyCheckpointShowButtonRef.current?.focus?.());
               }}>NOT NOW</button>
-              <button type="button" disabled={partyCheckpointBusy || libraryMutationBusy || partyFirstSongOpening} onClick={() => void discardSavedPartyPlan()}>
+              <button type="button" disabled={partyCheckpointBusy || libraryMutationBusy || !!libraryMembershipStatus || partyFirstSongOpening} onClick={() => void discardSavedPartyPlan()}>
                 DELETE SAVED PLAN
               </button>
               {recoverablePartyCheckpoint && (
-                <button type="button" disabled={partyCheckpointBusy || partyFirstSongOpening || partyCheckpointWriteCircuitOpen || partyCheckpointWriterLost} onClick={() => void restoreSavedPartyPlan()}>
+                <button type="button" disabled={partyCheckpointBusy || libraryMutationBusy || !!libraryMembershipStatus || partyFirstSongOpening || partyCheckpointWriteCircuitOpen || partyCheckpointWriterLost} onClick={() => void restoreSavedPartyPlan()}>
                   RESTORE PAUSED PLAN
                 </button>
               )}
@@ -5930,7 +6656,7 @@ export default function App() {
           </section>
         )}
         <div className="party-mode-flow" aria-label="Party setup steps">
-          <button type="button" disabled={partyCheckpointBusy || libraryMutationBusy || partyFirstSongOpening} onClick={() => importRef.current?.click()}>
+          <button type="button" disabled={transitionCompletionUncertain || partyCheckpointBusy || libraryMutationBusy || !!libraryMembershipStatus || partyFirstSongOpening} onClick={openLibraryImportPicker}>
             <span>1</span><strong>IMPORT MUSIC</strong><small>Saved only in this browser</small>
           </button>
           <button ref={partyFirstSongPlayButtonRef} type="button" onClick={() => void startCurrentSong()} disabled={partySoundStopLocked || transitionCompletionUncertain || partyCheckpointBusy || libraryMutationBusy || partyCheckpointWriterLost || partyFirstSongOpening || !!audioRecoveryState || outputDeviceChanged || !partyFirstSongActionReady || partyFirstSongActionPlaying || partyFirstSongOtherDeckPlaying || autoPilotEnabled}>
@@ -6352,7 +7078,7 @@ export default function App() {
                   <button
                     type="button"
                     onClick={() => void rehearseCurrentPair()}
-                    disabled={partySoundStopLocked || !!audioRecoveryState || outputDeviceChanged || autoMixArming || deckARef.current?.isPlaying?.() || deckBRef.current?.isPlaying?.()}
+                    disabled={partySoundStopLocked || transitionCompletionUncertain || !!audioRecoveryState || outputDeviceChanged || autoMixArming || deckARef.current?.isPlaying?.() || deckBRef.current?.isPlaying?.()}
                   >
                     {rehearsalPreparing ? "PREPARING REHEARSAL…" : "HEAR TRANSITION REHEARSAL"}
                   </button>
@@ -6430,10 +7156,10 @@ export default function App() {
           <div className="queue-header">
             <div className="queue-title">{`QUEUE (${queue.length} tracks)`}</div>
             <div className="library-top-spacer" />
-            <button className="library-top-btn" type="button" disabled={partyCheckpointBusy || libraryMutationBusy || partyFirstSongOpening} onClick={() => importRef.current?.click()}>
+            <button className="library-top-btn" type="button" disabled={transitionCompletionUncertain || partyCheckpointBusy || libraryMutationBusy || !!libraryMembershipStatus || partyFirstSongOpening} onClick={openLibraryImportPicker}>
               IMPORT
             </button>
-            <input ref={importRef} type="file" multiple accept=".mp3,.wav,.flac,.aiff,.m4a" onChange={handleImportFolder} hidden />
+            <input ref={importRef} type="file" multiple accept=".mp3,.wav,.flac,.aiff,.m4a" onChange={handleImportFolder} onCancel={releaseLibraryImportPickerSoon} hidden />
             <button className="library-top-btn" type="button" disabled={partyCheckpointBusy} onClick={() => setQueue([])}>
               CLEAR
             </button>
@@ -6459,10 +7185,10 @@ export default function App() {
               {`${timedOutAutoPilotTrackIds.length} ${timedOutAutoPilotTrackIds.length === 1 ? "song took" : "songs took"} too long to prepare and will be skipped for this party. Pause Autopilot and load one manually to retry it, or choose New Party to clear the skipped list.`}
             </p>
           )}
-          {libraryStorageError && (
+          {libraryStorageError && !libraryMembershipCircuitOpen && (
             <div ref={libraryStorageAlertRef} tabIndex={-1} className="library-storage-error" role="alert">
               <p>{libraryStorageError}</p>
-              {libraryHydrationCircuitOpen ? (
+              {libraryHydrationCircuitOpen || libraryMembershipCircuitOpen ? (
                 <button type="button" onClick={() => window.location.reload()}>RELOAD LOCAL MUSIC</button>
               ) : libraryMutationModeRef.current === "hydrating" && (
                 <button type="button" onClick={() => {
@@ -6471,6 +7197,12 @@ export default function App() {
                   setLibraryRestoreAttempt((value) => value + 1);
                   window.requestAnimationFrame(() => libraryHydrationStatusRef.current?.focus?.());
                 }}>RETRY OPENING LOCAL MUSIC</button>
+              )}
+              {!libraryHydrationCircuitOpen && libraryMutationModeRef.current === "idle" && (
+                <button type="button" onClick={() => {
+                  setLibraryStorageError("");
+                  openLibraryImportPicker();
+                }}>CHOOSE MUSIC AGAIN</button>
               )}
             </div>
           )}
@@ -6567,12 +7299,12 @@ export default function App() {
             )}
           </div>
 
-          <div className="library-title">LIBRARY ({library.length} tracks)</div>
+          <div ref={libraryHeadingRef} tabIndex={-1} className="library-title">LIBRARY ({library.length} tracks)</div>
 
           {library.length > 0 && (
             <div className="library-data-controls">
               <span>Music and analysis are stored only in this browser profile.</span>
-              <button type="button" disabled={partyCheckpointBusy || libraryMutationBusy} onClick={() => void clearLocalLibrary()}>{libraryMutationBusy ? "UPDATING LOCAL MUSIC…" : "REMOVE ALL LOCAL MUSIC"}</button>
+              <button type="button" disabled={transitionCompletionUncertain || partyCheckpointBusy || libraryMutationBusy || !!libraryMembershipStatus} onClick={() => void clearLocalLibrary()}>{libraryMutationBusy || libraryMembershipStatus ? "UPDATING LOCAL MUSIC…" : "REMOVE ALL LOCAL MUSIC"}</button>
             </div>
           )}
 
@@ -6693,7 +7425,7 @@ export default function App() {
                     <button
                       className="library-track-more"
                       type="button"
-                      disabled={partyCheckpointBusy || libraryMutationBusy || partyFirstSongOpening}
+                      disabled={transitionCompletionUncertain || partyCheckpointBusy || libraryMutationBusy || partyFirstSongOpening}
                       aria-label={`More actions for ${track.name}`}
                       aria-haspopup="menu"
                       aria-expanded={contextMenu?.trackId === track.id}
@@ -6814,7 +7546,7 @@ export default function App() {
           <button
             type="button"
             role="menuitem"
-            disabled={partyCheckpointBusy}
+            disabled={transitionCompletionUncertain || partyCheckpointBusy || !!libraryMembershipStatus}
             onClick={() => {
               const trackId = contextMenu.trackId;
               setContextMenu(null);

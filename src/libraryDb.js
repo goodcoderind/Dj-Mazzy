@@ -25,6 +25,24 @@ const mutationOriginId = crypto.randomUUID();
 let databasePromise = null;
 
 const checkpointAbortError = () => new DOMException("Party recovery write cancelled", "AbortError");
+const LIBRARY_MEMBERSHIP_FAILURE_VERSION = "library-membership-mutation-failure/v1";
+const membershipMutationFailure = (error, rollbackVerified) => Object.assign(
+  new Error("Local library membership mutation failed", { cause: error }),
+  {
+    name: "LibraryMembershipMutationError",
+    version: LIBRARY_MEMBERSHIP_FAILURE_VERSION,
+    rollbackVerified: rollbackVerified === true
+  }
+);
+const withVerifiedMembershipFailure = async (operation) => {
+  try {
+    return await operation();
+  } catch (error) {
+    if (error?.version === LIBRARY_MEMBERSHIP_FAILURE_VERSION) throw error;
+    // No membership transaction was created, so this operation made no change.
+    throw membershipMutationFailure(error, true);
+  }
+};
 
 export const createAbortableMutationQueue = () => {
   let tail = Promise.resolve();
@@ -452,65 +470,99 @@ const sameLibraryState = (current, expected) => current && expected &&
 export const saveImportedTracksToDb = async (
   tracks,
   legacyIdentities = [],
-  expectedLibraryState = null
-) => withCrossTabMutationLock(() => serializeMutation(async () => {
-  const db = await openDb();
+  expectedLibraryState = null,
+  { signal = null } = {}
+) => withVerifiedMembershipFailure(() => withCrossTabMutationLock(() => serializeMutation(async () => {
+  if (signal?.aborted) throw checkpointAbortError();
+  const db = await openDbWithAbort(signal);
+  if (signal?.aborted) throw checkpointAbortError();
   const tx = db.transaction([STORE_NAME, META_STORE_NAME, PARTY_SESSION_STORE_NAME], "readwrite");
   const completed = waitForTransaction(tx);
+  void completed.catch(() => undefined);
+  const abortTransaction = () => {
+    try { tx.abort(); } catch { /* The exact transaction already settled. */ }
+  };
+  signal?.addEventListener("abort", abortTransaction, { once: true });
   const store = tx.objectStore(STORE_NAME);
   const metaStore = tx.objectStore(META_STORE_NAME);
-  const [existingRows, currentState, rawCheckpoint] = await Promise.all([
-    requestResult(store.getAll()),
-    readLibraryState(metaStore),
-    requestResult(tx.objectStore(PARTY_SESSION_STORE_NAME).get(PARTY_SESSION_CHECKPOINT_KEY))
-  ]);
-  const expected = typeof expectedLibraryState === "number"
-    ? { epoch: expectedLibraryState, revision: currentState.revision }
-    : expectedLibraryState;
-  if (expected && !sameLibraryState(currentState, expected)) {
-    await completed;
-    return { status: "stale-library", savedTrackIds: [], duplicateContentIdentities: [], libraryState: currentState };
-  }
-
-  const byId = new Map(existingRows.map((track) => [track.id, track]));
-  const identities = new Set(existingRows.map((track) => track.contentIdentity).filter(Boolean));
-  const savedTrackIds = [];
-  const duplicateContentIdentities = [];
-  for (const track of tracks) {
-    if (track.contentIdentity && identities.has(track.contentIdentity)) {
-      duplicateContentIdentities.push(track.contentIdentity);
-      continue;
+  let transactionCommitted = false;
+  try {
+    const [existingRows, currentState, rawCheckpoint] = await Promise.all([
+      requestResult(store.getAll()),
+      readLibraryState(metaStore),
+      requestResult(tx.objectStore(PARTY_SESSION_STORE_NAME).get(PARTY_SESSION_CHECKPOINT_KEY))
+    ]);
+    if (signal?.aborted) {
+      abortTransaction();
+      throw checkpointAbortError();
     }
-    if (track.contentIdentity) identities.add(track.contentIdentity);
-    store.put(track);
-    byId.set(track.id, track);
-    savedTrackIds.push(track.id);
+    const expected = typeof expectedLibraryState === "number"
+      ? { epoch: expectedLibraryState, revision: currentState.revision }
+      : expectedLibraryState;
+    if (expected && !sameLibraryState(currentState, expected)) {
+      await completed;
+      transactionCommitted = true;
+      return {
+        status: "stale-library",
+        savedTrackIds: [],
+        duplicateContentIdentities: [],
+        libraryState: currentState,
+        checkpointRevision: rawCheckpointRevision(rawCheckpoint)
+      };
+    }
+
+    const byId = new Map(existingRows.map((track) => [track.id, track]));
+    const identities = new Set(existingRows.map((track) => track.contentIdentity).filter(Boolean));
+    const savedTrackIds = [];
+    const duplicateContentIdentities = [];
+    for (const track of tracks) {
+      if (track.contentIdentity && identities.has(track.contentIdentity)) {
+        duplicateContentIdentities.push(track.contentIdentity);
+        continue;
+      }
+      if (track.contentIdentity) identities.add(track.contentIdentity);
+      store.put(track);
+      byId.set(track.id, track);
+      savedTrackIds.push(track.id);
+    }
+    let legacyChanged = false;
+    for (const { id, contentIdentity } of legacyIdentities) {
+      const existing = byId.get(id);
+      if (!existing || existing.contentIdentity === contentIdentity) continue;
+      if (identities.has(contentIdentity)) continue;
+      identities.add(contentIdentity);
+      const next = { ...existing, contentIdentity };
+      store.put(next);
+      byId.set(id, next);
+      legacyChanged = true;
+    }
+    const changed = savedTrackIds.length > 0 || legacyChanged;
+    const libraryState = changed ? nextLibraryState(currentState) : currentState;
+    if (changed) metaStore.put(libraryState);
+    await completed;
+    transactionCommitted = true;
+    if (signal?.aborted) throw checkpointAbortError();
+    if (changed) {
+      broadcastLibraryMutation({
+        type: "library-membership-changed",
+        libraryEpoch: libraryState.epoch,
+        libraryRevision: libraryState.revision,
+        checkpointRevision: rawCheckpointRevision(rawCheckpoint)
+      });
+    }
+    return { status: "saved", savedTrackIds, duplicateContentIdentities, libraryState };
+  } catch (error) {
+    if (!transactionCommitted) {
+      abortTransaction();
+      let rollbackVerified = false;
+      try { await completed; } catch { rollbackVerified = true; }
+      throw membershipMutationFailure(error, rollbackVerified);
+    }
+    throw membershipMutationFailure(error, false);
+  } finally {
+    signal?.removeEventListener("abort", abortTransaction);
   }
-  let legacyChanged = false;
-  for (const { id, contentIdentity } of legacyIdentities) {
-    const existing = byId.get(id);
-    if (!existing || existing.contentIdentity === contentIdentity) continue;
-    if (identities.has(contentIdentity)) continue;
-    identities.add(contentIdentity);
-    const next = { ...existing, contentIdentity };
-    store.put(next);
-    byId.set(id, next);
-    legacyChanged = true;
-  }
-  const changed = savedTrackIds.length > 0 || legacyChanged;
-  const libraryState = changed ? nextLibraryState(currentState) : currentState;
-  if (changed) metaStore.put(libraryState);
-  await completed;
-  if (changed) {
-    broadcastLibraryMutation({
-      type: "library-membership-changed",
-      libraryEpoch: libraryState.epoch,
-      libraryRevision: libraryState.revision,
-      checkpointRevision: rawCheckpointRevision(rawCheckpoint)
-    });
-  }
-  return { status: "saved", savedTrackIds, duplicateContentIdentities, libraryState };
-}));
+}, { signal }), { signal }));
 
 const rawCheckpointRevision = (value) => safeCounter(value?.revision) && value.revision > 0 &&
   value.revision < Number.MAX_SAFE_INTEGER
@@ -698,78 +750,144 @@ export const clearPartySessionCheckpoint = async ({
   }
 }, { signal }), { signal });
 
-export const deleteTrackFromDb = async (trackId) => withCrossTabMutationLock(() => serializeMutation(async () => {
-  const db = await openDb();
+export const deleteTrackFromDb = async (
+  trackId,
+  { signal = null, expectedLibraryState = null } = {}
+) => withVerifiedMembershipFailure(() => withCrossTabMutationLock(() => serializeMutation(async () => {
+  if (signal?.aborted) throw checkpointAbortError();
+  const db = await openDbWithAbort(signal);
+  if (signal?.aborted) throw checkpointAbortError();
   const tx = db.transaction([STORE_NAME, META_STORE_NAME, PARTY_SESSION_STORE_NAME], "readwrite");
   const completed = waitForTransaction(tx);
+  void completed.catch(() => undefined);
+  const abortTransaction = () => {
+    try { tx.abort(); } catch { /* The exact transaction already settled. */ }
+  };
+  signal?.addEventListener("abort", abortTransaction, { once: true });
   const trackStore = tx.objectStore(STORE_NAME);
   const metaStore = tx.objectStore(META_STORE_NAME);
   const sessionStore = tx.objectStore(PARTY_SESSION_STORE_NAME);
-  const [existingTrack, currentState, rawCheckpoint] = await Promise.all([
-    requestResult(trackStore.get(trackId)),
-    readLibraryState(metaStore),
-    requestResult(sessionStore.get(PARTY_SESSION_CHECKPOINT_KEY))
-  ]);
-  let libraryState = currentState;
-  let checkpointRevision = rawCheckpointRevision(rawCheckpoint);
-  if (existingTrack) {
-    trackStore.delete(trackId);
-    libraryState = nextLibraryState(currentState);
-    metaStore.put(libraryState);
+  let transactionCommitted = false;
+  try {
+    const [existingTrack, currentState, rawCheckpoint] = await Promise.all([
+      requestResult(trackStore.get(trackId)),
+      readLibraryState(metaStore),
+      requestResult(sessionStore.get(PARTY_SESSION_CHECKPOINT_KEY))
+    ]);
+    if (signal?.aborted) {
+      abortTransaction();
+      throw checkpointAbortError();
+    }
+    if (expectedLibraryState && !sameLibraryState(currentState, expectedLibraryState)) {
+      await completed;
+      transactionCommitted = true;
+      return { status: "stale-library", deleted: false, libraryState: currentState, checkpointRevision: rawCheckpointRevision(rawCheckpoint) };
+    }
+    let libraryState = currentState;
+    let checkpointRevision = rawCheckpointRevision(rawCheckpoint);
+    if (existingTrack) {
+      trackStore.delete(trackId);
+      libraryState = nextLibraryState(currentState);
+      metaStore.put(libraryState);
+      const currentCheckpoint = normalizePartySessionCheckpointRecord(rawCheckpoint);
+      const tombstone = createPartySessionCheckpointTombstone(
+        "invalidated",
+        checkpointRevision + 1,
+        currentCheckpoint?.sessionId ?? null,
+        currentCheckpoint?.writerToken ?? null
+      );
+      checkpointRevision = tombstone.revision;
+      sessionStore.put(tombstone);
+    }
+    await completed;
+    transactionCommitted = true;
+    if (signal?.aborted) throw checkpointAbortError();
+    if (existingTrack) {
+      broadcastLibraryMutation({
+        type: "track-deleted",
+        trackId,
+        libraryEpoch: libraryState.epoch,
+        libraryRevision: libraryState.revision,
+        checkpointRevision
+      });
+    }
+    return { status: "deleted", deleted: Boolean(existingTrack), libraryState, checkpointRevision };
+  } catch (error) {
+    if (!transactionCommitted) {
+      abortTransaction();
+      let rollbackVerified = false;
+      try { await completed; } catch { rollbackVerified = true; }
+      throw membershipMutationFailure(error, rollbackVerified);
+    }
+    throw membershipMutationFailure(error, false);
+  } finally {
+    signal?.removeEventListener("abort", abortTransaction);
+  }
+}, { signal }), { signal }));
+
+export const clearTracksFromDb = async ({ signal = null, expectedLibraryState = null } = {}) =>
+  withVerifiedMembershipFailure(() => withCrossTabMutationLock(() => serializeMutation(async () => {
+  if (signal?.aborted) throw checkpointAbortError();
+  const db = await openDbWithAbort(signal);
+  if (signal?.aborted) throw checkpointAbortError();
+  const tx = db.transaction([STORE_NAME, META_STORE_NAME, PARTY_SESSION_STORE_NAME], "readwrite");
+  const completed = waitForTransaction(tx);
+  void completed.catch(() => undefined);
+  const abortTransaction = () => {
+    try { tx.abort(); } catch { /* The exact transaction already settled. */ }
+  };
+  signal?.addEventListener("abort", abortTransaction, { once: true });
+  const trackStore = tx.objectStore(STORE_NAME);
+  const metaStore = tx.objectStore(META_STORE_NAME);
+  const sessionStore = tx.objectStore(PARTY_SESSION_STORE_NAME);
+  let transactionCommitted = false;
+  try {
+    const [currentState, rawCheckpoint] = await Promise.all([
+      readLibraryState(metaStore),
+      requestResult(sessionStore.get(PARTY_SESSION_CHECKPOINT_KEY))
+    ]);
+    if (signal?.aborted) {
+      abortTransaction();
+      throw checkpointAbortError();
+    }
+    if (expectedLibraryState && !sameLibraryState(currentState, expectedLibraryState)) {
+      await completed;
+      transactionCommitted = true;
+      return { status: "stale-library", libraryState: currentState, checkpointRevision: rawCheckpointRevision(rawCheckpoint) };
+    }
+    const libraryState = nextLibraryState(currentState, { clear: true });
     const currentCheckpoint = normalizePartySessionCheckpointRecord(rawCheckpoint);
     const tombstone = createPartySessionCheckpointTombstone(
       "invalidated",
-      checkpointRevision + 1,
+      rawCheckpointRevision(rawCheckpoint) + 1,
       currentCheckpoint?.sessionId ?? null,
       currentCheckpoint?.writerToken ?? null
     );
-    checkpointRevision = tombstone.revision;
+    trackStore.clear();
+    metaStore.put(libraryState);
     sessionStore.put(tombstone);
-  }
-  await completed;
-  if (existingTrack) {
+    await completed;
+    transactionCommitted = true;
+    if (signal?.aborted) throw checkpointAbortError();
     broadcastLibraryMutation({
-      type: "track-deleted",
-      trackId,
+      type: "library-cleared",
       libraryEpoch: libraryState.epoch,
       libraryRevision: libraryState.revision,
-      checkpointRevision
+      checkpointRevision: tombstone.revision
     });
+    return { status: "cleared", libraryState, checkpointRevision: tombstone.revision };
+  } catch (error) {
+    if (!transactionCommitted) {
+      abortTransaction();
+      let rollbackVerified = false;
+      try { await completed; } catch { rollbackVerified = true; }
+      throw membershipMutationFailure(error, rollbackVerified);
+    }
+    throw membershipMutationFailure(error, false);
+  } finally {
+    signal?.removeEventListener("abort", abortTransaction);
   }
-  return { deleted: Boolean(existingTrack), libraryState, checkpointRevision };
-}));
-
-export const clearTracksFromDb = async () => withCrossTabMutationLock(() => serializeMutation(async () => {
-  const db = await openDb();
-  const tx = db.transaction([STORE_NAME, META_STORE_NAME, PARTY_SESSION_STORE_NAME], "readwrite");
-  const completed = waitForTransaction(tx);
-  const trackStore = tx.objectStore(STORE_NAME);
-  const metaStore = tx.objectStore(META_STORE_NAME);
-  const sessionStore = tx.objectStore(PARTY_SESSION_STORE_NAME);
-  const [currentState, rawCheckpoint] = await Promise.all([
-    readLibraryState(metaStore),
-    requestResult(sessionStore.get(PARTY_SESSION_CHECKPOINT_KEY))
-  ]);
-  const libraryState = nextLibraryState(currentState, { clear: true });
-  const currentCheckpoint = normalizePartySessionCheckpointRecord(rawCheckpoint);
-  const tombstone = createPartySessionCheckpointTombstone(
-    "invalidated",
-    rawCheckpointRevision(rawCheckpoint) + 1,
-    currentCheckpoint?.sessionId ?? null,
-    currentCheckpoint?.writerToken ?? null
-  );
-  trackStore.clear();
-  metaStore.put(libraryState);
-  sessionStore.put(tombstone);
-  await completed;
-  broadcastLibraryMutation({
-    type: "library-cleared",
-    libraryEpoch: libraryState.epoch,
-    libraryRevision: libraryState.revision,
-    checkpointRevision: tombstone.revision
-  });
-  return { libraryState, checkpointRevision: tombstone.revision };
-}));
+}, { signal }), { signal }));
 
 export const __resetLibraryDbForTests = async ({ deleteDatabase = false } = {}) => {
   const db = databasePromise ? await databasePromise.catch(() => null) : null;

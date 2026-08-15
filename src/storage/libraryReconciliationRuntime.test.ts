@@ -3,6 +3,7 @@ import {
   createLibraryReconciliationRuntime,
   libraryReconciliationResultCovers,
   mergeLibraryReconciliationRequirements,
+  settleLibraryReconciliationWaiters,
   shouldQuiescePartyForRemoteCheckpoint
 } from "./libraryReconciliationRuntime";
 
@@ -23,6 +24,17 @@ const flush = async () => {
 };
 
 describe("library reconciliation runtime", () => {
+  it("settles every import waiter once for any terminal reconciliation path", () => {
+    const first = vi.fn();
+    const second = vi.fn();
+    const waiters = new Set([first, second]);
+    settleLibraryReconciliationWaiters(waiters);
+    settleLibraryReconciliationWaiters(waiters);
+    expect(first).toHaveBeenCalledTimes(1);
+    expect(second).toHaveBeenCalledTimes(1);
+    expect(waiters.size).toBe(0);
+  });
+
   it("merges pending counter coverage without regressing a newer epoch", () => {
     const merged = mergeLibraryReconciliationRequirements(
       { minimumLibraryEpoch: 4, minimumLibraryRevision: 9, minimumCheckpointRevision: 12 },

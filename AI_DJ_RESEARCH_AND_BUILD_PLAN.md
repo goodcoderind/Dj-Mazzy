@@ -1928,8 +1928,9 @@ These are the active backlog, not reasons to discard the prototype.
   malformed, or permission-withheld estimates do not block import and remain a
   visibly unknown state. The check retains and transmits no filename, path,
   per-file size, or storage estimate; only the existing in-tab UI receives a
-  coarse formatted result. Import holds the shared local-library mutation lock
-  from estimate through one serialized IndexedDB transaction, and it publishes
+  coarse formatted result. D-077 supersedes the original broad-lock detail:
+  preparation remains outside the shared playback gate and the exact commit
+  alone holds the local-library mutation lock through one serialized IndexedDB transaction. It publishes
   library rows or a success announcement only after that transaction completes.
   Concurrent import/remove/clear cannot pass against one stale estimate, and a
   quota/write rejection leaves no in-memory phantom library. Browser eviction
@@ -2809,6 +2810,67 @@ These are the active backlog, not reasons to discard the prototype.
   pause/drain, unmount abort, and same-owner/old versus newer-foreign checkpoint
   quiescence. Browser IndexedDB suspension and cross-process crash durability
   remain external gates.
+
+- **D-077 — Bound exact local-library membership changes and keep import
+  preparation outside the playback gate:**
+  `library-membership-mutation-runtime/v1` gives Import, single-track Remove,
+  and Remove All one immutable tab-memory owner with mutation kind,
+  epoch/operation, expected library epoch/revision, stage ordinal, and monotonic
+  deadline. A second membership action is refused while that owner is live.
+  Selected audio is read and SHA-256 identified sequentially under bounded
+  read/digest stages, and the coarse storage estimate has its own 10-second
+  liveness boundary. The native file input is cleared immediately. Import
+  preparation announces count-only progress and offers a keyboard-operable
+  Cancel action, but does not acquire the broad playback/library gate; healthy
+  current audio and Autopilot may continue. Uncancelled browser digest work may
+  finish internally, but a revoked result has no Deck, library, or storage
+  authority. A short-lived exact native-picker owner defers the picker-return
+  focus reconciliation until `change` or `cancel` admission, so native event
+  ordering cannot discard the selected folder and the cross-tab check is not
+  lost. Preparation may overlap that bounded read, but precommit awaits its
+  exact terminal settlement and then revalidates library authority.
+
+  Immediately before mutation, App revalidates the exact owner and captured
+  library state, claims the routine-write exclusive and shared playback gate,
+  then starts one 30-second commit boundary. `saveImportedTracksToDb`,
+  `deleteTrackFromDb`, and `clearTracksFromDb` carry the same AbortSignal through
+  the profile Web Lock, abortable same-tab serializer, authority-bounded database
+  open, and exact live IndexedDB transaction. Delete and clear perform the
+  expected epoch/revision comparison inside that transaction before any write.
+  Every pre-completion adapter exception aborts the exact transaction and is
+  classified as definitely nonmutating only after the transaction abort is
+  observed; DOMException names are not rollback evidence.
+  Exact on-time `saved | deleted | cleared` settlement alone updates React,
+  queue, Deck, and checkpoint state. A stale CAS is nonmutating and asks for a
+  fresh host review. The old parallel compensating-delete guess after a stale
+  import owner is removed. A final-session checkpoint clear cannot overlap a
+  membership owner: it becomes one exact pending clear bound to session/writer
+  and drains only from the canonical post-mutation checkpoint revision.
+
+  A preparation cancel, failure, or timeout is definite and says nothing was
+  saved. Once commit begins, timeout or an unclassified rejection is treated as
+  outcome-uncertain: authority is revoked before abort, automatic planning is
+  paused, the stable current song and **Stop All Sound** remain available, and a
+  focused persistent **Reload Local Music** action owns recovery. Late success
+  or rejection is inert and cannot publish, compensate, or unlock the circuit.
+  Unmount, pagehide, New Party during preparation, and verified remote clear
+  revoke the exact owner. After committed deletion, exact Deck ejection remains
+  part of the owned cleanup. Unverified ejection retains a deck/track-bound
+  recovery owner; Stop All Sound must retry and prove that exact buffer absent
+  before releasing the playback lock, without ejecting a successor.
+
+  No IndexedDB, track-analysis, checkpoint, trace, report, export, or network
+  schema changes. Content identities remain only in existing local track rows;
+  runtime owners, counts, deadlines, File/byte references, and raw errors remain
+  tab-memory-only and are never placed in UI or diagnostics. Deterministic unit
+  evidence covers exact and delayed-timer deadlines, phase-aware cancellation,
+  reconciliation-circuit admission, post-exclusive owner/state checks, private
+  rollback classification, active FileReader abort, queued Web-Lock abort,
+  already-aborted adapters, stale delete/clear CAS, late settlement inertness,
+  and standard storage atomicity. The production build proves only that the
+  wiring bundles successfully; full React focus/page-lifecycle behavior and
+  real browser process death during an IndexedDB commit remain external
+  acceptance gates.
 
 ### Open questions
 

@@ -183,6 +183,79 @@ describe("library recovery storage", () => {
     expect((await loadLibraryRecoveryBundle()).checkpointRecord).toBeNull();
   });
 
+  it("rejects already-aborted membership mutations without changing membership", async () => {
+    const initial = (await loadLibraryRecoveryBundle()).libraryState;
+    const controller = new AbortController();
+    controller.abort();
+    await expect(saveImportedTracksToDb([track("source", "a")], [], initial, {
+      signal: controller.signal
+    })).rejects.toMatchObject({
+      version: "library-membership-mutation-failure/v1",
+      rollbackVerified: true
+    });
+    await expect(deleteTrackFromDb("source", {
+      signal: controller.signal,
+      expectedLibraryState: initial
+    })).rejects.toMatchObject({
+      version: "library-membership-mutation-failure/v1",
+      rollbackVerified: true
+    });
+    await expect(clearTracksFromDb({
+      signal: controller.signal,
+      expectedLibraryState: initial
+    })).rejects.toMatchObject({
+      version: "library-membership-mutation-failure/v1",
+      rollbackVerified: true
+    });
+    expect((await loadLibraryRecoveryBundle()).tracks).toEqual([]);
+    expect((await loadLibraryRecoveryBundle()).libraryState).toEqual(initial);
+  });
+
+  it("aborts membership admission while queued for the profile Web Lock", async () => {
+    const initial = (await loadLibraryRecoveryBundle()).libraryState;
+    const originalNavigator = globalThis.navigator;
+    const request = vi.fn((_name, options, operation) => new Promise((resolve, reject) => {
+      const onAbort = () => reject(new DOMException("cancelled", "AbortError"));
+      options.signal.addEventListener("abort", onAbort, { once: true });
+      void operation;
+      void resolve;
+    }));
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      value: { ...(originalNavigator ?? {}), locks: { request } }
+    });
+    const controller = new AbortController();
+    const pending = saveImportedTracksToDb([track("source", "a")], [], initial, {
+      signal: controller.signal
+    });
+    await Promise.resolve();
+    controller.abort();
+    await expect(pending).rejects.toMatchObject({
+      version: "library-membership-mutation-failure/v1",
+      rollbackVerified: true
+    });
+    expect(request).toHaveBeenCalledOnce();
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      value: originalNavigator
+    });
+  });
+
+  it("aborts and verifies rollback after a synchronous mid-import request failure", async () => {
+    const initial = (await loadLibraryRecoveryBundle()).libraryState;
+    await expect(saveImportedTracksToDb([
+      track("good", "a"),
+      { ...track("bad", "b"), id: undefined }
+    ], [], initial)).rejects.toMatchObject({
+      version: "library-membership-mutation-failure/v1",
+      rollbackVerified: true
+    });
+    const bundle = await loadLibraryRecoveryBundle();
+    expect(bundle.tracks).toEqual([]);
+    expect(bundle.libraryState).toEqual(initial);
+    expect(bundle.checkpointRecord).toBeNull();
+  });
+
   it("rejects an already-aborted startup hydration before reading local rows", async () => {
     const controller = new AbortController();
     controller.abort();
@@ -486,6 +559,23 @@ describe("library recovery storage", () => {
       recordStatus: "invalidated",
       revision: cleared.checkpointRevision
     });
+  });
+
+  it("does not delete or clear rows when the expected library state is stale", async () => {
+    const initial = (await loadLibraryRecoveryBundle()).libraryState;
+    const imported = await saveImportedTracksToDb(
+      [track("source", "a"), track("next", "b")],
+      [],
+      initial
+    );
+    const later = await saveImportedTracksToDb([track("later", "c")], [], imported.libraryState);
+    const deletion = await deleteTrackFromDb("source", { expectedLibraryState: imported.libraryState });
+    const clear = await clearTracksFromDb({ expectedLibraryState: imported.libraryState });
+    expect(deletion.status).toBe("stale-library");
+    expect(clear.status).toBe("stale-library");
+    const bundle = await loadLibraryRecoveryBundle();
+    expect(bundle.libraryState).toEqual(later.libraryState);
+    expect(bundle.tracks.map(({ id }) => id).sort()).toEqual(["later", "next", "source"]);
   });
 
   it("preserves the last valid checkpoint when a stale clear is rejected", async () => {

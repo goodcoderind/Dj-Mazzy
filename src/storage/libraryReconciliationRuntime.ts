@@ -56,6 +56,13 @@ export const libraryReconciliationResultCovers = ({
     libraryRevision >= requirements.minimumLibraryRevision)) &&
   checkpointRevision >= requirements.minimumCheckpointRevision;
 
+export const settleLibraryReconciliationWaiters = (
+  waiters: Set<() => void>
+) => {
+  for (const resolve of waiters) resolve();
+  waiters.clear();
+};
+
 type Active<T> = {
   trigger: T;
   owner: LibraryReconciliationOwner;

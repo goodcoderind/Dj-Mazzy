@@ -612,9 +612,22 @@ the browser's coarse storage estimate when one is available. It keeps a 128 MB
 reserve and refuses only a selection that clearly cannot fit, with a plain
 message to choose less music or remove saved tracks. If the browser withholds
 or rejects the estimate, import remains available and the UI says capacity was
-unknown. Import owns the local-library mutation through its IndexedDB commit;
-Mazzy publishes rows and says “Saved” only after that transaction succeeds, and
-a quota/write failure leaves no session-only phantom tracks. No filename, path,
+unknown. `library-membership-mutation-runtime/v1` checks and hashes one selected
+file at a time outside the playback-wide storage gate, with count-only progress
+and a real Cancel action. Music already playing and healthy Autopilot authority
+may continue during that preparation. Returning from the native file picker
+defers, rather than loses, the normal cross-tab storage check so picker focus
+cannot reject the selected folder. File preparation may continue during that
+bounded check, but commit waits for its exact settlement and revalidates the
+library before proceeding. The exact import claims the shared gate
+only for its atomic IndexedDB commit; Remove and Remove All use the same bounded
+30-second commit authority. Mazzy publishes rows and says “Saved” only after an
+exact on-time transaction succeeds. A stale library CAS asks the host to review
+the current library before trying again. If the party's final song ends during
+one of these commits, saved-recovery deletion waits for the exact membership
+owner and uses its canonical post-commit revision. A commit timeout or uncertain failure
+never guesses that nothing changed: it pauses automatic planning, keeps stable
+audio and Stop All Sound available, and focuses **Reload Local Music**. No filename, path,
 or file size is stored in diagnostics or uploaded. Byte-identical files receive
 a versioned local SHA-256 content identity, computed one file at a time and kept
 only in the IndexedDB track record; re-imported and within-folder duplicates are
@@ -624,8 +637,18 @@ The IndexedDB content-identity index is unique across Mazzy tabs. Routine
 analysis saves update existing rows only, and deletion is broadcast to other
 open tabs, so a stale tab cannot silently recreate music removed elsewhere.
 Cross-tab import/delete/clear transactions also use the browser's profile-wide
-Web Lock when available; a received clear invalidates any local import still
-hashing or waiting to publish.
+Web Lock when available. Their AbortSignal covers that wait, the same-tab
+serializer, database open, and live transaction. Delete and clear compare the
+exact expected library epoch/revision before changing rows, so a newer remote
+import cannot be silently removed. A transaction failure is treated as
+nonmutating only after the adapter has aborted and observed rollback; an error
+name alone is never accepted as proof. A received clear invalidates any local import
+still hashing or waiting to publish. If a committed removal cannot prove that
+its exact Deck buffer was ejected, playback remains locked; Stop All Sound
+retries exact ejection and cannot unlock merely because the buffer is paused.
+Owners, stages, deadlines, raw errors, and
+selected File references remain tab-memory-only; no new schema, report, export,
+or network path is introduced.
 Automatic analysis updates preserve the separately committed content identity,
 manual timing overrides, and timing-review record; a later background save
 cannot roll those fields backward. Analysis-save failures stay visible until a
