@@ -15,6 +15,7 @@ const validSettlement = (overrides: Partial<AutoPilotPreloadSettlement> = {}): A
   loaded: true,
   autoPilotEnabled: true,
   operationCurrent: true,
+  readinessCurrent: true,
   stillEligible: true,
   requestedTrackId: "next",
   targetTrackId: "next",
@@ -71,6 +72,7 @@ describe("Autopilot preload ownership", () => {
     for (const settlement of [
       validSettlement({ autoPilotEnabled: false }),
       validSettlement({ operationCurrent: false }),
+      validSettlement({ readinessCurrent: false }),
       validSettlement({ stillEligible: false }),
       validSettlement({ targetTrackId: "host-track" }),
       validSettlement({ targetPlaying: true })

@@ -139,6 +139,35 @@ describe("automatic transition planning", () => {
     expect(plan.explanation[0]).toContain("Filtered Fade");
   });
 
+  it("forces Safe Fade when either exact loaded deck lacks trusted timing facts", () => {
+    const plan = planAutomaticTransition({
+      ...qualifiedInput,
+      target: { ...qualifiedInput.target, forceSafeFadeOnly: true }
+    });
+    expect(plan.template).toBe("safe-fade");
+    expect(plan.eligibility.reasons).toContain("This loaded deck has no trusted timing facts for this play.");
+  });
+
+  it("does not let source-only filter evidence bypass the loaded target's Safe Fade policy", () => {
+    const source = {
+      ...qualifiedInput.source,
+      analyzerVersion: BASIC_ANALYZER_VERSION,
+      schemaVersion: "track-analysis/v5",
+      analysisStatus: "ready",
+      downbeatsSeconds: [],
+      downbeatConfidence: 0,
+      energyByBeat: Array(qualifiedInput.source.beatsSeconds.length).fill(0.5),
+      vocalProbabilityByBeat: Array(qualifiedInput.source.beatsSeconds.length).fill(0.2),
+      bandEnergyByBeat: Array.from({ length: qualifiedInput.source.beatsSeconds.length }, () => ({ low: 0.4, mid: 0.4, high: 0.2 }))
+    };
+    const plan = planAutomaticTransition({
+      ...qualifiedInput,
+      source,
+      target: { ...qualifiedInput.target, forceSafeFadeOnly: true }
+    });
+    expect(plan.template).toBe("safe-fade");
+  });
+
   it.each([
     { label: "stale analyzer evidence", analyzerVersion: "basic-worker/v4" },
     { label: "missing vocal evidence", vocalProbabilityByBeat: undefined },

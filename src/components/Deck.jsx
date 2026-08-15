@@ -2,6 +2,13 @@ import { forwardRef, useEffect, useId, useImperativeHandle, useMemo, useRef, use
 import WaveSurfer from "wavesurfer.js";
 import { getAudioEngine } from "../audioContext";
 import { DECK_LOAD_OUTCOME } from "../audio/deckLoadOutcome";
+import {
+  DECK_LOAD_PURPOSE,
+  DECK_LOAD_READINESS_VERSION,
+  commitDecodedDeckReadiness,
+  decideDeckLoadReadiness,
+  runDeckPostDecodeLoad
+} from "../audio/deckLoadReadiness";
 import { AnalysisClient, getAnalysisClient } from "../analysis/AnalysisClient";
 import { hasCurrentBasicAnalysis } from "../analysis/analysisVersion";
 import { normalizeProgramLevel } from "../analysis/programLevel";
@@ -133,6 +140,7 @@ const Deck = forwardRef(function Deck(
   const transportAuthorityRef = useRef(createDeckTransportAuthority());
   const loadAbortControllerRef = useRef(null);
   const isolatedAnalysisClientRef = useRef(null);
+  const loadReadinessRef = useRef(null);
   const metronomeCancelRef = useRef(null);
   const metronomeUiTimerRef = useRef(0);
   const clickPulseTimersRef = useRef([]);
@@ -174,6 +182,8 @@ const Deck = forwardRef(function Deck(
   const [eqKill, setEqKill] = useState({ low: false, mid: false, high: false });
   const [deckStatus, setDeckStatus] = useState(deckEngine.getSnapshot().status);
   const [analysisRecord, setAnalysisRecord] = useState(null);
+  const [runtimeProgramLevel, setRuntimeProgramLevel] = useState(null);
+  const [loadReadiness, setLoadReadiness] = useState(null);
   const [programLevelRuntimeStatus, setProgramLevelRuntimeStatus] = useState("pending");
   const [metronomeActive, setMetronomeActive] = useState(false);
   const [clickPulse, setClickPulse] = useState(null);
@@ -209,12 +219,15 @@ const Deck = forwardRef(function Deck(
     ? analysisRecord.timingReview
     : null;
   const automaticTrust = analysisRecord?.automaticRhythmTrust ?? null;
-  const currentProgramLevel = normalizeProgramLevel(analysisRecord?.programLevel);
+  const currentProgramLevel = normalizeProgramLevel(analysisRecord?.programLevel) ??
+    normalizeProgramLevel(runtimeProgramLevel);
   const programLevelRangeLabel = currentProgramLevel?.measurement.loudnessRangeLu == null
     ? "level range unavailable"
     : `level range ${currentProgramLevel.measurement.loudnessRangeLu.toFixed(1)} LU${currentProgramLevel.measurement.loudnessRangeStatus === "provisional" ? " · early estimate" : ""}`;
   const programLevelLabel = programLevelRuntimeStatus === "failed"
     ? "level check failed · no trim"
+    : programLevelRuntimeStatus === "deferred"
+    ? "no loudness trim for this play"
     : !currentProgramLevel
     ? "automatic loudness trim pending"
     : currentProgramLevel.measurement.status === "measured"
@@ -228,7 +241,9 @@ const Deck = forwardRef(function Deck(
   const automaticBarHandoff = currentEnhancedTiming &&
     ["bar-cut-candidate", "short-sync-candidate", "long-candidate"].includes(automaticTrust?.tier);
   const automaticTimingLabel = !analysisRecord
-    ? "Waiting for automatic analysis"
+    ? loadReadiness?.safeFadeOnly === true
+      ? "No timing grid for this play — Safe Fade ready"
+      : "Waiting for automatic analysis"
     : effectiveGrid.isManual
       ? "Manual timing — safe transitions only"
       : automaticBarHandoff
@@ -642,7 +657,11 @@ const Deck = forwardRef(function Deck(
     file,
     trackId = null,
     knownAnalysis = null,
-    { isolatedAnalysis = false, loadAuthorityKey = null } = {}
+    {
+      isolatedAnalysis = false,
+      loadAuthorityKey = null,
+      purpose = DECK_LOAD_PURPOSE.manual
+    } = {}
   ) => {
     if (playbackStartLocked || playbackStartLockRef?.current) {
       return DECK_LOAD_OUTCOME.cancelled;
@@ -657,9 +676,15 @@ const Deck = forwardRef(function Deck(
     loadAbortControllerRef.current = loadAbortController;
     loadGenerationRef.current += 1;
     const loadGeneration = loadGenerationRef.current;
-    loadAuthorityKeyRef.current = typeof loadAuthorityKey === "string" && loadAuthorityKey.length > 0
+    const expectedLoadAuthorityKey = typeof loadAuthorityKey === "string" && loadAuthorityKey.length > 0
       ? loadAuthorityKey
       : null;
+    loadAuthorityKeyRef.current = expectedLoadAuthorityKey;
+    const ownsLoad = () =>
+      loadGenerationRef.current === loadGeneration &&
+      currentTrackIdRef.current === trackId &&
+      loadAuthorityKeyRef.current === expectedLoadAuthorityKey &&
+      !playbackStartLockRef?.current;
     let audioContext;
     try {
       audioContext = await ensureGraphReady();
@@ -684,6 +709,9 @@ const Deck = forwardRef(function Deck(
       setTapTimes([]);
       currentTrackIdRef.current = trackId;
       setAnalysisRecord(null);
+      setRuntimeProgramLevel(null);
+      loadReadinessRef.current = null;
+      setLoadReadiness(null);
       setProgramLevelRuntimeStatus("pending");
       deckEngine.beginPreparing(trackId);
     } catch {
@@ -694,11 +722,11 @@ const Deck = forwardRef(function Deck(
     try {
       const arrayBuffer = await readFileAsArrayBuffer(file, loadAbortController.signal);
       decoded = await audioContext.decodeAudioData(arrayBuffer.slice(0));
-      if (loadGenerationRef.current !== loadGeneration || currentTrackIdRef.current !== trackId) {
+      if (!ownsLoad()) {
         return DECK_LOAD_OUTCOME.cancelled;
       }
     } catch (error) {
-      if (loadGenerationRef.current !== loadGeneration || currentTrackIdRef.current !== trackId) {
+      if (!ownsLoad()) {
         return DECK_LOAD_OUTCOME.cancelled;
       }
       if (playbackStartLockRef?.current) return DECK_LOAD_OUTCOME.cancelled;
@@ -713,7 +741,69 @@ const Deck = forwardRef(function Deck(
       return DECK_LOAD_OUTCOME.unplayableFile;
     }
 
+    const cachedProgramLevel = normalizeProgramLevel(knownAnalysis?.programLevel);
+    const readinessDecision = decideDeckLoadReadiness({
+      purpose,
+      hasCurrentBasicAnalysis: hadCurrentBasicAnalysis,
+      cachedTrimDb: cachedProgramLevel?.normalization.trimDb ?? null
+    });
+
+    return runDeckPostDecodeLoad({
+      decision: readinessDecision,
+      publishDecoded: (readinessDecision) => {
+      if (!ownsLoad() || audioContext.state !== "running") {
+        if (audioContext.state !== "running") onAudioStartError?.(audioContext.state);
+        return audioContext.state === "running"
+          ? DECK_LOAD_OUTCOME.cancelled
+          : DECK_LOAD_OUTCOME.audioBlocked;
+      }
+      const publication = commitDecodedDeckReadiness({
+        decision: readinessDecision,
+        ownsAuthority: () => ownsLoad() && audioContext.state === "running",
+        applyCachedBasicAnalysis: () => applyAnalysis(
+          {
+            ...knownAnalysis,
+            durationSeconds: decoded.duration,
+            analyzerVersion: knownAnalysis.analyzerVersion
+          },
+          trackId,
+          false
+        ),
+        clearBasicAnalysis: () => {
+          setAnalysisRecord(null);
+          setOriginalBpm(null);
+          setBpmLabel("n/a");
+          setKeyLabel("--");
+          onBpmChange(channel, null);
+        },
+        applyTrim: (trimDb, levelStatus) => {
+          deckEngine.setTrackTrimDb(trimDb);
+          setRuntimeProgramLevel(cachedProgramLevel);
+          setProgramLevelRuntimeStatus(levelStatus);
+        },
+        publishDecodedBuffer: () => deckEngine.loadBuffer(decoded, trackId)
+      });
+      if (publication !== "published") return DECK_LOAD_OUTCOME.cancelled;
+      const readiness = Object.freeze({
+        version: DECK_LOAD_READINESS_VERSION,
+        trackId,
+        loadAuthorityKey: expectedLoadAuthorityKey,
+        timingFacts: readinessDecision.timingFacts,
+        levelTrim: readinessDecision.levelTrim,
+        safeFadeOnly: readinessDecision.safeFadeOnly,
+        reason: readinessDecision.reason,
+        trimDb: readinessDecision.trimDb
+      });
+      loadReadinessRef.current = readiness;
+      setLoadReadiness(readiness);
+      onTrackLoaded?.(channel, trackId, file.name);
+      return DECK_LOAD_OUTCOME.loaded;
+      },
+      runInlineAnalysis: async () => {
+
     let isolatedAnalysisClient = null;
+    let resolvedBasicAnalysis = hadCurrentBasicAnalysis;
+    let resolvedProgramLevel = cachedProgramLevel;
     const analysisClient = () => {
       if (!isolatedAnalysis) return getAnalysisClient();
       if (!isolatedAnalysisClient) {
@@ -738,6 +828,7 @@ const Deck = forwardRef(function Deck(
       } else {
         generatedAnalysis = await analysisClient().analyzeAudioBuffer(decoded);
         if (loadGenerationRef.current !== loadGeneration || currentTrackIdRef.current !== trackId) return DECK_LOAD_OUTCOME.cancelled;
+        resolvedBasicAnalysis = true;
         applyAnalysis(
           { ...generatedAnalysis, analysisOverrides: knownAnalysis?.analysisOverrides },
           trackId
@@ -746,12 +837,17 @@ const Deck = forwardRef(function Deck(
       const activeProgramLevel = normalizeProgramLevel(generatedAnalysis?.programLevel) ??
         normalizeProgramLevel(knownAnalysis?.programLevel);
       if (activeProgramLevel) {
+        if (!ownsLoad()) return DECK_LOAD_OUTCOME.cancelled;
+        resolvedProgramLevel = activeProgramLevel;
         deckEngine.setTrackTrimDb(activeProgramLevel.normalization.trimDb);
+        setRuntimeProgramLevel(activeProgramLevel);
         setProgramLevelRuntimeStatus("ready");
       } else {
         const current = await analysisClient().analyzeAudioBuffer(decoded);
-        if (loadGenerationRef.current !== loadGeneration || currentTrackIdRef.current !== trackId) return DECK_LOAD_OUTCOME.cancelled;
+        if (!ownsLoad()) return DECK_LOAD_OUTCOME.cancelled;
+        resolvedProgramLevel = normalizeProgramLevel(current.programLevel);
         deckEngine.setTrackTrimDb(current.programLevel.normalization.trimDb);
+        setRuntimeProgramLevel(current.programLevel);
         setProgramLevelRuntimeStatus("ready");
         setAnalysisRecord((record) => record ? { ...record, programLevel: current.programLevel } : record);
         if (trackId) onProgramLevelDetected?.(trackId, current.programLevel);
@@ -777,8 +873,10 @@ const Deck = forwardRef(function Deck(
         });
       }
     } catch {
-      if (loadGenerationRef.current !== loadGeneration || currentTrackIdRef.current !== trackId) return DECK_LOAD_OUTCOME.cancelled;
+      if (!ownsLoad()) return DECK_LOAD_OUTCOME.cancelled;
       const failure = programLevelFailurePolicy(hadCurrentBasicAnalysis);
+      resolvedBasicAnalysis = failure.preserveBasicAnalysis;
+      resolvedProgramLevel = null;
       deckEngine.setTrackTrimDb(failure.trimDb);
       setProgramLevelRuntimeStatus(failure.levelStatus);
       if (!failure.preserveBasicAnalysis) {
@@ -793,13 +891,27 @@ const Deck = forwardRef(function Deck(
       }
       isolatedAnalysisClient?.dispose();
     }
-    if (loadGenerationRef.current !== loadGeneration || currentTrackIdRef.current !== trackId) return DECK_LOAD_OUTCOME.cancelled;
+    if (!ownsLoad()) return DECK_LOAD_OUTCOME.cancelled;
     // Publish deck readiness only after the current track has either a valid
     // v2 trim or an explicit neutral fallback. Manual Play cannot observe a
     // ready buffer and then receive a late multi-decibel trim step.
     deckEngine.loadBuffer(decoded, trackId);
+    const inlineReadiness = Object.freeze({
+      version: DECK_LOAD_READINESS_VERSION,
+      trackId,
+      loadAuthorityKey: expectedLoadAuthorityKey,
+      timingFacts: resolvedBasicAnalysis ? "cached-basic" : "none",
+      levelTrim: resolvedProgramLevel ? "cached" : "neutral",
+      safeFadeOnly: !resolvedBasicAnalysis,
+      reason: resolvedProgramLevel ? "cached-analysis" : "level-analysis-pending",
+      trimDb: deckEngine.getTrackTrimDb()
+    });
+    loadReadinessRef.current = inlineReadiness;
+    setLoadReadiness(inlineReadiness);
     onTrackLoaded?.(channel, trackId, file.name);
     return DECK_LOAD_OUTCOME.loaded;
+      }
+    });
   };
 
   const onFileChange = async (event) => {
@@ -969,6 +1081,8 @@ const Deck = forwardRef(function Deck(
     isolatedAnalysisClientRef.current = null;
     loadGenerationRef.current += 1;
     loadAuthorityKeyRef.current = null;
+    loadReadinessRef.current = null;
+    setLoadReadiness(null);
     if (deckEngine.getSnapshot().status !== "preparing") {
       return { cancelledLoad: false, paused: deckEngine.pause(), auxiliaryStopped: !metronomeCancelRef.current };
     }
@@ -979,6 +1093,7 @@ const Deck = forwardRef(function Deck(
     }
     currentTrackIdRef.current = null;
     setAnalysisRecord(null);
+    setRuntimeProgramLevel(null);
     setFileReady(false);
     setTrackName("NO TRACK LOADED");
     setCurrentTimeSec(0);
@@ -1006,6 +1121,7 @@ const Deck = forwardRef(function Deck(
       getTrackName: () => trackName,
       getDeckSnapshot: () => deckEngine.getSnapshot(),
       getAnalysisRecord: () => analysisRecord,
+      getLoadReadiness: () => loadReadinessRef.current,
       getDspSnapshot: () => ({
         trimDb: deckEngine.getTrackTrimDb(),
         eqDb: deckEngine.getEqSnapshot(),
@@ -1045,6 +1161,8 @@ const Deck = forwardRef(function Deck(
         isolatedAnalysisClientRef.current = null;
         loadGenerationRef.current += 1;
         loadAuthorityKeyRef.current = null;
+        loadReadinessRef.current = null;
+        setLoadReadiness(null);
         wavesurferRef.current?.empty?.();
         if (lastObjectUrlRef.current) {
           URL.revokeObjectURL(lastObjectUrlRef.current);
@@ -1056,6 +1174,7 @@ const Deck = forwardRef(function Deck(
         deckEngine.eject();
         currentTrackIdRef.current = null;
         setAnalysisRecord(null);
+        setRuntimeProgramLevel(null);
         setFileReady(false);
         setTrackName("NO TRACK LOADED");
         setCurrentTimeSec(0);

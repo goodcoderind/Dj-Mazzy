@@ -253,7 +253,7 @@ the skip; analysis failure and cancelled/audio-blocked loads never poison a song
 Every automatic preload also owns an exact, at-most-20-second Web Audio clock
 lease. The deadline shortens when needed to preserve five seconds of source-song
 runway; if even a half-second attempt cannot preserve that reserve, Autopilot
-pauses before starting another load. If a read/decode/analysis operation never settles, Mazzy invalidates that exact load,
+pauses before starting another load. If a read/decode operation never settles, Mazzy invalidates that exact load,
 marks the song as “took too long” for this party, and tries the next queue-first
 candidate without touching the playing source. Two consecutive lease expiries
 pause Autopilot and leave the current song playing so the host can retry a song
@@ -354,8 +354,9 @@ the native ordinals and requires a non-final ending to be followed immediately
 by either the source-stopped pause or one exact committed-target fallback
 attempt.
 
-When the opposite deck is already the exact committed preload—decoded,
-level-checked, ready, idle, and bound to the current Party load ordinal—Mazzy
+When the opposite deck is already the exact committed preload—decoded with a
+stable load-time trim (measured or an explicit neutral fallback), ready, idle,
+and bound to the current Party load ordinal—Mazzy
 now makes one bounded fallback start after verified non-final EOF. It starts
 from the beginning at 1×, applies a short target-only gain ramp, and does not
 select, decode, resume audio, infer a cue, or attempt beat matching in this
@@ -379,6 +380,21 @@ errors. The page and its aggregate-only report are excluded
 from normal builds. This closes one composed synthetic continuation seam; it is
 not the full React App, file decoding/analysis, physical output, a sustained
 party, or musical-quality evidence.
+
+Autopilot preload readiness is now decode-first. Once the exact owned local file
+has been read and decoded, the Deck freezes one `deck-load-readiness/v1`
+snapshot for that play: current stored timing and loudness facts are reused when
+valid. The two axes fail closed independently: missing timing removes the grid
+and forces Safe Fade for that play, while missing loudness uses a 0 dB neutral
+trim without discarding otherwise-valid timing. Missing basic, loudness, or enhanced
+analysis no longer consumes the at-most-20-second transport lease and never
+quarantines a playable file. The existing local single-flight background queue
+may enrich the matching library row for a future reload, but it has no authority
+to change the ready or playing Deck's trim, BPM, cue, transition eligibility, or
+committed plan. Exact load generation and opaque authority checks still make
+Stop, Pause, replacement, expiry, recovery, deletion, and unmount win over a
+late decode. No decoded audio, transient job state, or new identifier is added
+to persistence, diagnostics, checkpoints, exports, or a network path.
 
 Tempo-changing phrase blends also remain fail-closed until pitch-preserving
 playback is ready on the exact loaded decks. A developer-only Signalsmith

@@ -44,6 +44,7 @@ export type TransitionTrack = BeatGridAnalysis & {
   analyzerVersion?: string | null;
   schemaVersion?: string | null;
   analysisStatus?: string | null;
+  forceSafeFadeOnly?: boolean;
   energyByBeat?: number[];
   vocalProbabilityByBeat?: number[];
   bandEnergyByBeat?: Array<{ low: number; mid: number; high: number }>;
@@ -195,6 +196,7 @@ export const planAutomaticTransition = (
   const sourceGrid = buildEffectiveBeatGrid(source);
   const targetGrid = buildEffectiveBeatGrid(target);
   const reasons: string[] = [];
+  const forceSafeFadeOnly = source.forceSafeFadeOnly === true || target.forceSafeFadeOnly === true;
   const sourceNaturalBpm = sourceGrid.bpm;
   const targetNaturalBpm = targetGrid.bpm;
   const sourcePlaybackRate = Number.isFinite(sourceDeck.playbackRate) && sourceDeck.playbackRate > 0
@@ -210,6 +212,9 @@ export const planAutomaticTransition = (
 
   if (source.analysisOverrides?.autoMixDisabled || target.analysisOverrides?.autoMixDisabled) {
     reasons.push("A track is disabled for Auto Mix.");
+  }
+  if (forceSafeFadeOnly) {
+    reasons.push("This loaded deck has no trusted timing facts for this play.");
   }
   if (sourceGrid.isManual || targetGrid.isManual) {
     reasons.push("A manually repaired grid is not calibrated for long blends.");
@@ -323,6 +328,7 @@ export const planAutomaticTransition = (
   }
 
   const manualOrDisabled =
+    forceSafeFadeOnly ||
     source.analysisOverrides?.autoMixDisabled || target.analysisOverrides?.autoMixDisabled ||
     sourceGrid.isManual || targetGrid.isManual;
   if (

@@ -2504,6 +2504,40 @@ These are the active backlog, not reasons to discard the prototype.
   has passed. The page is absent from normal artifacts and its Stop/pagehide
   paths revoke both Deck sources and the AudioContext.
 
+- **D-069 — Make Autopilot transport readiness decode-first and analysis-deferred:**
+  `deck-load-readiness/v1` separates manual loads from exact Autopilot preloads.
+  Manual loads retain the existing inline analysis contract. An Autopilot-owned
+  load, however, publishes immediately after successful read/decode using one
+  immutable per-load fact set: current stored basic analysis when valid,
+  otherwise no trusted grid and Safe Fade only; independently, current valid
+  program-level trim when available, otherwise an explicit 0 dB neutral trim
+  without suppressing valid cached timing. Trim and planning
+  facts are installed before `DeckEngine.loadBuffer`, so readiness never precedes
+  the load's stable DSP decision.
+
+  The Autopilot path creates no Deck-owned analysis worker and starts no enhanced
+  analysis continuation. Missing or failed analysis cannot become an
+  `unplayable-file` outcome, quarantine a decodable song, or consume the bounded
+  preload lease. The existing local single-flight queue remains the only owner
+  of missing enrichment and may update only the current library row with the
+  same track ID, normalized content identity (or identical File object for a
+  legacy identity-less row), analysis generation, and deletion state. Those
+  results apply on a future reload; they cannot mutate a loaded
+  Deck's trim, BPM, cue, transition eligibility, or committed plan.
+
+  Load generation, exact track identity, the opaque D-065 authority key,
+  playback-recovery lock, and running AudioContext are rechecked before cached
+  facts, trim, buffer publication, and the loaded settlement. The final trim
+  proof allows only 0.0001 dB for the AudioParam float32 gain round-trip, far
+  below the 0.1 dB policy step. Stop, Pause,
+  source replacement, expiry, recovery, deletion, clear, and unmount therefore
+  leave late decode settlement inert. The readiness object is runtime-only; no
+  IndexedDB, analysis, trace, transition, checkpoint, export, or network schema
+  changed. Focused tests include a never-settling unrelated analysis promise,
+  cached and neutral decision matrices, authority loss before publication, and
+  stale/removed/content-replaced background settlements. Browser decoding and
+  sustained device behavior remain separate gates.
+
 ### Open questions
 
 - **Q-001:** Remain browser/PWA-first through launch, or package a desktop app

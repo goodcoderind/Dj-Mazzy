@@ -101,8 +101,10 @@ import { createPartyWakeLockController } from "./power/partyWakeLock";
 import { audioRecoveryMessage, needsHostAudioRecovery } from "./audio/audioContextRecovery";
 import { OUTPUT_DEVICE_RECOVERY_MESSAGE, supportsOutputDeviceChangeMonitoring } from "./audio/outputDeviceRecovery";
 import { DECK_LOAD_OUTCOME, shouldQuarantineAutoPilotLoad } from "./audio/deckLoadOutcome";
+import { DECK_LOAD_PURPOSE, ownsDeckLoadReadiness } from "./audio/deckLoadReadiness";
 import { normalizeProgramLevel } from "./analysis/programLevel";
 import { applyQueuedAnalysisFailure } from "./analysis/analysisQueueSettlement";
+import { ownsQueuedAnalysisLibraryRow, shouldRequeueReplacementAnalysis } from "./analysis/analysisQueueOwnership";
 import { runPartyStopAllSound, verifyPartyStopAllSound } from "./planning/partyStopAllSound";
 
 const audioExt = [".mp3", ".wav", ".flac", ".aiff", ".m4a"];
@@ -1371,6 +1373,17 @@ export default function App() {
   const analyzeQueuedTrack = async (track, generation) => {
     const needsBasicAnalysis = !hasCurrentBasicAnalysis(track);
     const needsProgramLevel = !normalizeProgramLevel(track.programLevel);
+    const expectedContentIdentity = normalizeContentIdentity(track.contentIdentity);
+    const ownsCurrentLibraryRow = (item) =>
+      ownsQueuedAnalysisLibraryRow({
+        expectedTrackId: track.id,
+        expectedContentIdentity,
+        currentTrackId: item.id,
+        currentContentIdentity: item.contentIdentity,
+        expectedFile: track.file,
+        currentFile: item.file,
+        removed: removedTrackIdsRef.current.has(track.id)
+      });
     setAnalyzingIds((prev) => ({ ...prev, [track.id]: true }));
     try {
       const decoded = await decodeForAnalysis(track.file);
@@ -1390,16 +1403,22 @@ export default function App() {
         try {
           enhancedResult = await analyzeEnhancedRhythm(decoded, undefined, track.id);
           if (generation !== analysisGenerationRef.current) return;
-          setEnhancedFailureByTrack((current) => ({ ...current, [track.id]: false }));
+          const currentRow = libraryRef.current.find((item) => item.id === track.id);
+          if (currentRow && ownsCurrentLibraryRow(currentRow)) {
+            setEnhancedFailureByTrack((current) => ({ ...current, [track.id]: false }));
+          }
         } catch {
-          setEnhancedFailureByTrack((current) => ({ ...current, [track.id]: true }));
+          const currentRow = libraryRef.current.find((item) => item.id === track.id);
+          if (currentRow && ownsCurrentLibraryRow(currentRow)) {
+            setEnhancedFailureByTrack((current) => ({ ...current, [track.id]: true }));
+          }
           // Basic automatic analysis and Safe Fade remain available.
         }
       }
       if (generation !== analysisGenerationRef.current) return;
       setLibrary((prev) =>
         prev.map((item) =>
-          item.id === track.id && !removedTrackIdsRef.current.has(track.id)
+          ownsCurrentLibraryRow(item)
             ? (() => {
                 let current = basicResult
                   ? { ...mergeGeneratedAnalysis(item, basicResult), programLevelStatus: "ready" }
@@ -1415,7 +1434,7 @@ export default function App() {
       if (generation !== analysisGenerationRef.current) return;
       setLibrary((prev) =>
         prev.map((item) =>
-          item.id === track.id && !removedTrackIdsRef.current.has(track.id)
+          ownsCurrentLibraryRow(item)
             ? applyQueuedAnalysisFailure(item, needsBasicAnalysis, needsProgramLevel)
             : item
         )
@@ -1424,6 +1443,27 @@ export default function App() {
       if (generation === analysisGenerationRef.current) {
         queuedAnalysisIdsRef.current.delete(track.id);
         setAnalyzingIds((prev) => ({ ...prev, [track.id]: false }));
+        const replacement = libraryRef.current.find((item) => item.id === track.id);
+        const replacementNeedsAnalysis = Boolean(replacement &&
+          (!hasCurrentBasicAnalysis(replacement) ||
+            (!normalizeProgramLevel(replacement.programLevel) && replacement.programLevelStatus !== "failed") ||
+            (enhancedTimingAvailable === true && !hasCurrentEnhancedRhythm(replacement))) &&
+          replacement.analysisStatus !== "failed");
+        if (shouldRequeueReplacementAnalysis({
+          removed: removedTrackIdsRef.current.has(track.id),
+          currentRowPresent: Boolean(replacement),
+          previousJobStillOwnsRow: Boolean(replacement && ownsCurrentLibraryRow(replacement)),
+          needsAnalysis: replacementNeedsAnalysis
+        })) {
+          queueMicrotask(() => {
+            if (generation !== analysisGenerationRef.current || removedTrackIdsRef.current.has(track.id)) return;
+            const currentReplacement = libraryRef.current.find((item) => item.id === track.id);
+            if (!currentReplacement || currentReplacement.file !== replacement.file ||
+              normalizeContentIdentity(currentReplacement.contentIdentity) !==
+                normalizeContentIdentity(replacement.contentIdentity)) return;
+            queueBackgroundAnalysis(currentReplacement);
+          });
+        }
       }
     }
   };
@@ -2275,7 +2315,11 @@ export default function App() {
       track.file,
       track.id,
       track,
-      { isolatedAnalysis: autoPilotOwned, loadAuthorityKey }
+      {
+        isolatedAnalysis: autoPilotOwned,
+        loadAuthorityKey,
+        purpose: autoPilotOwned ? DECK_LOAD_PURPOSE.autoPilotPreload : DECK_LOAD_PURPOSE.manual
+      }
     ) ?? DECK_LOAD_OUTCOME.cancelled;
     if (outcome === DECK_LOAD_OUTCOME.loaded) {
       setLoadedByDeck((prev) => ({ ...prev, [deck]: track.id }));
@@ -2365,15 +2409,19 @@ export default function App() {
     if (!sourceSnapshot || !targetSnapshot) return { status: "unavailable", sourceDeck, targetDeck };
     const sourceAnalysis = sourceRef.current.getAnalysisRecord?.();
     const targetAnalysis = targetRef.current.getAnalysisRecord?.();
+    const sourceReadiness = sourceRef.current.getLoadReadiness?.();
+    const targetReadiness = targetRef.current.getLoadReadiness?.();
     const plan = planAutomaticTransition({
       requestedAt: getAudioEngine().clock.now(),
       source: {
         ...(sourceAnalysis ?? {}),
+        forceSafeFadeOnly: sourceReadiness?.safeFadeOnly === true,
         trackId: sourceSnapshot.trackId,
         duration: sourceSnapshot.durationSeconds
       },
       target: {
         ...(targetAnalysis ?? {}),
+        forceSafeFadeOnly: targetReadiness?.safeFadeOnly === true,
         trackId: targetSnapshot.trackId,
         duration: targetSnapshot.durationSeconds
       },
@@ -3689,7 +3737,8 @@ export default function App() {
           durationSeconds: Number(sourceSnapshot?.durationSeconds ?? 0),
           positionSeconds: Number(sourceSnapshot?.positionSeconds ?? 0),
           playbackRate: Number(sourceSnapshot?.playbackRate ?? 1),
-          analysis: sourceRef.current?.getAnalysisRecord?.() ?? null
+          analysis: sourceRef.current?.getAnalysisRecord?.() ?? null,
+          forceSafeFadeOnly: sourceRef.current?.getLoadReadiness?.()?.safeFadeOnly === true
         },
         target: {
           deck: targetDeck,
@@ -3700,7 +3749,8 @@ export default function App() {
           durationSeconds: Number(targetSnapshot?.durationSeconds ?? 0),
           positionSeconds: Number(targetSnapshot?.positionSeconds ?? 0),
           playbackRate: Number(targetSnapshot?.playbackRate ?? 1),
-          analysis: targetRef.current?.getAnalysisRecord?.() ?? null
+          analysis: targetRef.current?.getAnalysisRecord?.() ?? null,
+          forceSafeFadeOnly: targetRef.current?.getLoadReadiness?.()?.safeFadeOnly === true
         },
         queueTrackIds: queue,
         library,
@@ -3813,6 +3863,7 @@ export default function App() {
           startedAtSeconds: now,
           deadlineSeconds: decision.preloadDeadlineSeconds
         });
+        const preloadLoadAuthorityKey = autoPilotPreloadLoadAuthorityKey(preloadLease);
         autoPilotPreloadLeaseRef.current = preloadLease;
         partyPendingLoadByDeckRef.current = {
           ...partyPendingLoadByDeckRef.current,
@@ -3848,7 +3899,7 @@ export default function App() {
         try {
           const loadOutcome = await loadTrackToDeck(targetDeck, nextTrack, {
             autoPilotOwned: true,
-            loadAuthorityKey: autoPilotPreloadLoadAuthorityKey(preloadLease)
+            loadAuthorityKey: preloadLoadAuthorityKey
           });
           if (!autoPilotEnabledRef.current ||
             !ownsPartyAutopilotTick(partyAutopilotTickBoundaryRef.current, ticket)) return;
@@ -3856,6 +3907,13 @@ export default function App() {
           const settledAtSeconds = engine.clock.now();
           const loaded = loadOutcome === DECK_LOAD_OUTCOME.loaded;
           const targetSnapshot = targetRef.current?.getDeckSnapshot?.();
+          const targetReadiness = targetRef.current?.getLoadReadiness?.();
+          const readinessCurrent = loaded && ownsDeckLoadReadiness({
+            value: targetReadiness,
+            trackId: nextTrack.id,
+            loadAuthorityKey: preloadLoadAuthorityKey,
+            appliedTrimDb: targetRef.current?.getDspSnapshot?.()?.trimDb
+          });
           const stillEligible = buildAutoPilotPlanningIds(
             queueRef.current,
             libraryRef.current,
@@ -3869,6 +3927,7 @@ export default function App() {
             autoPilotEnabled: autoPilotEnabledRef.current && sourceStillOwned() &&
               !playbackRecoveryLockedRef.current,
             operationCurrent: ownsAutoPilotPreloadLease(autoPilotPreloadLeaseRef.current, preloadLease),
+            readinessCurrent,
             stillEligible,
             requestedTrackId: nextTrack.id,
             targetTrackId: targetSnapshot?.trackId ?? null,
@@ -3885,6 +3944,10 @@ export default function App() {
           }
           consecutiveAutoPilotPreloadTimeoutsRef.current = 0;
           if (shouldCommitAutoPilotPreload(settlement)) {
+            const safeFadeOnly = targetReadiness?.version === "deck-load-readiness/v1" &&
+              targetReadiness.safeFadeOnly === true;
+            const neutralLevel = targetReadiness?.version === "deck-load-readiness/v1" &&
+              targetReadiness.levelTrim === "neutral";
             partyCommittedPreloadByDeckRef.current = {
               ...partyCommittedPreloadByDeckRef.current,
               [targetDeck]: {
@@ -3900,9 +3963,20 @@ export default function App() {
               name: nextTrack.name,
               afterNextId: decision.afterNextTrackId,
               afterNextName: libraryRef.current.find((track) => track.id === decision.afterNextTrackId)?.name ?? null,
-              reasons: decision.reasons
+              reasons: safeFadeOnly
+                ? [
+                    "Next song ready with a conservative Safe Fade.",
+                    ...decision.reasons
+                  ]
+                : neutralLevel
+                  ? ["Next song ready with current timing · no loudness trim for this play.", ...decision.reasons]
+                  : decision.reasons
             });
-            showToast(`Autopilot planned two songs ahead · ${decision.reasons[0] ?? "Queue order preserved."}`);
+            showToast(safeFadeOnly
+              ? "Next song ready · conservative Safe Fade"
+              : neutralLevel
+                ? "Next song ready · no loudness trim for this play"
+                : `Autopilot planned two songs ahead · ${decision.reasons[0] ?? "Queue order preserved."}`);
           } else if (shouldDiscardSettledAutoPilotPreload(settlement)) {
             recordPreloadSettlement(settlement.operationCurrent ? "discarded" : "superseded");
             targetRef.current?.eject?.();

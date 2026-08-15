@@ -31,6 +31,7 @@ export type AutoPilotDeckObservation = Readonly<{
   positionSeconds: number;
   playbackRate: number;
   analysis?: Partial<TransitionTrack> | null;
+  forceSafeFadeOnly?: boolean;
 }>;
 
 export type AutoPilotPreloadLease = Readonly<{
@@ -120,6 +121,7 @@ const validObservation = (observation: AutoPilotDeckObservation) =>
   finiteNonNegative(observation.durationSeconds) &&
   finiteNonNegative(observation.positionSeconds) &&
   Number.isFinite(observation.playbackRate) && observation.playbackRate > 0 &&
+  (observation.forceSafeFadeOnly == null || typeof observation.forceSafeFadeOnly === "boolean") &&
   observation.positionSeconds <= observation.durationSeconds + 0.001;
 
 const transitionTrack = (
@@ -127,6 +129,7 @@ const transitionTrack = (
   fallbackId: string
 ): TransitionTrack => ({
   ...(observation.analysis ?? {}),
+  forceSafeFadeOnly: observation.forceSafeFadeOnly === true,
   trackId: observation.trackId ?? fallbackId,
   duration: observation.durationSeconds
 });

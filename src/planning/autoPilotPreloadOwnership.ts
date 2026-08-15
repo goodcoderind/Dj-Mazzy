@@ -2,6 +2,7 @@ export type AutoPilotPreloadSettlement = Readonly<{
   loaded: boolean;
   autoPilotEnabled: boolean;
   operationCurrent: boolean;
+  readinessCurrent: boolean;
   stillEligible: boolean;
   requestedTrackId: string;
   targetTrackId: string | null;
@@ -161,6 +162,7 @@ export const shouldCommitAutoPilotPreload = (settlement: AutoPilotPreloadSettlem
   settlement.loaded &&
   settlement.autoPilotEnabled &&
   settlement.operationCurrent &&
+  settlement.readinessCurrent &&
   settlement.stillEligible &&
   settlement.targetTrackId === settlement.requestedTrackId &&
   !settlement.targetPlaying;
