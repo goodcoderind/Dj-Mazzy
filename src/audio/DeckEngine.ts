@@ -196,6 +196,12 @@ export class DeckEngine {
     return this.activePlaybackBackend;
   }
 
+  hasNativePlaybackCompletionAuthority() {
+    const runtime = this.nativeCompletion;
+    return Boolean(runtime && this.source === runtime.source && this.activePlaybackBackend === "native" &&
+      ownsDeckPlaybackCompletionLease(this.nativeCompletion?.lease, runtime.lease));
+  }
+
   prepareKeyLock(): Promise<boolean> {
     if (!this.buffer) return Promise.resolve(false);
     if (this.keyLockState.status === "ready") return Promise.resolve(true);

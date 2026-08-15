@@ -2472,6 +2472,38 @@ These are the active backlog, not reasons to discard the prototype.
   time, error text, audio, device value, persistence field, export, or network
   path was added.
 
+- **D-068 — Compose native EOF through the production fallback audio transaction in a browser:**
+  `party-committed-target-audio-transaction/v1` now owns the mutation sequence
+  shared by App and the diagnostics runner: observe the exact ready/idle 1×
+  target and its current deck gain, mute it, schedule a zero-offset native start
+  with a render guard, install the owned 80 ms target ramp, verify the exact
+  active postcondition, and revoke the operation. Every early rejection revokes
+  the operation even before audio mutation. A post-mutation failure revokes
+  first, then pauses and restores gain only while the same exact target remains;
+  inability to prove inactivity, 1× rate, and restored gain keeps D-067's Stop
+  recovery lock.
+
+  The diagnostics-only `/party-continuation-diagnostic.html` runner composes a
+  real DeckEngine native natural completion, D-066 Party ingestion, D-067 exact
+  committed-target choice, that production audio transaction, a second native
+  completion owner, and the post-master AudioWorklet health observer. Its strict
+  `party-continuation-browser-report/v1` contains only fixed enums, safe counts,
+  bounded relative timing/level metrics, and failure codes—never track IDs,
+  filenames, audio, raw clock timestamps, error text, persistence, export, or a
+  network path. A fresh 48 kHz Chromium run passed with one on-time source
+  callback, one zero-offset target start, the 80 ms ramp, a 35 ms scheduled
+  EOF-to-start gap,
+  exact source inactivity/target activity, an installed target native-completion
+  owner, the completed target gain, and 48,000 healthy monitored frames with an
+  86 ms longest unexpected-silence interval and zero non-finite/clipped samples
+  or processor errors.
+
+  This is deliberately a composed synthetic state/audio-ownership gate, not a
+  third Party simulator and not a claim that the React App, file decoding,
+  analysis, background throttling, output hardware, or a sustained real party
+  has passed. The page is absent from normal artifacts and its Stop/pagehide
+  paths revoke both Deck sources and the AudioContext.
+
 ### Open questions
 
 - **Q-001:** Remain browser/PWA-first through launch, or package a desktop app

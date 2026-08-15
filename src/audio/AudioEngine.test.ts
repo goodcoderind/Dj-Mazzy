@@ -863,6 +863,7 @@ describe("DeckEngine", () => {
     deck.subscribePlaybackCompletion((event) => completions.push(event));
     deck.loadBuffer({ duration: 2 } as AudioBuffer, "short");
     deck.play(0, 10);
+    expect(deck.hasNativePlaybackCompletionAuthority()).toBe(true);
     const source = context.sources.at(-1)!;
     const primary = source.onended;
 
@@ -871,6 +872,7 @@ describe("DeckEngine", () => {
     primary?.();
 
     expect(deck.getSnapshot().status).toBe("ended");
+    expect(deck.hasNativePlaybackCompletionAuthority()).toBe(false);
     expect(completions).toEqual([expect.objectContaining({
       channel: "a",
       trackId: "short",

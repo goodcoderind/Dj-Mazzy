@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Mazzy · Party Continuation Diagnostic</title>
+    <style>
+      :root { color-scheme: dark; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+      body { margin: 0; background: #090909; color: #ddd; }
+      main { max-width: 780px; margin: 0 auto; padding: 40px 24px; }
+      h1 { margin: 0 0 12px; font-size: 22px; }
+      p { color: #aaa; line-height: 1.55; }
+      .actions { display: flex; gap: 10px; flex-wrap: wrap; }
+      button { min-height: 44px; padding: 10px 16px; border: 1px solid #c8a96e; background: #151515; color: #eee; font: inherit; }
+      button:disabled { opacity: .45; }
+      .pass { color: #8bd6a4; } .fail { color: #ff929f; }
+      pre { overflow: auto; padding: 12px; border: 1px solid #303030; background: #111; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Party continuation browser diagnostic</h1>
+      <p>This development-only check plays quiet synthetic tones. It composes Mazzy’s native deck completion owner, Party completion ingestion, exact committed-target decision, and production fallback audio transaction through the real Web Audio engine. It is excluded from normal builds. It does not use music files, upload or save anything, simulate the full React App, or prove speaker/device performance.</p>
+      <div class="actions">
+        <button id="run" type="button">RUN SYNTHETIC CONTINUATION</button>
+        <button id="stop" type="button" disabled>STOP</button>
+      </div>
+      <p id="status" role="status">Ready. The browser will ask for an audio gesture.</p>
+      <pre id="report">No run yet.</pre>
+    </main>
+    <script type="module" src="/src/diagnostics/partyContinuationDiagnosticPage.ts"></script>
+  </body>
+</html>

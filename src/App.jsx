@@ -28,6 +28,7 @@ import { assessPartyReadiness } from "./planning/partyReadiness";
 import { decideRescueTransition } from "./planning/rescueTransition";
 import { decidePartyDeckCompletion } from "./planning/partyDeckCompletionIngestion";
 import { decidePartyCommittedTargetContinuation } from "./planning/partyCommittedTargetContinuation";
+import { runPartyCommittedTargetAudioTransaction } from "./audio/partyCommittedTargetContinuationAudio";
 import { isTimingReviewCurrent, normalizeTimingReview } from "./domain/timingReview";
 import {
   analyzeEnhancedRhythm,
@@ -1897,8 +1898,7 @@ export default function App() {
           sourceTrackId: endedIdentity.trackId,
           sourceLoadOrdinal: endedIdentity.loadOrdinal,
           targetTrackId: committedTarget.trackId,
-          targetLoadOrdinal: committedTarget.loadOrdinal,
-          targetGainBeforeAttempt
+          targetLoadOrdinal: committedTarget.loadOrdinal
         });
         const ownsLease = () => {
           const current = partyFallbackContinuationRef.current;
@@ -1937,18 +1937,39 @@ export default function App() {
           });
           endedEventRecorded = true;
         }
-        try {
-          if (!ownsLease()) throw new Error("fallback continuation authority expired");
-          targetRef.current?.setGain?.(0);
-          const startTime = engine.clock.now() + Math.max(0.03, 256 / engine.context.sampleRate);
-          const started = targetRef.current?.playReadyAtIfRunning?.(startTime, 0, ownsLease);
-          if (!started || !ownsLease()) throw new Error("committed target did not start");
-          engine.scheduleDeckGainCurve(targetDeck, new Float32Array([0, 1]), started.scheduledStart, 0.08, ownsLease);
-          const startedSnapshot = targetRef.current?.getDeckSnapshot?.();
-          if (!ownsLease() || startedSnapshot?.trackId !== lease.targetTrackId ||
-            !targetRef.current?.isPlaying?.()) throw new Error("committed target start was not verified");
-
-          partyFallbackContinuationRef.current = null;
+        const audioResult = runPartyCommittedTargetAudioTransaction({
+          sampleRate: engine.context.sampleRate,
+          now: () => engine.clock.now(),
+          authority: ownsLease,
+          revokeAuthority: () => {
+            if (partyFallbackContinuationRef.current === lease) {
+              partyFallbackContinuationRef.current = null;
+            }
+          },
+          getSnapshot: () => targetRef.current?.getDeckSnapshot?.() ?? null,
+          isActive: () => Boolean(targetRef.current?.isPlaying?.()),
+          isExactTarget: (snapshot) => {
+            const currentTarget = partyLoadByDeckRef.current[targetDeck];
+            return snapshot?.trackId === lease.targetTrackId &&
+              currentTarget?.trackId === lease.targetTrackId &&
+              currentTarget.loadOrdinal === lease.targetLoadOrdinal;
+          },
+          getGain: () => engine.getDeckGain(targetDeck),
+          setGain: (gain) => {
+            if (!targetRef.current?.setGain) throw new Error("target gain unavailable");
+            targetRef.current.setGain(gain);
+          },
+          playReadyAtIfRunning: (startTime, offsetSeconds, authority) =>
+            targetRef.current?.playReadyAtIfRunning?.(startTime, offsetSeconds, authority) ?? null,
+          scheduleGainCurve: (curve, startTime, durationSeconds, authority) =>
+            engine.scheduleDeckGainCurve(targetDeck, curve, startTime, durationSeconds, authority),
+          pause: () => {
+            if (!targetRef.current?.pause) throw new Error("target pause unavailable");
+            targetRef.current.pause();
+          }
+        });
+        fallbackCleanupConfirmed = audioResult.cleanupConfirmed;
+        if (audioResult.status === "scheduled") {
           partyPlayedLoadsRef.current.add(`${committedTarget.trackOrdinal}:${committedTarget.loadOrdinal}`);
           recordPartyEvent({ type: "fallback-settled", operation, outcome: "scheduled", pauseRequired: false });
           partyCommittedPreloadByDeckRef.current = {
@@ -1967,28 +1988,8 @@ export default function App() {
           setAutoPilotChoice(null);
           showToast("Ready next song started · a short gap may have occurred");
           return;
-        } catch {
-          partyFallbackContinuationRef.current = null;
-          try {
-            const currentTarget = partyLoadByDeckRef.current[targetDeck];
-            const currentSnapshot = targetRef.current?.getDeckSnapshot?.();
-            const exactTarget = currentTarget?.trackId === lease.targetTrackId &&
-              currentTarget.loadOrdinal === lease.targetLoadOrdinal &&
-              currentSnapshot?.trackId === lease.targetTrackId;
-            if (exactTarget) {
-              targetRef.current?.pause?.();
-              targetRef.current?.setGain?.(lease.targetGainBeforeAttempt);
-              const restoredSnapshot = targetRef.current?.getDeckSnapshot?.();
-              if (targetRef.current?.isPlaying?.() || restoredSnapshot?.playbackRate !== 1 ||
-                Math.abs(engine.getDeckGain(targetDeck) - lease.targetGainBeforeAttempt) > 1e-6) {
-                fallbackCleanupConfirmed = false;
-              }
-            } else {
-              fallbackCleanupConfirmed = false;
-            }
-          } catch { fallbackCleanupConfirmed = false; }
-          recordPartyEvent({ type: "fallback-settled", operation, outcome: "failed", pauseRequired: true });
         }
+        recordPartyEvent({ type: "fallback-settled", operation, outcome: "failed", pauseRequired: true });
       }
     }
 

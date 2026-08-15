@@ -367,6 +367,19 @@ This is a best-effort continuation and a short audible gap may occur—it is not
 seamless or gapless playback. Soak v12 covers both the ordinary pause and the
 exact committed-target continuation through the shared pure decisions.
 
+The diagnostics-only `/party-continuation-diagnostic.html` page now composes
+the real native DeckEngine completion callback, Party-session ingestion,
+committed-target decision, and the same production fallback audio transaction
+through a running AudioContext. A fresh 48 kHz synthetic browser run observed
+one source completion, one target start from offset zero, the owned 80 ms gain
+ramp, a 35 ms scheduled EOF-to-start gap, an active native completion owner on
+the target, and one second of post-master health with an 86 ms longest
+unexpected-silence interval and no non-finite or clipped samples or processor
+errors. The page and its aggregate-only report are excluded
+from normal builds. This closes one composed synthetic continuation seam; it is
+not the full React App, file decoding/analysis, physical output, a sustained
+party, or musical-quality evidence.
+
 Tempo-changing phrase blends also remain fail-closed until pitch-preserving
 playback is ready on the exact loaded decks. A developer-only Signalsmith
 AudioWorklet spike now passes local 44.1 and 48 kHz synthetic smoke checks at 0.94×,
@@ -674,6 +687,11 @@ npm run preview:diagnostics
 Then open `/key-lock-benchmark.html`. It uses generated synthetic audio only and
 does not unlock live phrase blends. Add `?sampleRate=44100` to run the separate
 44.1 kHz check; the default is 48 kHz.
+
+Open `/party-continuation-diagnostic.html` for the short audible synthetic
+native-EOF continuation check. It uses no music files and exposes an explicit
+Stop action; its report stays in the page and must not be treated as a full
+Party Autopilot or speaker-output test.
 
 The real-track command reads `~/Desktop/music small` by default and writes only
 to external private application storage outside the repository and Vite root. See

@@ -17,6 +17,7 @@ const htmlInputs = {
         "key-lock-crossfade-diagnostic": path.join(workspaceRoot, "key-lock-crossfade-diagnostic.html"),
         "key-lock-listening": path.join(workspaceRoot, "key-lock-listening.html"),
         "master-peak-guard-listening": path.join(workspaceRoot, "master-peak-guard-listening.html"),
+        "party-continuation-diagnostic": path.join(workspaceRoot, "party-continuation-diagnostic.html"),
         "party-level-listening": path.join(workspaceRoot, "party-level-listening.html"),
         "transition-rehearsal-diagnostic": path.join(workspaceRoot, "transition-rehearsal-diagnostic.html")
       }
