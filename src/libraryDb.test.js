@@ -180,6 +180,13 @@ describe("library recovery storage", () => {
     expect((await loadLibraryRecoveryBundle()).checkpointRecord).toBeNull();
   });
 
+  it("rejects an already-aborted startup hydration before reading local rows", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    await expect(loadLibraryRecoveryBundle({ signal: controller.signal }))
+      .rejects.toMatchObject({ name: "AbortError" });
+  });
+
   it("releases an aborted queue waiter without running it after the predecessor settles", async () => {
     const queue = createAbortableMutationQueue();
     let releaseFirst;

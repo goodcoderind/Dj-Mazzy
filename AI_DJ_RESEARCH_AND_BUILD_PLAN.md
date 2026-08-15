@@ -2656,6 +2656,36 @@ These are the active backlog, not reasons to discard the prototype.
   revocation. Real crash durability, browser suspension, storage
   eviction, and physical-device behavior remain separate gates.
 
+- **D-073 — Bound startup library/recovery hydration before unlocking the host UI:**
+  `library-hydration-runtime/v1` gives the one startup recovery-bundle read an
+  immutable epoch, operation, monotonic start/deadline, and AbortSignal. Only
+  its exact on-time settlement may atomically publish restored tracks, library
+  revision, checkpoint revision/recovery state, and then release the initial
+  library/playback lock. A stale retry, unmount settlement, late error, or late
+  success is inert.
+
+  The 30-second boundary covers waiting for the cached IndexedDB open and the
+  exact readonly track/meta/checkpoint transaction. Once that transaction
+  exists, abort cancels it and removes its listener. Browser database-open
+  requests are not themselves cancellable, so a timeout revokes application
+authority, retains the fail-closed library lock, and shows a focused
+**Reload Local Music** action instead of starting another open in the same
+document. An ordinary on-time rejection retains the existing bounded-owner
+**Retry Opening Local Music** flow. The visible polite opening status and the
+same synchronous lock cover Party actions plus direct Deck load/start/timing
+controls, while Pause and **Stop All Sound** remain available. Both retryable
+and reload-required failures focus their persistent alert. No File, Blob, filename, raw error,
+  checkpoint payload, or operation timing is added to persistence, trace,
+  report, export, or network paths; no stored schema changes.
+
+  Deterministic tests cover exact on-time commit, exact-deadline abort, late
+  success after timeout, ordinary retryable failure, unmount/retry revocation,
+  malformed owner/clock rejection, and pre-aborted storage access. Existing
+  recovery-bundle tests still prove valid library/checkpoint hydration. This is
+  a startup-liveness and ownership gate, not browser durability evidence. The
+  later paused-plan claim and routine analysis-row persistence remain explicit
+  follow-up storage-liveness slices.
+
 ### Open questions
 
 - **Q-001:** Remain browser/PWA-first through launch, or package a desktop app

@@ -113,6 +113,7 @@ import {
 } from "./diagnostics/partyAutopilotTrace";
 import { assessImportCapacity, formatStorageSize } from "./storage/importCapacity";
 import { identifyLocalFile, normalizeContentIdentity } from "./storage/contentIdentity";
+import { ownsLibraryHydration, startLibraryHydration } from "./storage/libraryHydrationRuntime";
 import {
   createPartyCheckpointClearOwner,
   createPartyCheckpointWriteRuntime,
@@ -313,6 +314,7 @@ export default function App() {
   const [librarySaveStatus, setLibrarySaveStatus] = useState("idle");
   const [libraryMutationBusy, setLibraryMutationBusy] = useState(true);
   const [libraryStorageError, setLibraryStorageError] = useState("");
+  const [libraryHydrationCircuitOpen, setLibraryHydrationCircuitOpen] = useState(false);
   const [libraryAnalysisSaveError, setLibraryAnalysisSaveError] = useState("");
   const [backgroundAnalysisNotice, setBackgroundAnalysisNotice] = useState(null);
   const [libraryTimingSaveErrors, setLibraryTimingSaveErrors] = useState({});
@@ -419,6 +421,12 @@ export default function App() {
   const libraryMutationBusyRef = useRef(true);
   const libraryMutationModeRef = useRef("hydrating");
   const libraryHydrationGenerationRef = useRef(0);
+  const libraryHydrationOperationRef = useRef(0);
+  const libraryHydrationOwnerRef = useRef(null);
+  const libraryHydrationCancelRef = useRef(null);
+  const libraryHydrationRetryRequestedRef = useRef(false);
+  const libraryHydrationStatusRef = useRef(null);
+  const libraryStorageAlertRef = useRef(null);
   const libraryImportGenerationRef = useRef(0);
   const audioOutputWatchArmedRef = useRef(false);
   const outputDeviceGenerationRef = useRef(0);
@@ -912,45 +920,77 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (libraryHydrationCircuitOpen) return undefined;
     const hydrationGeneration = ++libraryHydrationGenerationRef.current;
+    const hydration = startLibraryHydration({
+      epoch: hydrationGeneration,
+      operation: ++libraryHydrationOperationRef.current,
+      task: (signal) => loadLibraryRecoveryBundle({ signal }),
+      ownsAuthority: (owner) => ownsLibraryHydration(libraryHydrationOwnerRef.current, owner)
+    });
+    libraryHydrationOwnerRef.current = hydration.owner;
+    libraryHydrationCancelRef.current = hydration.cancel;
     const restore = async () => {
       let restored = false;
-      try {
-        const bundle = await loadLibraryRecoveryBundle();
-        if (hydrationGeneration !== libraryHydrationGenerationRef.current) return;
-        const restoredLibrary = bundle.tracks.map(restorePersistedTrack);
-        libraryStateRef.current = bundle.libraryState;
-        const normalizedCheckpoint = normalizePartySessionCheckpointRecord(bundle.checkpointRecord);
-        partyCheckpointStoredRecordRef.current = normalizedCheckpoint;
-        partyCheckpointRevisionRef.current = bundle.checkpointRevision;
-        const checkpointRecovery = reconcilePartySessionCheckpoint(
-          bundle.checkpointRecord,
-          bundle.libraryState.epoch,
-          bundle.libraryState.revision,
-          restoredLibrary.map((track) => track.id)
-        );
-        partyCheckpointRecoveryRef.current = checkpointRecovery;
-        setPartyCheckpointRecovery(checkpointRecovery.status === "none" ? null : checkpointRecovery);
-        setPartyCheckpointCardVisible(true);
-        partyCheckpointHydratedRef.current = true;
-        libraryRef.current = restoredLibrary;
-        setLibrary(restoredLibrary);
-        setLibraryStorageError("");
-        restored = true;
-      } catch (_err) {
-        if (hydrationGeneration !== libraryHydrationGenerationRef.current) return;
-        setLibraryStorageError("Saved music couldn't be opened. Close other Mazzy tabs, then retry opening local music.");
-      } finally {
-        if (hydrationGeneration === libraryHydrationGenerationRef.current && restored) {
-          setLibraryMutationLock(false);
+      const settlement = await hydration.settlement;
+      if (!ownsLibraryHydration(libraryHydrationOwnerRef.current, hydration.owner)) return;
+      libraryHydrationOwnerRef.current = null;
+      libraryHydrationCancelRef.current = null;
+      if (settlement.outcome === "completed") {
+        try {
+          const bundle = settlement.value;
+          const restoredLibrary = bundle.tracks.map(restorePersistedTrack);
+          const normalizedCheckpoint = normalizePartySessionCheckpointRecord(bundle.checkpointRecord);
+          const checkpointRecovery = reconcilePartySessionCheckpoint(
+            bundle.checkpointRecord,
+            bundle.libraryState.epoch,
+            bundle.libraryState.revision,
+            restoredLibrary.map((track) => track.id)
+          );
+          libraryStateRef.current = bundle.libraryState;
+          partyCheckpointStoredRecordRef.current = normalizedCheckpoint;
+          partyCheckpointRevisionRef.current = bundle.checkpointRevision;
+          partyCheckpointRecoveryRef.current = checkpointRecovery;
+          setPartyCheckpointRecovery(checkpointRecovery.status === "none" ? null : checkpointRecovery);
+          setPartyCheckpointCardVisible(true);
+          partyCheckpointHydratedRef.current = true;
+          libraryRef.current = restoredLibrary;
+          setLibrary(restoredLibrary);
+          setLibraryStorageError("");
+          if (libraryHydrationRetryRequestedRef.current) {
+            libraryHydrationRetryRequestedRef.current = false;
+            window.requestAnimationFrame(() => partyModeTitleRef.current?.focus?.());
+          }
+          restored = true;
+        } catch {
+          setLibraryStorageError("Saved music could not be validated. Reload Mazzy before opening local music.");
+          setLibraryHydrationCircuitOpen(true);
+          window.requestAnimationFrame(() => libraryStorageAlertRef.current?.focus?.());
         }
+      } else if (settlement.outcome === "failed") {
+        setLibraryStorageError("Saved music couldn't be opened. Close other Mazzy tabs, then retry opening local music.");
+        window.requestAnimationFrame(() => libraryStorageAlertRef.current?.focus?.());
+      } else if (settlement.outcome === "timed-out") {
+        setLibraryHydrationCircuitOpen(true);
+        setLibraryStorageError("Saved music did not finish opening because browser storage stopped responding. Reload Mazzy before trying again.");
+        window.requestAnimationFrame(() => libraryStorageAlertRef.current?.focus?.());
+      }
+      if (restored && hydrationGeneration === libraryHydrationGenerationRef.current) {
+        setLibraryMutationLock(false);
       }
     };
     void restore();
     return () => {
-      if (hydrationGeneration === libraryHydrationGenerationRef.current) libraryHydrationGenerationRef.current += 1;
+      if (ownsLibraryHydration(libraryHydrationOwnerRef.current, hydration.owner)) {
+        libraryHydrationOwnerRef.current = null;
+        try { libraryHydrationCancelRef.current?.(); } catch { /* Hydration authority is already revoked. */ }
+        libraryHydrationCancelRef.current = null;
+      }
+      if (hydrationGeneration === libraryHydrationGenerationRef.current) {
+        libraryHydrationGenerationRef.current += 1;
+      }
     };
-  }, [libraryRestoreAttempt]);
+  }, [libraryRestoreAttempt, libraryHydrationCircuitOpen]);
 
   const dismissContextMenu = () => {
     if (contextMenuRef.current?.contains(document.activeElement)) contextMenuTriggerRef.current?.focus?.();
@@ -4877,7 +4917,7 @@ export default function App() {
     void partyWakeLockRef.current?.release?.();
   };
   const startPartyAutopilot = async () => {
-    if (playbackRecoveryLockedRef.current || partyCheckpointBusyRef.current) return;
+    if (playbackRecoveryLockedRef.current || libraryMutationBusyRef.current || partyCheckpointBusyRef.current) return;
     if (partyFirstSongBlocksAutopilotStart({
       openingOwned: Boolean(partyFirstSongLoadRef.current),
       readyOwned: Boolean(partyFirstSongReadyOwner)
@@ -5094,7 +5134,8 @@ export default function App() {
     const actionRef = partyFirstSongActionRef;
     const otherDeckPlaying = Boolean(readyOwner &&
       (readyOwner.deck === "a" ? deckBRef : deckARef).current?.isPlaying?.());
-    if (playbackRecoveryLockedRef.current || partyCheckpointBusyRef.current || partyCheckpointWriterLostRef.current ||
+    if (playbackRecoveryLockedRef.current || libraryMutationBusyRef.current ||
+      partyCheckpointBusyRef.current || partyCheckpointWriterLostRef.current ||
       audioRecoveryState || outputDeviceChanged || getAudioEngine().context.state === "closed" ||
       !actionRef.current?.isReady?.() || actionRef.current?.isPlaying?.() || otherDeckPlaying || autoPilotEnabled) return;
     const actionSnapshot = actionRef.current?.getDeckSnapshot?.() ?? null;
@@ -5187,6 +5228,19 @@ export default function App() {
           </button>
         </div>
         <p className="party-mode-status" role="status">{partyModeStatus}</p>
+        {libraryMutationBusy && libraryMutationModeRef.current === "hydrating" && !libraryStorageError && (
+          <div
+            ref={libraryHydrationStatusRef}
+            tabIndex={-1}
+            className="party-mode-readiness"
+            role="status"
+            aria-live="polite"
+            aria-atomic="true"
+          >
+            <strong>OPENING SAVED LOCAL MUSIC</strong>
+            <span>Import and new playback stay unavailable until browser storage finishes.</span>
+          </div>
+        )}
         {partyCheckpointBusy && (
           <div className="party-mode-readiness" role="status" aria-live="polite" aria-atomic="true">
             <strong>UPDATING SAVED PARTY RECOVERY</strong>
@@ -5348,10 +5402,10 @@ export default function App() {
           <button type="button" disabled={partyCheckpointBusy || libraryMutationBusy || partyFirstSongOpening} onClick={() => importRef.current?.click()}>
             <span>1</span><strong>IMPORT MUSIC</strong><small>Saved only in this browser</small>
           </button>
-          <button ref={partyFirstSongPlayButtonRef} type="button" onClick={() => void startCurrentSong()} disabled={partySoundStopLocked || transitionCompletionUncertain || partyCheckpointBusy || partyCheckpointWriterLost || partyFirstSongOpening || !!audioRecoveryState || outputDeviceChanged || !partyFirstSongActionReady || partyFirstSongActionPlaying || partyFirstSongOtherDeckPlaying || autoPilotEnabled}>
+          <button ref={partyFirstSongPlayButtonRef} type="button" onClick={() => void startCurrentSong()} disabled={partySoundStopLocked || transitionCompletionUncertain || partyCheckpointBusy || libraryMutationBusy || partyCheckpointWriterLost || partyFirstSongOpening || !!audioRecoveryState || outputDeviceChanged || !partyFirstSongActionReady || partyFirstSongActionPlaying || partyFirstSongOtherDeckPlaying || autoPilotEnabled}>
             <span>2</span><strong>{partyFirstSongActionPlaying ? "FIRST SONG PLAYING" : "PLAY FIRST SONG"}</strong><small>{partyFirstSongActionReady ? partyFirstSongActionTrack?.name ?? "Loaded track" : "Choose a song below"}</small>
           </button>
-          <button ref={partyStartButtonRef} type="button" onClick={() => autoPilotEnabled ? pausePartyAutopilot() : setShowPartyReadiness(true)} disabled={partySoundStopLocked || transitionCompletionUncertain || partyCheckpointBusy || partyCheckpointWriterLost || !!audioRecoveryState || outputDeviceChanged || (!!partyFirstSongReadyOwner && !autoPilotEnabled) || (!sourcePartyPlaying && !autoPilotEnabled)}>
+          <button ref={partyStartButtonRef} type="button" onClick={() => autoPilotEnabled ? pausePartyAutopilot() : setShowPartyReadiness(true)} disabled={partySoundStopLocked || transitionCompletionUncertain || partyCheckpointBusy || (libraryMutationBusy && !autoPilotEnabled) || partyCheckpointWriterLost || !!audioRecoveryState || outputDeviceChanged || (!!partyFirstSongReadyOwner && !autoPilotEnabled) || (!sourcePartyPlaying && !autoPilotEnabled)}>
             <span>3</span><strong>{autoPilotEnabled ? "PAUSE AUTOPILOT" : "START AUTOPILOT"}</strong><small>{autoPilotEnabled ? "Music keeps playing" : "Mazzy handles later songs"}</small>
           </button>
         </div>
@@ -5418,7 +5472,7 @@ export default function App() {
                 setShowPartyReadiness(false);
                 window.requestAnimationFrame(() => partyStartButtonRef.current?.focus?.());
               }}>NOT YET</button>
-              <button type="button" disabled={partySoundStopLocked || partyCheckpointBusy || partyFirstSongAutopilotBlocked || !!audioRecoveryState || outputDeviceChanged || !partyReadiness.canStart} onClick={() => {
+              <button type="button" disabled={partySoundStopLocked || partyCheckpointBusy || libraryMutationBusy || partyFirstSongAutopilotBlocked || !!audioRecoveryState || outputDeviceChanged || !partyReadiness.canStart} onClick={() => {
                 void startPartyAutopilot();
                 window.requestAnimationFrame(() => partyStartButtonRef.current?.focus?.());
               }}>START PARTY AUTOPILOT</button>
@@ -5447,7 +5501,7 @@ export default function App() {
               }}>{autoPilotIntervention.reason === "unexpected-source-ended" ? "CHOOSE A SONG" : "CHOOSE ANOTHER SONG"}</button>
               <button
                 type="button"
-                disabled={partySoundStopLocked || transitionCompletionUncertain || partyFirstSongAutopilotBlocked || !!audioRecoveryState || outputDeviceChanged || !sourcePartyReady || !sourcePartyPlaying}
+                disabled={partySoundStopLocked || transitionCompletionUncertain || libraryMutationBusy || partyFirstSongAutopilotBlocked || !!audioRecoveryState || outputDeviceChanged || !sourcePartyReady || !sourcePartyPlaying}
                 onClick={() => void startPartyAutopilot()}
               >RETRY AUTOPILOT</button>
             </div>
@@ -5519,12 +5573,12 @@ export default function App() {
             onStopAllSound={stopAllSound}
             onDeckPlaybackCompletion={onDeckPlaybackCompletion}
             onAudioStartError={onAudioStartError}
-            playbackStartLocked={partySoundStopLocked || transitionCompletionUncertain || partyCheckpointBusy || partyCheckpointWriterLost || !!audioRecoveryState || outputDeviceChanged}
+            playbackStartLocked={partySoundStopLocked || transitionCompletionUncertain || libraryMutationBusy || partyCheckpointBusy || partyCheckpointWriterLost || !!audioRecoveryState || outputDeviceChanged}
             playbackStartLockRef={playbackRecoveryLockedRef}
             flash={deckFlash.a}
             transitionLocked={autoMixing || autoMixArming || autoPilotEnabled}
             rehearsalLocked={rehearsalActive || rehearsalPreparing}
-            partySetupLocked={partyFirstSongOpening}
+            partySetupLocked={partyFirstSongOpening || libraryMutationBusy}
           />
 
           <section className="crossfader-panel">
@@ -5589,7 +5643,7 @@ export default function App() {
               className={`auto-pilot-toggle ${autoPilotEnabled ? "enabled" : ""}`}
               type="button"
               aria-pressed={autoPilotEnabled}
-              disabled={rehearsalActive || rehearsalPreparing || partyFirstSongAutopilotBlocked}
+              disabled={rehearsalActive || rehearsalPreparing || (libraryMutationBusy && !autoPilotEnabled) || partyFirstSongAutopilotBlocked}
               onClick={() => {
                 if (autoPilotEnabled) {
                   pausePartyAutopilot();
@@ -5731,7 +5785,7 @@ export default function App() {
                   <button type="button" onClick={() => setShowPartyReadiness(false)}>CANCEL</button>
                   <button
                     type="button"
-                    disabled={partySoundStopLocked || partyFirstSongAutopilotBlocked || !partyReadiness.canStart}
+                    disabled={partySoundStopLocked || libraryMutationBusy || partyFirstSongAutopilotBlocked || !partyReadiness.canStart}
                     onClick={() => {
                       void startPartyAutopilot();
                     }}
@@ -5830,12 +5884,12 @@ export default function App() {
             onStopAllSound={stopAllSound}
             onDeckPlaybackCompletion={onDeckPlaybackCompletion}
             onAudioStartError={onAudioStartError}
-            playbackStartLocked={partySoundStopLocked || transitionCompletionUncertain || partyCheckpointBusy || partyCheckpointWriterLost || !!audioRecoveryState || outputDeviceChanged}
+            playbackStartLocked={partySoundStopLocked || transitionCompletionUncertain || libraryMutationBusy || partyCheckpointBusy || partyCheckpointWriterLost || !!audioRecoveryState || outputDeviceChanged}
             playbackStartLockRef={playbackRecoveryLockedRef}
             flash={deckFlash.b}
             transitionLocked={autoMixing || autoMixArming || autoPilotEnabled}
             rehearsalLocked={rehearsalActive || rehearsalPreparing}
-            partySetupLocked={partyFirstSongOpening}
+            partySetupLocked={partyFirstSongOpening || libraryMutationBusy}
           />
         </div>
       </section>
@@ -5875,12 +5929,16 @@ export default function App() {
             </p>
           )}
           {libraryStorageError && (
-            <div className="library-storage-error" role="alert">
+            <div ref={libraryStorageAlertRef} tabIndex={-1} className="library-storage-error" role="alert">
               <p>{libraryStorageError}</p>
-              {libraryMutationModeRef.current === "hydrating" && (
+              {libraryHydrationCircuitOpen ? (
+                <button type="button" onClick={() => window.location.reload()}>RELOAD LOCAL MUSIC</button>
+              ) : libraryMutationModeRef.current === "hydrating" && (
                 <button type="button" onClick={() => {
                   setLibraryStorageError("");
+                  libraryHydrationRetryRequestedRef.current = true;
                   setLibraryRestoreAttempt((value) => value + 1);
+                  window.requestAnimationFrame(() => libraryHydrationStatusRef.current?.focus?.());
                 }}>RETRY OPENING LOCAL MUSIC</button>
               )}
             </div>

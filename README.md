@@ -213,6 +213,17 @@ and a late old clear cannot mutate a successor party. This bounds in-memory
 recovery work; it does not prove crash-time
 durability or guarantee that an already-committing browser transaction was
 rolled back.
+Opening the saved library and paused recovery record at startup is also an
+exact, single-operation task with a conservative 30-second monotonic boundary.
+An ordinary on-time browser-storage error keeps **Retry Opening Local Music**;
+an unresponsive open/read keeps the library locked and requires **Reload Local
+Music**, because the browser may still finish an uncancellable database-open
+request later. Only an exact on-time bundle unlocks import and playback. This
+wait is announced in a polite visible status; direct Deck starts, loads, and
+Party start actions stay locked while Pause and **Stop All Sound** remain
+available. Storage failures focus their persistent Retry or Reload alert. This
+does not yet bound the later paused-plan claim or routine analysis-row writes;
+those remain separate storage-liveness milestones.
 While Autopilot runs, **Energy Down** and **Energy Up** temporarily shift the
 next-song activity target by up to 30%. This remains a soft selection preference
 and cannot promote a weaker transition or bypass Safe Fade.

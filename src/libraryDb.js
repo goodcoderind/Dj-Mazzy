@@ -110,6 +110,26 @@ const requestResult = (request) => new Promise((resolve, reject) => {
   request.onerror = () => reject(request.error ?? new Error("IndexedDB request failed"));
 });
 
+const awaitWithAbort = (promise, signal) => {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(checkpointAbortError());
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      callback(value);
+    };
+    const onAbort = () => finish(reject, checkpointAbortError());
+    signal.addEventListener("abort", onAbort, { once: true });
+    Promise.resolve(promise).then(
+      (value) => finish(resolve, value),
+      (error) => finish(reject, error)
+    );
+  });
+};
+
 const migrateTracks = (store, event) => {
   const needsAnalysisUpgrade = event.oldVersion < 5;
   const needsContentIdentityIndex = event.oldVersion < 6 && !store.indexNames.contains(CONTENT_IDENTITY_INDEX);
@@ -220,27 +240,54 @@ const readLibraryState = async (store) => {
   return state;
 };
 
-export const loadLibraryRecoveryBundle = async () => {
-  const db = await openDb();
+export const loadLibraryRecoveryBundle = async ({ signal = null } = {}) => {
+  if (signal?.aborted) throw checkpointAbortError();
+  const opening = openDb();
+  let db;
+  try {
+    db = await awaitWithAbort(opening, signal);
+  } catch (error) {
+    if (signal?.aborted) {
+      void opening.then((opened) => {
+        if (!signal.aborted) return;
+        try { opened.close(); } catch { /* The late open is already non-authoritative. */ }
+        if (databasePromise === opening) databasePromise = null;
+      }, () => undefined);
+    }
+    throw error;
+  }
+  if (signal?.aborted) throw checkpointAbortError();
   const tx = db.transaction([STORE_NAME, META_STORE_NAME, PARTY_SESSION_STORE_NAME], "readonly");
   const completed = waitForTransaction(tx);
+  const abortTransaction = () => {
+    try { tx.abort(); } catch { /* The transaction already settled. */ }
+  };
+  signal?.addEventListener("abort", abortTransaction, { once: true });
   const tracksRequest = tx.objectStore(STORE_NAME).getAll();
   const stateRequest = tx.objectStore(META_STORE_NAME).get(LIBRARY_STATE_KEY);
   const checkpointRequest = tx.objectStore(PARTY_SESSION_STORE_NAME).get(PARTY_SESSION_CHECKPOINT_KEY);
-  const [tracks, rawState, checkpointRecord] = await Promise.all([
-    requestResult(tracksRequest),
-    requestResult(stateRequest),
-    requestResult(checkpointRequest)
-  ]);
-  await completed;
-  const libraryState = normalizeLibraryState(rawState);
-  if (!libraryState) throw new DOMException("Local library revision is malformed", "DataError");
-  return Object.freeze({
-    tracks: Object.freeze(tracks || []),
-    libraryState,
-    checkpointRecord: checkpointRecord ?? null,
-    checkpointRevision: rawCheckpointRevision(checkpointRecord)
-  });
+  try {
+    const [tracks, rawState, checkpointRecord] = await Promise.all([
+      requestResult(tracksRequest),
+      requestResult(stateRequest),
+      requestResult(checkpointRequest),
+      completed
+    ]);
+    if (signal?.aborted) {
+      abortTransaction();
+      throw checkpointAbortError();
+    }
+    const libraryState = normalizeLibraryState(rawState);
+    if (!libraryState) throw new DOMException("Local library revision is malformed", "DataError");
+    return Object.freeze({
+      tracks: Object.freeze(tracks || []),
+      libraryState,
+      checkpointRecord: checkpointRecord ?? null,
+      checkpointRevision: rawCheckpointRevision(checkpointRecord)
+    });
+  } finally {
+    signal?.removeEventListener("abort", abortTransaction);
+  }
 };
 
 export const loadLibraryFromDb = async () => (await loadLibraryRecoveryBundle()).tracks;
