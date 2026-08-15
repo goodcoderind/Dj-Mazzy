@@ -1,6 +1,7 @@
 export const PARTY_CHECKPOINT_WRITE_RUNTIME_VERSION = "party-checkpoint-write-runtime/v1" as const;
 export const PARTY_CHECKPOINT_WRITE_TIMEOUT_MS = 30_000;
 export const PARTY_CHECKPOINT_CLEAR_OWNER_VERSION = "party-checkpoint-clear-owner/v1" as const;
+export const PARTY_CHECKPOINT_CLAIM_OWNER_VERSION = "party-checkpoint-claim-owner/v1" as const;
 
 export type PartyCheckpointWriteTicket = Readonly<{
   version: typeof PARTY_CHECKPOINT_WRITE_RUNTIME_VERSION;
@@ -20,6 +21,39 @@ export type PartyCheckpointClearOwner = Readonly<{
   sessionId: string | null;
   writerToken: string | null;
 }>;
+
+export type PartyCheckpointClaimOwner = Readonly<{
+  version: typeof PARTY_CHECKPOINT_CLAIM_OWNER_VERSION;
+  operation: number;
+  sessionId: string;
+  checkpointRevision: number;
+  previousWriterToken: string;
+  nextWriterToken: string;
+  libraryEpoch: number;
+  libraryRevision: number;
+}>;
+
+export const createPartyCheckpointClaimOwner = (
+  owner: Omit<PartyCheckpointClaimOwner, "version">
+): PartyCheckpointClaimOwner => {
+  if (!Number.isSafeInteger(owner.operation) || owner.operation <= 0 ||
+      !Number.isSafeInteger(owner.checkpointRevision) || owner.checkpointRevision <= 0 ||
+      !Number.isSafeInteger(owner.libraryEpoch) || owner.libraryEpoch < 0 ||
+      !Number.isSafeInteger(owner.libraryRevision) || owner.libraryRevision < 0) {
+    throw new RangeError("checkpoint claim counters are invalid");
+  }
+  if (![owner.sessionId, owner.previousWriterToken, owner.nextWriterToken]
+    .every((value) => typeof value === "string" && value.length > 0)) {
+    throw new TypeError("checkpoint claim identity is invalid");
+  }
+  return Object.freeze({ version: PARTY_CHECKPOINT_CLAIM_OWNER_VERSION, ...owner });
+};
+
+export const ownsPartyCheckpointClaim = (
+  current: PartyCheckpointClaimOwner | null,
+  expected: PartyCheckpointClaimOwner | null
+) => Boolean(current && expected && Object.keys(expected).every((key) =>
+  current[key as keyof PartyCheckpointClaimOwner] === expected[key as keyof PartyCheckpointClaimOwner]));
 
 export const createPartyCheckpointClearOwner = ({
   operation,

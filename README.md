@@ -222,8 +222,15 @@ request later. Only an exact on-time bundle unlocks import and playback. This
 wait is announced in a polite visible status; direct Deck starts, loads, and
 Party start actions stay locked while Pause and **Stop All Sound** remain
 available. Storage failures focus their persistent Retry or Reload alert. This
-does not yet bound the later paused-plan claim; that remains a separate
-storage-liveness milestone.
+startup boundary does not grant restore authority by itself.
+Restoring a paused plan is a separate exact 30-second claim operation bound to
+the saved session/revision/writers and current library epoch/revision. Its Web
+Lock wait, same-tab queue admission, and live IndexedDB transaction share one
+AbortSignal. Only an exact on-time claim applies the paused queue, progress, and
+settings; timeout, cancellation, library change, or stale settlement applies no
+plan and requires **Reload Recovery State**. Stop All Sound and browser/output
+recovery revoke the exact claim before their transient state can clear, so a
+late claim cannot resume after those actions. Restore never starts audio.
 Routine local-analysis persistence is bounded independently from playback and
 party recovery. `library-routine-write-runtime/v1` keeps at most one active
 15-second storage batch and one merged latest pending batch; repeated analysis

@@ -2730,7 +2730,34 @@ These are the active backlog, not reasons to discard the prototype.
   exact IndexedDB snapshot/patch behavior, replacement-content rejection, and
   pre-aborted storage access. Real IndexedDB suspension, quota
   eviction, and crash durability remain browser/device gates. The paused-plan
-  restore claim is the next bounded storage-ownership follow-up.
+  restore claim is bounded separately in D-075.
+
+- **D-075 — Bound the exact paused-plan restore claim before applying any
+  session state:** `party-checkpoint-claim-owner/v1` binds one runtime-only
+  operation to the saved session/revision, previous and next writer tokens, and
+  current library epoch/revision. Restore claims this authority synchronously,
+  exposes the existing global storage-busy lock/status, and runs the production
+  claim through the shared 30-second monotonic checkpoint-operation boundary.
+  Duplicate Restore, Delete, New Party, first-song, Deck-start, and Autopilot
+  entry remain refused while the owner is live; Stop All Sound remains reachable.
+
+  `claimPartySessionCheckpoint` now accepts one AbortSignal across the Web Lock,
+  abortable same-tab serializer wait, authority-bounded database open, and exact
+  readwrite transaction. The App rechecks the exact owner, unchanged recovery
+  object, library generation, stopped Decks, and absence of transition/preload
+  authority after settlement and before applying anything. Exact on-time claim
+  alone rebuilds the paused queue, elapsed-active clock, and settings. Timeout,
+  failure, stale result, remote mutation, or unmount revokes the owner, leaves
+  the plan unapplied, opens the checkpoint circuit, and focuses fixed reload
+  guidance; late settlement is inert. A successful restore still never resumes
+  AudioContext, starts a Deck, acquires wake lock, or starts diagnostics.
+
+  The owner, AbortSignal, deadline, and errors remain tab-memory-only. No
+  checkpoint, library, trace, export, network, or database schema changes.
+  Deterministic evidence covers exact identity matching, already-aborted claim,
+  exact deadline/cancel/late settlement through the shared bounded primitive,
+  and the existing cross-tab one-winner claim transaction. Real IndexedDB/Web
+  Lock suspension remains a browser gate.
 
 ### Open questions
 

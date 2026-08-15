@@ -127,8 +127,10 @@ import {
 } from "./storage/libraryRoutineWriteBatch";
 import { createLibraryRoutineWriteRuntime } from "./storage/libraryRoutineWriteRuntime";
 import {
+  createPartyCheckpointClaimOwner,
   createPartyCheckpointClearOwner,
   createPartyCheckpointWriteRuntime,
+  ownsPartyCheckpointClaim,
   ownsPartyCheckpointClear,
   shouldQueuePartyCheckpointCandidate,
   startBoundedPartyCheckpointOperation
@@ -395,6 +397,9 @@ export default function App() {
   const partyCheckpointClearOperationRef = useRef(0);
   const partyCheckpointClearOwnerRef = useRef(null);
   const partyCheckpointClearCancelRef = useRef(null);
+  const partyCheckpointClaimOperationRef = useRef(0);
+  const partyCheckpointClaimOwnerRef = useRef(null);
+  const partyCheckpointClaimCancelRef = useRef(null);
   const partyCheckpointLastFingerprintRef = useRef("");
   const partyCheckpointTerminalRef = useRef(true);
   const partyCheckpointPauseReasonRef = useRef("host-paused");
@@ -501,6 +506,7 @@ export default function App() {
     if (!supportsOutputDeviceChangeMonitoring(mediaDevices)) return;
     const onDeviceChange = () => {
       if (!audioOutputWatchArmedRef.current) return;
+      invalidatePartyCheckpointClaim("Audio output changed while the saved plan was being restored. Reload Mazzy to review recovery before continuing.");
       outputDeviceGenerationRef.current += 1;
       outputDevicePendingRef.current = true;
       refreshPlaybackRecoveryLock();
@@ -577,6 +583,7 @@ export default function App() {
         return;
       }
       if (!needsHostAudioRecovery(state)) return;
+      invalidatePartyCheckpointClaim("Browser audio changed while the saved plan was being restored. Reload Mazzy to review recovery before continuing.");
       audioRecoveryGenerationRef.current += 1;
       audioRecoveryPendingRef.current = true;
       refreshPlaybackRecoveryLock();
@@ -743,6 +750,7 @@ export default function App() {
     libraryReconcileNowRef.current = () => void reconcileStoredState().catch(() => undefined);
 
     const unsubscribe = subscribeToLibraryMutations((message) => {
+      invalidatePartyCheckpointClaim("The saved party plan changed in another tab while it was being restored. Reload Mazzy to review recovery before continuing.");
       if (message.type === "track-deleted") {
         stopRemoteLibraryPlayback();
         autoPilotPreloadGenerationRef.current += 1;
@@ -1376,6 +1384,21 @@ export default function App() {
       }
     });
     return partyCheckpointWriteRuntimeRef.current;
+  };
+
+  const invalidatePartyCheckpointClaim = (message) => {
+    if (!partyCheckpointClaimOwnerRef.current) return false;
+    partyCheckpointClaimOwnerRef.current = null;
+    try { partyCheckpointClaimCancelRef.current?.(); } catch { /* Claim authority is already revoked. */ }
+    partyCheckpointClaimCancelRef.current = null;
+    partyCheckpointBusyRef.current = false;
+    setPartyCheckpointBusy(false);
+    refreshPlaybackRecoveryLock();
+    getPartyCheckpointWriteRuntime().openCircuit();
+    setPartyCheckpointWriteCircuitOpen(true);
+    setPartyCheckpointError(message);
+    window.requestAnimationFrame(() => partyCheckpointAlertRef.current?.focus?.());
+    return true;
   };
 
   const queuePartyCheckpointSave = (checkpointReason = null) => {
@@ -2241,7 +2264,7 @@ export default function App() {
   }, [library, enhancedTimingAvailable]);
 
   const handleImportFolder = async (event) => {
-    if (libraryMutationBusyRef.current) {
+    if (libraryMutationBusyRef.current || partyCheckpointBusyRef.current) {
       if (importRef.current) importRef.current.value = "";
       showToast("Local music is still updating · try again in a moment");
       return;
@@ -4380,6 +4403,7 @@ export default function App() {
   };
 
   const stopAllSound = () => {
+    invalidatePartyCheckpointClaim("Stop All Sound cancelled the saved-plan restore. Reload Mazzy to review recovery before continuing.");
     const engine = getAudioEngine();
     let deckAStopConfirmed = false;
     let deckBStopConfirmed = false;
@@ -5053,6 +5077,10 @@ export default function App() {
       partyCheckpointClearOwnerRef.current = null;
       try { partyCheckpointClearCancelRef.current?.(); } catch { /* Storage owner is already revoked. */ }
       partyCheckpointClearCancelRef.current = null;
+      partyCheckpointClaimOperationRef.current += 1;
+      partyCheckpointClaimOwnerRef.current = null;
+      try { partyCheckpointClaimCancelRef.current?.(); } catch { /* Storage owner is already revoked. */ }
+      partyCheckpointClaimCancelRef.current = null;
       partyCheckpointWriteRuntimeRef.current?.halt?.();
       libraryRoutineWriteRuntimeRef.current?.halt?.();
       cancelActiveBackgroundAnalysis({ resetEnhanced: true, announceUnabortable: false });
@@ -5232,32 +5260,99 @@ export default function App() {
   const restoreSavedPartyPlan = async () => {
     const recovery = partyCheckpointRecoveryRef.current;
     const checkpoint = recovery?.status === "available" ? recovery.checkpoint : null;
-    if (!checkpoint || partyCheckpointBusyRef.current || partyFirstSongLoadRef.current) return;
+    if (!checkpoint || partyCheckpointBusyRef.current || partyCheckpointClaimOwnerRef.current ||
+        partyFirstSongLoadRef.current || libraryMutationBusyRef.current) return;
+    if (partyCheckpointWriterLostRef.current ||
+        (partyCheckpointWriteRuntimeRef.current?.snapshot?.().mode ?? "running") !== "running") {
+      setPartyCheckpointWriteCircuitOpen(true);
+      setPartyCheckpointError("Party recovery needs to be reloaded before this saved plan can be restored.");
+      window.requestAnimationFrame(() => partyCheckpointAlertRef.current?.focus?.());
+      return;
+    }
     if (deckARef.current?.isPlaying?.() || deckBRef.current?.isPlaying?.() || autoMixing || autoMixArming ||
-        transitionArmRef.current || activeTransitionScheduleRef.current || rehearsalActive ||
-        rehearsalPreparing || rehearsalCancelRef.current) {
+        transitionArmRef.current || transitionArmLeaseRef.current || activeTransitionScheduleRef.current ||
+        transitionCompletionRuntimeRef.current || transitionCompletionCancelRef.current ||
+        transitionCompletionUncertainRef.current || autoPilotPreloadLeaseRef.current ||
+        partyFallbackContinuationRef.current || rehearsalActive || rehearsalPreparing ||
+        rehearsalCancelRef.current || partySoundStopInProgressRef.current || audioRecoveryPendingRef.current ||
+        outputDevicePendingRef.current) {
       setPartyCheckpointError("Stop current audio or the transition preview before restoring the saved party plan.");
       return;
     }
+    const claimOwner = createPartyCheckpointClaimOwner({
+      operation: ++partyCheckpointClaimOperationRef.current,
+      sessionId: checkpoint.sessionId,
+      checkpointRevision: checkpoint.revision,
+      previousWriterToken: checkpoint.writerToken,
+      nextWriterToken: partyCheckpointWriterTokenRef.current,
+      libraryEpoch: libraryStateRef.current.epoch,
+      libraryRevision: libraryStateRef.current.revision
+    });
+    partyCheckpointClaimOwnerRef.current = claimOwner;
     partyCheckpointBusyRef.current = true;
-    advancePartyAutopilotCoordinatorEpoch();
     refreshPlaybackRecoveryLock();
     setPartyCheckpointBusy(true);
     setPartyCheckpointError("");
-    autoPilotPreloadGenerationRef.current += 1;
-    cancelCurrentTransitionArm();
-    transitionArmGenerationRef.current += 1;
-    const nextWriterToken = partyCheckpointWriterTokenRef.current;
+    const ownsClaim = () => ownsPartyCheckpointClaim(partyCheckpointClaimOwnerRef.current, claimOwner) &&
+      partyCheckpointRecoveryRef.current?.status === "available" &&
+      partyCheckpointRecoveryRef.current.checkpoint === checkpoint &&
+      libraryStateRef.current.epoch === claimOwner.libraryEpoch &&
+      libraryStateRef.current.revision === claimOwner.libraryRevision &&
+      !libraryMutationBusyRef.current && !partyFirstSongLoadRef.current &&
+      (partyCheckpointWriteRuntimeRef.current?.snapshot?.().mode ?? "running") === "running" &&
+      !deckARef.current?.isPlaying?.() && !deckBRef.current?.isPlaying?.() &&
+      !autoMixing && !autoMixArming && !transitionArmRef.current &&
+      !transitionArmLeaseRef.current && !activeTransitionScheduleRef.current &&
+      !transitionCompletionRuntimeRef.current && !transitionCompletionCancelRef.current &&
+      !transitionCompletionUncertainRef.current && !autoPilotPreloadLeaseRef.current &&
+      !partyFallbackContinuationRef.current && !rehearsalActive && !rehearsalPreparing &&
+      !rehearsalCancelRef.current && !partySoundStopInProgressRef.current &&
+      !audioRecoveryPendingRef.current && !outputDevicePendingRef.current;
     try {
-      const result = await claimPartySessionCheckpoint(
-        checkpoint.sessionId,
-        checkpoint.revision,
-        checkpoint.writerToken,
-        nextWriterToken
-      );
-      if (result.status !== "claimed") {
-        throw new DOMException("Saved party plan changed in another tab", "InvalidStateError");
+      const boundedClaim = startBoundedPartyCheckpointOperation({
+        ownsAuthority: ownsClaim,
+        task: (signal) => claimPartySessionCheckpoint(
+          checkpoint.sessionId,
+          checkpoint.revision,
+          checkpoint.writerToken,
+          claimOwner.nextWriterToken,
+          {
+            signal,
+            expectedLibraryState: {
+              epoch: claimOwner.libraryEpoch,
+              revision: claimOwner.libraryRevision
+            }
+          }
+        )
+      });
+      partyCheckpointClaimCancelRef.current = boundedClaim.cancel;
+      const settlement = await boundedClaim.promise;
+      if (!ownsClaim()) {
+        if (ownsPartyCheckpointClaim(partyCheckpointClaimOwnerRef.current, claimOwner)) {
+          getPartyCheckpointWriteRuntime().openCircuit();
+          setPartyCheckpointWriteCircuitOpen(true);
+          setPartyCheckpointError("The saved party plan could not be applied because local music or audio state changed during restore. Reload Mazzy to review recovery before continuing.");
+          window.requestAnimationFrame(() => partyCheckpointAlertRef.current?.focus?.());
+        }
+        return;
       }
+      if (settlement.outcome !== "completed" || settlement.value.status !== "claimed" ||
+          settlement.value.revision !== claimOwner.checkpointRevision + 1 ||
+          settlement.value.libraryState.epoch !== claimOwner.libraryEpoch ||
+          settlement.value.libraryState.revision !== claimOwner.libraryRevision) {
+        getPartyCheckpointWriteRuntime().openCircuit();
+        setPartyCheckpointWriteCircuitOpen(true);
+        setPartyCheckpointError(settlement.outcome === "timed-out"
+          ? "The saved party plan could not be claimed because browser storage did not respond. Reload Mazzy to review recovery before continuing."
+          : "The saved party plan changed or could not be claimed. Reload Mazzy to review the current local recovery copy.");
+        window.requestAnimationFrame(() => partyCheckpointAlertRef.current?.focus?.());
+        return;
+      }
+      const result = settlement.value;
+      advancePartyAutopilotCoordinatorEpoch();
+      autoPilotPreloadGenerationRef.current += 1;
+      cancelCurrentTransitionArm();
+      transitionArmGenerationRef.current += 1;
       if (activeTransitionScheduleRef.current) rescueTransition();
       stopRemoteLibraryPlayback();
       deckARef.current?.eject?.();
@@ -5298,7 +5393,7 @@ export default function App() {
         recordStatus: "claimed",
         revision: result.revision,
         sessionId: checkpoint.sessionId,
-        writerToken: nextWriterToken
+        writerToken: claimOwner.nextWriterToken
       };
       libraryStateRef.current = result.libraryState;
       partyCheckpointTerminalRef.current = false;
@@ -5313,12 +5408,20 @@ export default function App() {
       setPartyCheckpointCardVisible(true);
       window.requestAnimationFrame(() => partyCheckpointCardRef.current?.focus?.());
     } catch {
-      setPartyCheckpointError("The saved party plan changed or could not be claimed. Reload Mazzy to review the current local recovery copy.");
-      window.requestAnimationFrame(() => partyCheckpointAlertRef.current?.focus?.());
+      if (ownsPartyCheckpointClaim(partyCheckpointClaimOwnerRef.current, claimOwner)) {
+        getPartyCheckpointWriteRuntime().openCircuit();
+        setPartyCheckpointWriteCircuitOpen(true);
+        setPartyCheckpointError("The saved party plan changed or could not be claimed. Reload Mazzy to review the current local recovery copy.");
+        window.requestAnimationFrame(() => partyCheckpointAlertRef.current?.focus?.());
+      }
     } finally {
-      partyCheckpointBusyRef.current = false;
-      refreshPlaybackRecoveryLock();
-      setPartyCheckpointBusy(false);
+      if (ownsPartyCheckpointClaim(partyCheckpointClaimOwnerRef.current, claimOwner)) {
+        partyCheckpointClaimCancelRef.current = null;
+        partyCheckpointClaimOwnerRef.current = null;
+        partyCheckpointBusyRef.current = false;
+        refreshPlaybackRecoveryLock();
+        setPartyCheckpointBusy(false);
+      }
     }
   };
 
@@ -5400,6 +5503,7 @@ export default function App() {
     }
   };
   const onAudioStartError = (state) => {
+    invalidatePartyCheckpointClaim("Browser audio changed while the saved plan was being restored. Reload Mazzy to review recovery before continuing.");
     audioRecoveryPendingRef.current = true;
     refreshPlaybackRecoveryLock();
     setAudioRecoveryState(needsHostAudioRecovery(state) ? state : "suspended");
@@ -5567,7 +5671,7 @@ export default function App() {
                 DELETE SAVED PLAN
               </button>
               {recoverablePartyCheckpoint && (
-                <button type="button" disabled={partyCheckpointBusy || partyFirstSongOpening} onClick={() => void restoreSavedPartyPlan()}>
+                <button type="button" disabled={partyCheckpointBusy || partyFirstSongOpening || partyCheckpointWriteCircuitOpen || partyCheckpointWriterLost} onClick={() => void restoreSavedPartyPlan()}>
                   RESTORE PAUSED PLAN
                 </button>
               )}

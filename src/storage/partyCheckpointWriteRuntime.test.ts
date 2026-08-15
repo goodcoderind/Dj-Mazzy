@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  createPartyCheckpointClaimOwner,
   createPartyCheckpointClearOwner,
   createPartyCheckpointWriteRuntime,
+  ownsPartyCheckpointClaim,
   ownsPartyCheckpointClear,
   shouldQueuePartyCheckpointCandidate,
   startBoundedPartyCheckpointOperation
@@ -189,6 +191,27 @@ describe("party checkpoint write runtime", () => {
 });
 
 describe("party checkpoint clear ownership", () => {
+  it("matches only the exact paused-plan claim and library generation", () => {
+    const owner = createPartyCheckpointClaimOwner({
+      operation: 1,
+      sessionId: "session",
+      checkpointRevision: 2,
+      previousWriterToken: "previous",
+      nextWriterToken: "next",
+      libraryEpoch: 3,
+      libraryRevision: 4
+    });
+    expect(ownsPartyCheckpointClaim(owner, owner)).toBe(true);
+    expect(ownsPartyCheckpointClaim(createPartyCheckpointClaimOwner({
+      ...owner,
+      operation: 2
+    }), owner)).toBe(false);
+    expect(ownsPartyCheckpointClaim(createPartyCheckpointClaimOwner({
+      ...owner,
+      libraryRevision: 5
+    }), owner)).toBe(false);
+  });
+
   it("matches only the exact operation, session, and writer", () => {
     const owner = createPartyCheckpointClearOwner({ operation: 1, sessionId: "session", writerToken: "writer" });
     expect(ownsPartyCheckpointClear(owner, owner)).toBe(true);
@@ -237,6 +260,33 @@ describe("party checkpoint clear ownership", () => {
     await Promise.resolve();
     owned = false;
     resolveTask("old-success");
+    await expect(bounded.promise).resolves.toEqual({ outcome: "cancelled" });
+  });
+
+  it("cannot regain authority after a Stop-style owner revocation", async () => {
+    const owner = createPartyCheckpointClaimOwner({
+      operation: 1,
+      sessionId: "session",
+      checkpointRevision: 2,
+      previousWriterToken: "previous",
+      nextWriterToken: "next",
+      libraryEpoch: 3,
+      libraryRevision: 4
+    });
+    let currentOwner: ReturnType<typeof createPartyCheckpointClaimOwner> | null = owner;
+    let transientStop = false;
+    let resolveTask!: (value: string) => void;
+    const bounded = startBoundedPartyCheckpointOperation({
+      task: () => new Promise((resolve) => { resolveTask = resolve; }),
+      ownsAuthority: () => ownsPartyCheckpointClaim(currentOwner, owner) && !transientStop,
+      setTimer: () => 1,
+      clearTimer: () => undefined
+    });
+    await Promise.resolve();
+    transientStop = true;
+    currentOwner = null;
+    transientStop = false;
+    resolveTask("late-claimed");
     await expect(bounded.promise).resolves.toEqual({ outcome: "cancelled" });
   });
 

@@ -366,6 +366,69 @@ describe("library recovery storage", () => {
     });
   });
 
+  it("leaves an exact available checkpoint unchanged when claim is already aborted", async () => {
+    const initial = (await loadLibraryRecoveryBundle()).libraryState;
+    const imported = await saveImportedTracksToDb(
+      [track("source", "a"), track("next", "b")],
+      [],
+      initial
+    );
+    const saved = await savePartySessionCheckpointToDb(draft(imported.libraryState), {
+      checkpointRevision: 0,
+      libraryEpoch: imported.libraryState.epoch,
+      libraryRevision: imported.libraryState.revision,
+      sessionId: null,
+      writerToken: null
+    });
+    const controller = new AbortController();
+    controller.abort();
+    await expect(claimPartySessionCheckpoint(
+      sessionId,
+      saved.checkpoint.revision,
+      writerA,
+      writerB,
+      { signal: controller.signal }
+    )).rejects.toMatchObject({ name: "AbortError" });
+    expect((await loadLibraryRecoveryBundle()).checkpointRecord).toMatchObject({
+      recordStatus: "available",
+      writerToken: writerA,
+      revision: saved.checkpoint.revision
+    });
+  });
+
+  it("rejects a claim when library membership changed before its transaction", async () => {
+    const initial = (await loadLibraryRecoveryBundle()).libraryState;
+    const imported = await saveImportedTracksToDb(
+      [track("source", "a"), track("next", "b")],
+      [],
+      initial
+    );
+    const saved = await savePartySessionCheckpointToDb(draft(imported.libraryState), {
+      checkpointRevision: 0,
+      libraryEpoch: imported.libraryState.epoch,
+      libraryRevision: imported.libraryState.revision,
+      sessionId: null,
+      writerToken: null
+    });
+    const changed = await saveImportedTracksToDb(
+      [track("later", "c")],
+      [],
+      imported.libraryState
+    );
+    const result = await claimPartySessionCheckpoint(
+      sessionId,
+      saved.checkpoint.revision,
+      writerA,
+      writerB,
+      { expectedLibraryState: imported.libraryState }
+    );
+    expect(result).toMatchObject({ status: "stale-library", libraryState: changed.libraryState });
+    expect((await loadLibraryRecoveryBundle()).checkpointRecord).not.toMatchObject({
+      recordStatus: "claimed",
+      writerToken: writerB
+    });
+  });
+
   it("invalidates recovery atomically when a track is deleted", async () => {
     const initial = (await loadLibraryRecoveryBundle()).libraryState;
     const imported = await saveImportedTracksToDb(
