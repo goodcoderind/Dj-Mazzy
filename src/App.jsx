@@ -127,6 +127,12 @@ import {
 } from "./storage/libraryRoutineWriteBatch";
 import { createLibraryRoutineWriteRuntime } from "./storage/libraryRoutineWriteRuntime";
 import {
+  createLibraryReconciliationRuntime,
+  libraryReconciliationResultCovers,
+  mergeLibraryReconciliationRequirements,
+  shouldQuiescePartyForRemoteCheckpoint
+} from "./storage/libraryReconciliationRuntime";
+import {
   createPartyCheckpointClaimOwner,
   createPartyCheckpointClearOwner,
   createPartyCheckpointWriteRuntime,
@@ -329,6 +335,8 @@ export default function App() {
   const [libraryMutationBusy, setLibraryMutationBusy] = useState(true);
   const [libraryStorageError, setLibraryStorageError] = useState("");
   const [libraryHydrationCircuitOpen, setLibraryHydrationCircuitOpen] = useState(false);
+  const [libraryReconcileBusy, setLibraryReconcileBusy] = useState(false);
+  const [libraryReconcileCircuitOpen, setLibraryReconcileCircuitOpen] = useState(false);
   const [libraryRoutineWriteCircuitOpen, setLibraryRoutineWriteCircuitOpen] = useState(false);
   const [libraryAnalysisSaveError, setLibraryAnalysisSaveError] = useState("");
   const [backgroundAnalysisNotice, setBackgroundAnalysisNotice] = useState(null);
@@ -384,8 +392,7 @@ export default function App() {
   const autoPilotEnabledRef = useRef(false);
   const queueRef = useRef([]);
   const libraryRef = useRef([]);
-  const libraryReconcilePendingRef = useRef(false);
-  const libraryReconcileNowRef = useRef(null);
+  const libraryReconcileRuntimeRef = useRef(null);
   const playedTrackIdsRef = useRef([]);
   const partySessionClockRef = useRef(createPartySessionClock(180 * 60));
   const libraryStateRef = useRef({ epoch: 0, revision: 0 });
@@ -400,6 +407,7 @@ export default function App() {
   const partyCheckpointClaimOperationRef = useRef(0);
   const partyCheckpointClaimOwnerRef = useRef(null);
   const partyCheckpointClaimCancelRef = useRef(null);
+  const partyCheckpointTerminalClearPendingRef = useRef(null);
   const partyCheckpointLastFingerprintRef = useRef("");
   const partyCheckpointTerminalRef = useRef(true);
   const partyCheckpointPauseReasonRef = useRef("host-paused");
@@ -653,10 +661,31 @@ export default function App() {
       ? { state: "stopped", message: "Preview stopped because local playback authority changed in another Mazzy tab." }
       : current);
     autoPilotTransitionKeyRef.current = null;
-    try { if (activeTransitionScheduleRef.current) rescueTransition(); } catch { /* Continue pausing remote authority. */ }
-    try { transitionCompletionCancelRef.current?.(); } catch { /* Continue pausing remote authority. */ }
+    let transitionCleanupConfirmed = true;
+    try {
+      if (activeTransitionScheduleRef.current) rescueTransition();
+      if (transitionCompletionUncertainRef.current) transitionCleanupConfirmed = false;
+    } catch {
+      transitionCleanupConfirmed = false;
+      transitionCompletionUncertainRef.current = true;
+      setTransitionCompletionUncertain(true);
+      refreshPlaybackRecoveryLock();
+      if (partyTraceRecorderRef.current) {
+        partyTraceRunningRef.current = false;
+        partyTraceRecorderRef.current.markInterrupted();
+        updatePartyDiagnosticEvaluation();
+      }
+      showAutoPilotArmIntervention("transition-completion-lost");
+    }
+    try { transitionCompletionCancelRef.current?.(); } catch {
+      transitionCleanupConfirmed = false;
+      transitionCompletionUncertainRef.current = true;
+      setTransitionCompletionUncertain(true);
+      refreshPlaybackRecoveryLock();
+      showAutoPilotArmIntervention("transition-completion-lost");
+    }
     transitionCompletionCancelRef.current = null;
-    activeTransitionScheduleRef.current = null;
+    if (transitionCleanupConfirmed) activeTransitionScheduleRef.current = null;
     transitionArmRef.current = false;
     finalTrackRef.current = null;
     pausePartyClockFailClosed();
@@ -668,6 +697,22 @@ export default function App() {
     setAutoMixArming(false);
   };
 
+  const resumeLibraryReconciliationAfterCheckpointOperation = () => {
+    if (partyCheckpointBusyRef.current || partyCheckpointClaimOwnerRef.current ||
+        partyCheckpointClearOwnerRef.current) return false;
+    const runtime = libraryReconcileRuntimeRef.current;
+    if (runtime?.snapshot?.().mode !== "paused") return false;
+    runtime.resume();
+    const snapshot = runtime.snapshot();
+    if (snapshot.active || snapshot.pending) {
+      libraryMutationBusyRef.current = true;
+      libraryMutationModeRef.current = "reconciling";
+      setLibraryMutationBusy(true);
+      setLibraryReconcileBusy(true);
+    }
+    return true;
+  };
+
   useEffect(() => {
     autoPilotEnabledRef.current = autoPilotEnabled;
     queueRef.current = queue;
@@ -676,21 +721,50 @@ export default function App() {
   }, [autoPilotEnabled, queue, library, playedTrackIds]);
 
   useEffect(() => {
-    let reconcileGeneration = 0;
-    const reconcileStoredState = async () => {
-      if (!partyCheckpointHydratedRef.current) {
-        libraryReconcilePendingRef.current = true;
-        return;
+    const failReconciliationClosed = () => {
+      quiescePartyForReconciliationFailure();
+      partyCheckpointTerminalClearPendingRef.current = null;
+      libraryMutationBusyRef.current = true;
+      libraryMutationModeRef.current = "reconcile-circuit";
+      setLibraryMutationBusy(true);
+      setLibraryReconcileBusy(false);
+      setLibraryReconcileCircuitOpen(true);
+      partyCheckpointWriterLostRef.current = true;
+      setPartyCheckpointWriterLost(true);
+      refreshPlaybackRecoveryLock();
+      getPartyCheckpointWriteRuntime().openCircuit();
+      setPartyCheckpointWriteCircuitOpen(true);
+      setPartyCheckpointError("Mazzy could not confirm changes from another tab. New playback and library changes are locked. Reload Mazzy to review the current local music and saved party plan.");
+      window.requestAnimationFrame(() => partyCheckpointAlertRef.current?.focus?.());
+    };
+    const gateAutomaticWorkForReconciliation = () => {
+      advancePartyAutopilotCoordinatorEpoch();
+      try { settleAutoPilotPreloadForPause("superseded"); } catch { /* The synchronous storage gate remains active. */ }
+      try { cancelCurrentTransitionArm(); } catch { /* The arm generation below remains authoritative. */ }
+      transitionArmGenerationRef.current += 1;
+    };
+    const quiescePartyForReconciliationFailure = () => {
+      advancePartyAutopilotCoordinatorEpoch();
+      autoPilotEnabledRef.current = false;
+      setAutoPilotEnabled(false);
+      try { stopRemoteLibraryPlayback(); } catch { /* The recovery locks below remain authoritative. */ }
+    };
+    const applyReconciledBundle = (trigger, bundle) => {
+      const currentLibraryState = libraryStateRef.current;
+      const libraryRegressed = bundle.libraryState.epoch < currentLibraryState.epoch ||
+        (bundle.libraryState.epoch === currentLibraryState.epoch &&
+          bundle.libraryState.revision < currentLibraryState.revision);
+      const triggerNotCovered = !libraryReconciliationResultCovers({
+        requirements: trigger,
+        libraryEpoch: bundle.libraryState.epoch,
+        libraryRevision: bundle.libraryState.revision,
+        checkpointRevision: bundle.checkpointRevision
+      });
+      if (libraryRegressed || triggerNotCovered ||
+          bundle.checkpointRevision < partyCheckpointRevisionRef.current) {
+        throw new DOMException("Stored reconciliation result is stale", "InvalidStateError");
       }
-      if (libraryMutationBusyRef.current) {
-        libraryReconcilePendingRef.current = true;
-        return;
-      }
-      libraryReconcilePendingRef.current = false;
-      const generation = ++reconcileGeneration;
       const knownCheckpointRevision = partyCheckpointRevisionRef.current;
-      const bundle = await loadLibraryRecoveryBundle();
-      if (generation !== reconcileGeneration) return;
       const restoredRows = bundle.tracks.map(restorePersistedTrack);
       const storedIds = new Set(restoredRows.map((track) => track.id));
       const removedIds = libraryRef.current
@@ -747,10 +821,87 @@ export default function App() {
       setPartyCheckpointRecovery(localSessionId || recovery.status === "none" ? null : recovery);
       if (!localSessionId && recovery.status !== "none") setPartyCheckpointCardVisible(true);
     };
-    libraryReconcileNowRef.current = () => void reconcileStoredState().catch(() => undefined);
-
+    const runtime = createLibraryReconciliationRuntime({
+      read: (_trigger, signal) => loadLibraryRecoveryBundle({ signal }),
+      mergePending: mergeLibraryReconciliationRequirements,
+      onStarted: () => {
+        libraryMutationBusyRef.current = true;
+        libraryMutationModeRef.current = "reconciling";
+        setLibraryMutationBusy(true);
+        setLibraryReconcileBusy(true);
+      },
+      onCompleted: (trigger, bundle) => {
+        applyReconciledBundle(trigger, bundle);
+        libraryMutationBusyRef.current = false;
+        libraryMutationModeRef.current = "idle";
+        setLibraryMutationBusy(false);
+        setLibraryReconcileBusy(false);
+        const terminalClear = partyCheckpointTerminalClearPendingRef.current;
+        if (terminalClear) {
+          partyCheckpointTerminalClearPendingRef.current = null;
+          const stored = partyCheckpointStoredRecordRef.current;
+          const stillOwned = stored &&
+            (stored.recordStatus === "available" || stored.recordStatus === "claimed") &&
+            stored.sessionId === terminalClear.sessionId &&
+            stored.writerToken === terminalClear.writerToken &&
+            stored.revision >= terminalClear.minimumRevision;
+          if (stillOwned) {
+            void clearOwnedPartyCheckpoint(terminalClear.recordStatus, {
+              terminalOnFailure: true,
+              expectedCheckpoint: {
+                revision: stored.revision,
+                sessionId: stored.sessionId,
+                writerToken: stored.writerToken
+              }
+            });
+          } else {
+            pauseForCheckpointOwnershipLoss();
+          }
+        }
+      },
+      onFailed: failReconciliationClosed,
+      onTimedOut: failReconciliationClosed
+    });
+    libraryReconcileRuntimeRef.current = runtime;
+    const requestReconciliation = (kind = "focus", message = null, { quiesceSession = false } = {}) => {
+      const trigger = Object.freeze({
+        kind,
+        minimumLibraryEpoch: message?.libraryEpoch ?? libraryStateRef.current.epoch,
+        minimumLibraryRevision: message?.libraryRevision ?? libraryStateRef.current.revision,
+        minimumCheckpointRevision: message?.checkpointRevision ?? partyCheckpointRevisionRef.current,
+        checkpointSessionId: message?.sessionId ?? null,
+        checkpointWriterToken: message?.writerToken ?? null
+      });
+      if (quiesceSession) quiescePartyForReconciliationFailure();
+      else gateAutomaticWorkForReconciliation();
+      if (!partyCheckpointHydratedRef.current ||
+          partyCheckpointBusyRef.current || partyCheckpointClaimOwnerRef.current ||
+          partyCheckpointClearOwnerRef.current ||
+          (libraryMutationBusyRef.current && libraryMutationModeRef.current !== "reconciling")) {
+        runtime.pause();
+        runtime.request(trigger);
+        return;
+      }
+      const wasPaused = runtime.snapshot().mode === "paused";
+      const admitted = runtime.request(trigger);
+      if (admitted === "blocked") return;
+      if (wasPaused) runtime.resume();
+      libraryMutationBusyRef.current = true;
+      libraryMutationModeRef.current = "reconciling";
+      setLibraryMutationBusy(true);
+      setLibraryReconcileBusy(true);
+    };
     const unsubscribe = subscribeToLibraryMutations((message) => {
       invalidatePartyCheckpointClaim("The saved party plan changed in another tab while it was being restored. Reload Mazzy to review recovery before continuing.");
+      const newerRemoteCheckpoint = shouldQuiescePartyForRemoteCheckpoint({
+        eventType: message.type,
+        eventCheckpointRevision: message.checkpointRevision,
+        eventSessionId: message.sessionId ?? null,
+        eventWriterToken: message.writerToken ?? null,
+        currentCheckpointRevision: partyCheckpointRevisionRef.current,
+        currentSessionId: partyCheckpointSessionIdRef.current,
+        currentWriterToken: partyCheckpointWriterTokenRef.current
+      });
       if (message.type === "track-deleted") {
         stopRemoteLibraryPlayback();
         autoPilotPreloadGenerationRef.current += 1;
@@ -778,17 +929,24 @@ export default function App() {
         disposeAnalysisClient();
         disposeEnhancedRhythmClient();
       }
-      void reconcileStoredState().catch(() => undefined);
+      const libraryStateAdvanced = message.libraryEpoch > libraryStateRef.current.epoch ||
+        (message.libraryEpoch === libraryStateRef.current.epoch &&
+          message.libraryRevision > libraryStateRef.current.revision);
+      if (!message.type.startsWith("party-checkpoint-") || newerRemoteCheckpoint ||
+          libraryStateAdvanced) {
+        requestReconciliation("broadcast", message, { quiesceSession: newerRemoteCheckpoint });
+      }
     });
     const onReturn = () => {
-      if (document.visibilityState === "visible") void reconcileStoredState().catch(() => undefined);
+      if (document.visibilityState === "visible") requestReconciliation("focus");
     };
     window.addEventListener("focus", onReturn);
     window.addEventListener("pageshow", onReturn);
     document.addEventListener("visibilitychange", onReturn);
     return () => {
-      reconcileGeneration += 1;
-      libraryReconcileNowRef.current = null;
+      runtime.halt();
+      partyCheckpointTerminalClearPendingRef.current = null;
+      if (libraryReconcileRuntimeRef.current === runtime) libraryReconcileRuntimeRef.current = null;
       unsubscribe();
       window.removeEventListener("focus", onReturn);
       window.removeEventListener("pageshow", onReturn);
@@ -1043,11 +1201,23 @@ export default function App() {
   };
 
   const setLibraryMutationLock = (locked, mode = "destructive") => {
+    const reconcileRuntime = libraryReconcileRuntimeRef.current;
+    if (locked && mode !== "reconciling") {
+      reconcileRuntime?.pause?.();
+      setLibraryReconcileBusy(false);
+    }
     libraryMutationBusyRef.current = locked;
     libraryMutationModeRef.current = locked ? mode : "idle";
     setLibraryMutationBusy(locked);
-    if (!locked && libraryReconcilePendingRef.current) {
-      window.queueMicrotask(() => libraryReconcileNowRef.current?.());
+    if (!locked && reconcileRuntime?.snapshot?.().mode === "paused") {
+      reconcileRuntime.resume();
+      const snapshot = reconcileRuntime.snapshot();
+      if (snapshot.active || snapshot.pending) {
+        libraryMutationBusyRef.current = true;
+        libraryMutationModeRef.current = "reconciling";
+        setLibraryMutationBusy(true);
+        setLibraryReconcileBusy(true);
+      }
     }
   };
 
@@ -1394,6 +1564,7 @@ export default function App() {
     partyCheckpointBusyRef.current = false;
     setPartyCheckpointBusy(false);
     refreshPlaybackRecoveryLock();
+    resumeLibraryReconciliationAfterCheckpointOperation();
     getPartyCheckpointWriteRuntime().openCircuit();
     setPartyCheckpointWriteCircuitOpen(true);
     setPartyCheckpointError(message);
@@ -1462,6 +1633,31 @@ export default function App() {
     recordStatus = "cleared",
     { terminalOnFailure = false, expectedCheckpoint = null } = {}
   ) => {
+    const reconcileSnapshot = libraryReconcileRuntimeRef.current?.snapshot?.();
+    if (libraryMutationModeRef.current === "reconciling" ||
+        libraryMutationModeRef.current === "reconcile-circuit" ||
+        reconcileSnapshot?.active) {
+      if (terminalOnFailure) {
+        partyCheckpointTerminalRef.current = true;
+        if (libraryMutationModeRef.current === "reconciling" &&
+            reconcileSnapshot?.mode === "running") {
+          const stored = partyCheckpointStoredRecordRef.current;
+          partyCheckpointTerminalClearPendingRef.current = Object.freeze({
+            recordStatus,
+            sessionId: stored?.sessionId ?? partyCheckpointSessionIdRef.current,
+            writerToken: stored?.writerToken ?? partyCheckpointWriterTokenRef.current,
+            minimumRevision: stored?.revision ?? partyCheckpointRevisionRef.current
+          });
+        } else {
+          partyCheckpointTerminalClearPendingRef.current = null;
+          getPartyCheckpointWriteRuntime().openCircuit();
+          setPartyCheckpointWriteCircuitOpen(true);
+          setPartyCheckpointError("The party finished, but saved recovery cleanup could not be confirmed. Reload Mazzy before starting another party.");
+          window.requestAnimationFrame(() => partyCheckpointAlertRef.current?.focus?.());
+        }
+      }
+      return false;
+    }
     if (partyCheckpointBusyRef.current || partyCheckpointClearOwnerRef.current) return false;
     const previousTerminal = partyCheckpointTerminalRef.current;
     partyCheckpointTerminalRef.current = true;
@@ -1557,6 +1753,7 @@ export default function App() {
         if (!terminalOnFailure && writeRuntime.snapshot().mode !== "running") {
           partyCheckpointTerminalRef.current = previousTerminal;
         }
+        resumeLibraryReconciliationAfterCheckpointOperation();
       }
     }
   };
@@ -3719,6 +3916,7 @@ export default function App() {
       const engine = getAudioEngine();
       const now = engine.clock.now();
       if (!runtime.sourceRef.current?.isPlaying?.() ||
+        libraryMutationBusyRef.current ||
         (runtime.origin === "autopilot" && (!autoPilotEnabledRef.current || playbackRecoveryLockedRef.current))) {
         settleTransitionArmRuntime(runtime, "cancelled");
         return;
@@ -3748,7 +3946,7 @@ export default function App() {
   };
 
   const startAutoMix = async (origin = "host") => {
-    if (playbackRecoveryLockedRef.current || partyCheckpointBusyRef.current || partyCheckpointWriterLostRef.current || audioRecoveryState || outputDeviceChanged || getAudioEngine().context.state !== "running") return;
+    if (playbackRecoveryLockedRef.current || libraryMutationBusyRef.current || partyCheckpointBusyRef.current || partyCheckpointWriterLostRef.current || audioRecoveryState || outputDeviceChanged || getAudioEngine().context.state !== "running") return;
     if (autoMixing || transitionArmRef.current || rehearsalActive) {
       return;
     }
@@ -3887,7 +4085,8 @@ export default function App() {
       nowSeconds: engine.clock.now(),
       pair: currentArmPairIdentity(runtime)
     });
-    const armIsCurrent = () => armState() === "active" && transitionArmGenerationRef.current === armGeneration;
+    const armIsCurrent = () => !libraryMutationBusyRef.current &&
+      armState() === "active" && transitionArmGenerationRef.current === armGeneration;
 
     setTransitionInfo({
       active: true,
@@ -4697,7 +4896,7 @@ export default function App() {
       return true;
     };
     const tick = async (ticket, setPhase) => {
-      if (cancelled || !autoPilotEnabledRef.current ||
+      if (cancelled || libraryMutationBusyRef.current || !autoPilotEnabledRef.current ||
         !ownsPartyAutopilotTick(partyAutopilotTickBoundaryRef.current, ticket)) return;
       const sourceDeck = masterDeck;
       const targetDeck = sourceDeck === "a" ? "b" : "a";
@@ -4708,10 +4907,10 @@ export default function App() {
       const now = engine.clock.now();
       partyAutopilotLastObservedNowRef.current = now;
       sourceRef.current?.reconcilePlaybackCompletion?.(now);
-      if (!autoPilotEnabledRef.current ||
+      if (libraryMutationBusyRef.current || !autoPilotEnabledRef.current ||
         !ownsPartyAutopilotTick(partyAutopilotTickBoundaryRef.current, ticket)) return;
       targetRef.current?.reconcilePlaybackCompletion?.(now);
-      if (!autoPilotEnabledRef.current ||
+      if (libraryMutationBusyRef.current || !autoPilotEnabledRef.current ||
         !ownsPartyAutopilotTick(partyAutopilotTickBoundaryRef.current, ticket)) return;
       if (autoMixing) {
         transitionCompletionRuntimeRef.current?.attempt?.("watchdog");
@@ -4908,6 +5107,10 @@ export default function App() {
             autoPilotOwned: true,
             loadAuthorityKey: preloadLoadAuthorityKey
           });
+          if (libraryMutationBusyRef.current) {
+            supersedePreloadLease(preloadLease, engine.clock.now());
+            return;
+          }
           if (!autoPilotEnabledRef.current ||
             !ownsPartyAutopilotTick(partyAutopilotTickBoundaryRef.current, ticket)) return;
           if (!ownsAutoPilotPreloadLease(autoPilotPreloadLeaseRef.current, preloadLease)) return;
@@ -5204,7 +5407,7 @@ export default function App() {
     setShowPartyReadiness(false);
   };
   const resetPartyAutopilot = async () => {
-    if (partyCheckpointBusyRef.current) return;
+    if (partyCheckpointBusyRef.current || libraryMutationBusyRef.current) return;
     if (partyCheckpointWriterLostRef.current) {
       setPartyCheckpointError("Reload this tab to review the current saved party plan before starting a new party here.");
       window.requestAnimationFrame(() => partyCheckpointAlertRef.current?.focus?.());
@@ -5421,12 +5624,13 @@ export default function App() {
         partyCheckpointBusyRef.current = false;
         refreshPlaybackRecoveryLock();
         setPartyCheckpointBusy(false);
+        resumeLibraryReconciliationAfterCheckpointOperation();
       }
     }
   };
 
   const discardSavedPartyPlan = async () => {
-    if (partyFirstSongLoadRef.current) return;
+    if (partyFirstSongLoadRef.current || libraryMutationBusyRef.current) return;
     setPartyCheckpointError("");
     const recovery = partyCheckpointRecoveryRef.current;
     const checkpoint = recovery?.status === "available" ? recovery.checkpoint : null;
@@ -5510,6 +5714,8 @@ export default function App() {
   };
   const partyModeStatus = partyEndingFinalTrack
     ? "Final song is playing. The session will finish when it ends."
+    : libraryReconcileBusy
+      ? "Checking saved local changes. The current song may continue; new automatic planning waits."
     : partyFirstSongOpening
       ? partyFirstSongLoadStatus.message
     : autoMixing
@@ -5558,6 +5764,12 @@ export default function App() {
           >
             <strong>OPENING SAVED LOCAL MUSIC</strong>
             <span>Import and new playback stay unavailable until browser storage finishes.</span>
+          </div>
+        )}
+        {libraryReconcileBusy && !libraryReconcileCircuitOpen && (
+          <div className="party-mode-readiness" role="status" aria-live="polite" aria-atomic="true">
+            <strong>CHECKING SAVED LOCAL CHANGES</strong>
+            <span>New playback and library changes wait while Mazzy checks browser storage. Audio already playing may continue; Stop All Sound stays available.</span>
           </div>
         )}
         {partyCheckpointBusy && (
@@ -5667,7 +5879,7 @@ export default function App() {
                 setPartyCheckpointCardVisible(false);
                 window.requestAnimationFrame(() => partyCheckpointShowButtonRef.current?.focus?.());
               }}>NOT NOW</button>
-              <button type="button" disabled={partyCheckpointBusy || partyFirstSongOpening} onClick={() => void discardSavedPartyPlan()}>
+              <button type="button" disabled={partyCheckpointBusy || libraryMutationBusy || partyFirstSongOpening} onClick={() => void discardSavedPartyPlan()}>
                 DELETE SAVED PLAN
               </button>
               {recoverablePartyCheckpoint && (
@@ -5838,7 +6050,7 @@ export default function App() {
             <button type="button" onClick={() => setPartyEnergyShift((value) => Math.max(-0.3, value - 0.1))} disabled={!autoPilotEnabled || partyEnergyShift <= -0.3}>PREFER CALMER LATER SONGS</button>
             <button type="button" onClick={() => setPartyEnergyShift((value) => Math.min(0.3, value + 0.1))} disabled={!autoPilotEnabled || partyEnergyShift >= 0.3}>PREFER MORE ENERGETIC LATER SONGS</button>
             <span className="sr-only" role="status">{`Later-song activity preference ${Math.round(partyEnergyShift * 100)} percent`}</span>
-            <button type="button" onClick={() => void startAutoMix()} disabled={partySoundStopLocked || transitionCompletionUncertain || !autoPilotEnabled || autoMixing || autoMixArming || !pairPreview?.plan}>CHANGE SONG NOW</button>
+            <button type="button" onClick={() => void startAutoMix()} disabled={partySoundStopLocked || transitionCompletionUncertain || libraryMutationBusy || !autoPilotEnabled || autoMixing || autoMixArming || !pairPreview?.plan}>CHANGE SONG NOW</button>
             {autoMixing && <button className="party-emergency" type="button" disabled={partySoundStopLocked} onClick={rescueTransition}>STOP AUTOMATIC TRANSITION</button>}
           </div>
         )}
@@ -5929,7 +6141,7 @@ export default function App() {
               onChange={onCrossFade}
               disabled={autoMixing || autoMixArming || autoPilotEnabled || rehearsalActive || rehearsalPreparing}
             />
-            <button className="auto-mix-btn" type="button" onClick={startAutoMix} disabled={partySoundStopLocked || !!audioRecoveryState || outputDeviceChanged || autoMixing || autoMixArming || autoPilotEnabled || rehearsalActive || rehearsalPreparing}>
+            <button className="auto-mix-btn" type="button" onClick={startAutoMix} disabled={partySoundStopLocked || libraryMutationBusy || !!audioRecoveryState || outputDeviceChanged || autoMixing || autoMixArming || autoPilotEnabled || rehearsalActive || rehearsalPreparing}>
               {autoMixArming
                 ? "ARMING SAFE TRANSITION…"
                 : autoMixing
@@ -6073,7 +6285,7 @@ export default function App() {
               <button
                 className="skip-current-btn"
                 type="button"
-                disabled={partySoundStopLocked || autoMixing || autoMixArming || !pairPreview?.plan}
+                disabled={partySoundStopLocked || libraryMutationBusy || autoMixing || autoMixArming || !pairPreview?.plan}
                 onClick={() => void startAutoMix()}
               >
                 SKIP CURRENT SONG SAFELY
@@ -6086,7 +6298,7 @@ export default function App() {
                 {!autoPilotEnabled && (
                   <button
                     type="button"
-                    disabled={partyCheckpointBusy || partyCheckpointWriteCircuitOpen || partyCheckpointWriterLost}
+                    disabled={partyCheckpointBusy || libraryMutationBusy || partyCheckpointWriteCircuitOpen || partyCheckpointWriterLost}
                     onClick={() => {
                       void resetPartyAutopilot();
                     }}

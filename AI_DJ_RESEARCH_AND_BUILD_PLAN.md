@@ -2759,6 +2759,57 @@ These are the active backlog, not reasons to discard the prototype.
   and the existing cross-tab one-winner claim transaction. Real IndexedDB/Web
   Lock suspension remains a browser gate.
 
+- **D-076 — Bound and serialize cross-tab/focus library reconciliation before
+  it may change live authority:** `library-reconciliation-runtime/v1` owns one
+  exact read plus one replaceable latest trigger under immutable
+  epoch/operation and a monotonic 30-second deadline. Validated BroadcastChannel
+  mutations, focus, pageshow, and visible visibility changes therefore cannot
+  create an unbounded fan-out of IndexedDB bundle reads. A newer trigger
+  coalesces behind the current owner without resetting its deadline and starts
+  one latest read after settlement; a local Import/Remove/Remove-All boundary
+  revokes the read, preserves one newest trigger, and drains it only after the
+  exact local mutation unlocks.
+
+  The production read reuses `loadLibraryRecoveryBundle({ signal })`, covering
+  the authority-bounded database-open wait and exact readonly transaction.
+  Settlement must be strictly before the deadline and must cover the trigger's
+  library epoch/revision and checkpoint revision without regressing current
+  tab state. Exact current settlement alone may reconcile library membership,
+  loaded-deck cleanup, and paused-plan presentation. Timeout, rejection,
+  non-covering counters, circuit state, or unmount revokes authority; late
+  success/error is inert.
+
+  Every admitted reconciliation synchronously gates new automatic loads and
+  transitions while the healthy current session and stable song may continue.
+  A validated newer remote checkpoint mutation synchronously pauses Autopilot
+  planning before the read, even when a clear retains the same stored
+  session/writer identity. Failure or timeout also pauses the session.
+  During reconciliation, the existing synchronous
+  library/playback gate prevents Import, Deck starts, first-song, Restore,
+  New Party, and Autopilot entry. A visible polite status says saved local
+  changes are being checked and keeps **Stop All Sound** reachable. Any
+  uncertain terminal settlement opens the actual checkpoint recovery circuit,
+  retains the interaction lock, and focuses fixed **Reload Recovery State**
+  guidance; it never silently retries in the same document.
+  Final-track completion marks checkpoint authority terminal synchronously. A
+  healthy in-flight reconciliation owns one deferred clear bound to the final
+  session/writer and the exact reconciled revision. A foreign owner is never
+  cleared; a reconciliation circuit retains fixed Reload guidance and admits
+  no later checkpoint write.
+  Checkpoint claim and clear owners are symmetrically exclusive with bundle
+  reads: a focus or tab trigger arriving during either operation remains one
+  pending reconciliation and resumes only after the exact owner releases busy
+  authority.
+
+  Runtime triggers, owners, deadlines, and errors remain tab-memory-only. No
+  library, checkpoint, trace, report, export, network, or database schema
+  changes. Deterministic evidence covers a 1,000-trigger burst with at most one
+  active and one latest read, superseded-result inertness, exact and
+  throttled-timer deadlines, failure circuit admission, local-mutation
+  pause/drain, unmount abort, and same-owner/old versus newer-foreign checkpoint
+  quiescence. Browser IndexedDB suspension and cross-process crash durability
+  remain external gates.
+
 ### Open questions
 
 - **Q-001:** Remain browser/PWA-first through launch, or package a desktop app

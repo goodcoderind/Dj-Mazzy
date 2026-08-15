@@ -231,6 +231,30 @@ settings; timeout, cancellation, library change, or stale settlement applies no
 plan and requires **Reload Recovery State**. Stop All Sound and browser/output
 recovery revoke the exact claim before their transient state can clear, so a
 late claim cannot resume after those actions. Restore never starts audio.
+Cross-tab and return-to-tab reconciliation is bounded separately by
+`library-reconciliation-runtime/v1`. Mazzy keeps one exact browser-storage read
+and one newest pending trigger, rather than starting a read for every focus,
+visibility, page-return, or validated tab message. Newer triggers coalesce
+behind the current read without extending its deadline; local Import/Remove
+work revokes the read and drains one latest trigger afterward. Every admitted
+check temporarily gates new automatic loads and transitions while leaving a
+healthy Party session and the current stable song alone. A newer remote
+checkpoint mutation, failure, or timeout pauses automatic planning before
+uncertain storage authority can be used. Every read has a 30-second monotonic
+boundary. Failure, timeout, or
+non-covering storage counters keep new playback and library changes locked and
+show a focused **Reload Recovery State** action; late results are inert. A
+visible polite status explains the bounded check while already-playing audio
+may continue and **Stop All Sound** remains available. This is cross-tab
+ownership/liveness evidence, not proof of browser crash durability.
+If the final song ends during a healthy check, the party becomes terminal
+immediately and one saved-recovery clear runs afterward only if the exact
+session/writer still owns the reconciled checkpoint. Foreign ownership or an
+uncertain check keeps persistent Reload guidance instead of deleting that
+record or admitting a new save.
+Checkpoint Restore/Delete/terminal-clear ownership is mutually exclusive with
+reconciliation in both directions: a check arriving during one of those exact
+operations coalesces and starts only after its owner settles.
 Routine local-analysis persistence is bounded independently from playback and
 party recovery. `library-routine-write-runtime/v1` keeps at most one active
 15-second storage batch and one merged latest pending batch; repeated analysis
