@@ -18,6 +18,7 @@ const htmlInputs = {
         "key-lock-crossfade-diagnostic": path.join(workspaceRoot, "key-lock-crossfade-diagnostic.html"),
         "key-lock-listening": path.join(workspaceRoot, "key-lock-listening.html"),
         "master-peak-guard-listening": path.join(workspaceRoot, "master-peak-guard-listening.html"),
+        "party-app-journey-diagnostic": path.join(workspaceRoot, "party-app-journey-diagnostic.html"),
         "party-continuation-diagnostic": path.join(workspaceRoot, "party-continuation-diagnostic.html"),
         "party-level-listening": path.join(workspaceRoot, "party-level-listening.html"),
         "transition-rehearsal-diagnostic": path.join(workspaceRoot, "transition-rehearsal-diagnostic.html")
@@ -210,6 +211,7 @@ export default defineConfig({
   },
   define: {
     __MAZZY_ENHANCED_TIMING_INCLUDED__: JSON.stringify(includeEnhancedTiming),
+    __MAZZY_DIAGNOSTICS_INCLUDED__: JSON.stringify(includeDiagnostics),
     __MAZZY_OFFLINE_SHELL_INCLUDED__: JSON.stringify(!includeDiagnostics)
   },
   server: {

@@ -1225,8 +1225,10 @@ before musical or operational reliability are:
   deterministic final-track ownership, but live real-party validation and
   refresh/crash recovery remain open;
 - production transition rehearsal, private listening tools, and synthetic
-  sustained diagnostics exist; the fresh visible v4 two-hour audio-engine gate
-  and human key-lock listening judgment remain open.
+  sustained diagnostics exist; a fresh generated-WAV Chromium gate now composes
+  the production React App through two automatic handoffs, while real-party,
+  multi-browser, physical-output, and human key-lock listening judgment remain
+  open.
 
 These are the active backlog, not reasons to discard the prototype.
 
@@ -2905,9 +2907,71 @@ These are the active backlog, not reasons to discard the prototype.
   fixed copy, idempotent retry, and absence of the hostile sentinel from the
   DOM; it is not an automated browser release gate. This boundary intentionally
   covers React descendant render/lifecycle faults only; arbitrary async event
-  errors, browser/OS process death, physical speaker state, full-App Party
-  journey acceptance, a machine-run fault-browser report, and normal
-  multi-handoff audio composition remain separate gates.
+  errors, browser/OS process death, physical speaker state, real-music App
+  acceptance, and a machine-run fault-browser report remain separate gates.
+  The generated-WAV full-App multi-handoff gate is D-079 below.
+
+- **D-079 — Run the production React App through a generated-audio Chromium
+  Party journey, and settle an exact transition source EOF through its existing
+  completion owner:** `party-app-browser-runner/v1` launches an installed local
+  Chrome/Chromium against the diagnostics build with no autoplay bypass, a
+  fresh temporary profile, and three generated 48 kHz stereo WAVs. It uses the
+  real hidden folder input, the production membership transaction, a hard
+  reload and IndexedDB Blob hydration, Choose First, Play First Song, the
+  readiness dialog, the production 500 ms coordinator, two Safe Fades, native
+  final EOF, and terminal checkpoint cleanup. It runs twice with independent
+  profiles and requires matching categorical ownership/count results. The
+  runner uses Node built-ins only, blocks/counts non-loopback page and worker
+  requests with persistent observers through report commit, closes observer
+  admission and boundedly drains in-flight worker setup/request acknowledgements
+  before pass, treats observer or bounded event-backlog failure as fatal, and
+  deletes every temporary profile and WAV in `finally`.
+
+  The first live run found a production browser ordering race that isolated
+  state and audio harnesses had not composed: Safe Fade ends the source at the
+  same audio-clock boundary as the crossfade, and Chromium may deliver the
+  source Deck's native `onended` before the crossfade completion oscillator.
+  `party-deck-completion-ingestion/v1` now returns
+  `settle-transition-source` only for the exact successful source owned by the
+  active transition. App invokes the existing exact transition-completion
+  runtime; that runtime rechecks schedule, source/target load keys, target
+  playback, context, lock state, and deadline before committing. Premature
+  source completion, target completion, missing runtime ownership, or cleanup
+  uncertainty retains the prior fail-closed Stop/Rescue behavior. No trace
+  event shape or ordering changes.
+
+  `party-app-journey-report/v1` fails closed unless each run proves three
+  imported, hydrated, and retained rows; one immediate first start; two unique
+  scheduled and completed Safe Fades; on-time exact completion with no
+  cancellation, more than 10 ms earliness, or ownership loss; exactly two
+  native source completions while those crossfade owners remain active; exactly
+  two invocations of the production native-EOF settlement branch and zero
+  recovered-signal or crossfade-sentinel dispatches for this fixture;
+  terminal trace success; empty queue;
+  Autopilot off; a cleared checkpoint; inactive Decks; no active crossfade or
+  recovery UI; focus handoff through Import, Play First Song, and readiness;
+  a reachable 44-pixel Stop; continuously running context-state snapshots; at
+  least 18 seconds of internally consistent non-silent post-master coverage;
+  at most 100 ms
+  unexpected silence; and zero non-finite, clipped, processor, page,
+  unhandled-rejection, visibility, or external-network failures. The committed
+  `party-app-browser-acceptance/v1` artifact contains two passing reports.
+
+  The diagnostic page, observer, runner, and report code are absent from the
+  standard/enhanced artifact. Public evidence contains only fixed contracts,
+  enums, booleans, counts, rounded lateness, and bounded audio-health metrics;
+  no filename, path, track/content ID, hash, timestamp, error text, user agent,
+  device identifier, File/PCM, or audio is retained. This adds report/runtime
+  versions only: IndexedDB v8, `track-analysis/v5`, `transition-plan/v3`,
+  `party-session-checkpoint/v1`, and trace/evaluation v12 do not change. The
+  gate proves generated-WAV composition in the tested Chromium environment,
+  not MP3/FLAC breadth, real music, musical quality, physical speakers,
+  process-death durability, two-hour endurance, or Firefox/Safari support.
+  The diagnostic has one idempotent teardown used by terminal settlement,
+  timeout/setup failure, and `pagehide`; it unmounts App, stops and permanently
+  latches the existing audio engine, disposes observers/health monitoring, and
+  closes or suspends the context. Persisted BFCache restoration reloads rather
+  than reviving stale patched authority.
 
 ### Open questions
 

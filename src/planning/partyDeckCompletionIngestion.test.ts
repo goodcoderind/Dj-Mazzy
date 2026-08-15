@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { decidePartyDeckCompletion, type PartyDeckCompletionInput } from "./partyDeckCompletionIngestion";
+import {
+  decidePartyDeckCompletion,
+  transitionCompletionSignalForDeckEvent,
+  type PartyDeckCompletionInput
+} from "./partyDeckCompletionIngestion";
 
 const base = (): PartyDeckCompletionInput => ({
   callbackDeck: "a",
@@ -108,12 +112,12 @@ describe("Party deck completion ingestion", () => {
     }).kind).toBe("pause-premature");
   });
 
-  it("never treats either deck of an active transition as an ordinary ending", () => {
+  it("routes an exact on-time transition source ending through the transition completion owner", () => {
     const input = base();
     expect(decidePartyDeckCompletion({
       ...input,
       activeTransition: { source: "a", target: "b" }
-    }).kind).toBe("lock-transition");
+    }).kind).toBe("settle-transition-source");
     expect(decidePartyDeckCompletion({
       ...input,
       callbackDeck: "b",
@@ -122,6 +126,27 @@ describe("Party deck completion ingestion", () => {
       partyLoad: { trackId: "target", trackOrdinal: 2, loadOrdinal: 5 },
       activeTransition: { source: "a", target: "b" }
     }).kind).toBe("lock-transition");
+    expect(decidePartyDeckCompletion({
+      ...input,
+      event: { ...input.event, outcome: "premature" },
+      snapshot: { ...input.snapshot!, status: "recoverable-error" },
+      activeTransition: { source: "a", target: "b" }
+    }).kind).toBe("lock-transition");
+  });
+
+  it("preserves native versus recovered completion provenance", () => {
+    const input = base();
+    expect(transitionCompletionSignalForDeckEvent(input.event)).toBe("primary");
+    expect(transitionCompletionSignalForDeckEvent({
+      ...input.event,
+      settledBy: "audio-clock",
+      outcome: "recovered"
+    })).toBe("watchdog");
+    expect(transitionCompletionSignalForDeckEvent({
+      ...input.event,
+      settledBy: "reconcile",
+      outcome: "recovered"
+    })).toBe("watchdog");
   });
 
   it("ignores exact manual completions after session authority is gone", () => {

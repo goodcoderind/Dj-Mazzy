@@ -25,7 +25,10 @@ import { mergeGeneratedAnalysis } from "./analysis/mergeAnalysis";
 import { planAutomaticTransition } from "./planning/TransitionPlanner";
 import { assessPartyReadiness } from "./planning/partyReadiness";
 import { decideRescueTransition } from "./planning/rescueTransition";
-import { decidePartyDeckCompletion } from "./planning/partyDeckCompletionIngestion";
+import {
+  decidePartyDeckCompletion,
+  transitionCompletionSignalForDeckEvent
+} from "./planning/partyDeckCompletionIngestion";
 import { decidePartyCommittedTargetContinuation } from "./planning/partyCommittedTargetContinuation";
 import { runPartyCommittedTargetAudioTransaction } from "./audio/partyCommittedTargetContinuationAudio";
 import { isTimingReviewCurrent, normalizeTimingReview } from "./domain/timingReview";
@@ -3240,6 +3243,29 @@ export default function App() {
     });
     if (decision.kind === "ignore-stale") return;
 
+    if (decision.kind === "settle-transition-source") {
+      const completionRuntime = transitionCompletionRuntimeRef.current;
+      const exactCompletionOwner = Boolean(activeTransition?.completionLease &&
+        ownsAutoPilotTransitionCompletionLease(
+          completionRuntime?.lease,
+          activeTransition.completionLease
+        ));
+      if (exactCompletionOwner && typeof completionRuntime?.attempt === "function") {
+        try {
+          const signal = transitionCompletionSignalForDeckEvent(event);
+          completionRuntime.attempt(signal);
+          if (__MAZZY_DIAGNOSTICS_INCLUDED__) {
+            try {
+              window.dispatchEvent(new Event(signal === "primary"
+                ? "mazzy:party-app-journey-native-transition-dispatch"
+                : "mazzy:party-app-journey-recovered-transition-dispatch"));
+            } catch { /* Diagnostics must never gain transition authority. */ }
+          }
+          return;
+        } catch { /* The existing fail-closed transition branch below retains recovery ownership. */ }
+      }
+    }
+
     if (decision.kind === "pause-premature") {
       const traceWasRunning = partyTraceRunningRef.current;
       advancePartyAutopilotCoordinatorEpoch();
@@ -5075,7 +5101,13 @@ export default function App() {
       transitionCompletionCancelRef.current = revokeCompletionRuntime;
       completionRuntime.primaryCancel = engine.onCrossfadeComplete(
         crossfadeSchedule.id,
-        () => attemptTransitionCompletion("primary")
+        () => {
+          if (__MAZZY_DIAGNOSTICS_INCLUDED__) {
+            try { window.dispatchEvent(new Event("mazzy:party-app-journey-crossfade-sentinel-dispatch")); }
+            catch { /* Diagnostics must never gain transition authority. */ }
+          }
+          attemptTransitionCompletion("primary");
+        }
       );
       completionRuntime.deadlineCancel = engine.onAudioClockDeadline(
         completionLease.deadlineSeconds,

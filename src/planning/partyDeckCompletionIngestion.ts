@@ -32,6 +32,7 @@ export type PartyDeckCompletionDecision = Readonly<{
     | "ignore-stale"
     | "finish-final"
     | "pause-premature"
+    | "settle-transition-source"
     | "pause-unexpected-source"
     | "lock-transition"
     | "pause-conflict";
@@ -40,6 +41,7 @@ export type PartyDeckCompletionDecision = Readonly<{
     | "inactive-session"
     | "exact-final"
     | "premature"
+    | "transition-source-ended"
     | "non-final-source-ended"
     | "transition-deck-ended"
     | "owner-unobservable"
@@ -101,8 +103,11 @@ export const decidePartyDeckCompletion = (
 
   if (!sessionOwnsCompletion) return result("ignore-stale", "inactive-session");
 
-  const transitionOwnsDeck = input.activeTransition != null &&
-    [input.activeTransition.source, input.activeTransition.target].includes(input.callbackDeck);
+  const transitionOwnsSource = input.activeTransition?.source === input.callbackDeck;
+  const transitionOwnsDeck = transitionOwnsSource || input.activeTransition?.target === input.callbackDeck;
+  if (transitionOwnsSource && successful) {
+    return result("settle-transition-source", "transition-source-ended");
+  }
   if (transitionOwnsDeck) return result("lock-transition", "transition-deck-ended");
 
   // A materially early native ending is an audio-clock safety failure even if
@@ -122,3 +127,7 @@ export const decidePartyDeckCompletion = (
   }
   return result("pause-conflict", "conflicting-owner");
 };
+
+export const transitionCompletionSignalForDeckEvent = (
+  event: PartyDeckCompletionEvent
+): "primary" | "watchdog" => event.settledBy === "source-onended" ? "primary" : "watchdog";

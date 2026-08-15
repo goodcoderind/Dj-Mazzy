@@ -1,0 +1,145 @@
+{
+  "schemaVersion": "party-app-browser-acceptance/v1",
+  "runnerContract": "party-app-browser-runner/v1",
+  "status": "passed",
+  "freshProfileRuns": 2,
+  "reportsMatched": true,
+  "reports": [
+    {
+      "schemaVersion": "party-app-journey-report/v1",
+      "runnerContract": "party-app-browser-runner/v1",
+      "buildContract": "mazzy-app-basic/v1",
+      "fixtureContract": "generated-stereo-wav/v1",
+      "scenario": "three-track-safe-fade",
+      "counts": {
+        "importedTracks": 3,
+        "hydratedTracks": 3,
+        "storedTracksAfter": 3,
+        "immediateDeckStarts": 1,
+        "scheduledTargetStarts": 2,
+        "scheduledTransitions": 2,
+        "completedTransitions": 2,
+        "nativeTransitionSourceCompletions": 2,
+        "nativeTransitionDispatches": 2,
+        "recoveredTransitionDispatches": 0,
+        "crossfadeSentinelDispatches": 0,
+        "safeFadeTransitions": 2
+      },
+      "completion": {
+        "uniqueTransitionOwners": 2,
+        "cancelledTransitions": 0,
+        "ownershipFailures": 0,
+        "maximumLatenessMs": 1,
+        "maximumEarlinessMs": 0
+      },
+      "terminal": {
+        "tracePassed": true,
+        "queueTracks": 0,
+        "autoPilotActive": false,
+        "checkpointStatus": "cleared",
+        "activeDecks": 0,
+        "activeCrossfade": false,
+        "recoveryUiVisible": false,
+        "stopControlReady": true
+      },
+      "focus": {
+        "importRestored": true,
+        "firstSongPlay": true,
+        "readiness": true
+      },
+      "audioHealth": {
+        "supported": true,
+        "renderedFrames": 1488000,
+        "expectedActiveFrames": 1428480,
+        "silentFrames": 291,
+        "renderQuanta": 11625,
+        "nonFiniteSamples": 0,
+        "clippedSamples": 0,
+        "processorErrors": 0,
+        "peak": 0.074074,
+        "longestUnexpectedSilentMs": 6,
+        "reports": 31
+      },
+      "browser": {
+        "contextInterruptions": 0,
+        "externalRequests": 0,
+        "uncaughtErrors": 0,
+        "unhandledRejections": 0,
+        "pageStayedVisible": true
+      },
+      "failureCodes": [],
+      "passed": true,
+      "evidenceScope": "Generated-WAV full React App import, hydration, local decode, Autopilot state/audio composition, and terminal cleanup; not music quality, codec breadth, physical speakers, process death, or endurance.",
+      "privacy": "Fixed enums, booleans, capped counters, and bounded 48 kHz audio-health aggregates only; no audio, names, paths, IDs, hashes, timestamps, raw error text, user agent, or device identifiers."
+    },
+    {
+      "schemaVersion": "party-app-journey-report/v1",
+      "runnerContract": "party-app-browser-runner/v1",
+      "buildContract": "mazzy-app-basic/v1",
+      "fixtureContract": "generated-stereo-wav/v1",
+      "scenario": "three-track-safe-fade",
+      "counts": {
+        "importedTracks": 3,
+        "hydratedTracks": 3,
+        "storedTracksAfter": 3,
+        "immediateDeckStarts": 1,
+        "scheduledTargetStarts": 2,
+        "scheduledTransitions": 2,
+        "completedTransitions": 2,
+        "nativeTransitionSourceCompletions": 2,
+        "nativeTransitionDispatches": 2,
+        "recoveredTransitionDispatches": 0,
+        "crossfadeSentinelDispatches": 0,
+        "safeFadeTransitions": 2
+      },
+      "completion": {
+        "uniqueTransitionOwners": 2,
+        "cancelledTransitions": 0,
+        "ownershipFailures": 0,
+        "maximumLatenessMs": 1,
+        "maximumEarlinessMs": 0
+      },
+      "terminal": {
+        "tracePassed": true,
+        "queueTracks": 0,
+        "autoPilotActive": false,
+        "checkpointStatus": "cleared",
+        "activeDecks": 0,
+        "activeCrossfade": false,
+        "recoveryUiVisible": false,
+        "stopControlReady": true
+      },
+      "focus": {
+        "importRestored": true,
+        "firstSongPlay": true,
+        "readiness": true
+      },
+      "audioHealth": {
+        "supported": true,
+        "renderedFrames": 1488000,
+        "expectedActiveFrames": 1428736,
+        "silentFrames": 291,
+        "renderQuanta": 11625,
+        "nonFiniteSamples": 0,
+        "clippedSamples": 0,
+        "processorErrors": 0,
+        "peak": 0.074365,
+        "longestUnexpectedSilentMs": 6,
+        "reports": 31
+      },
+      "browser": {
+        "contextInterruptions": 0,
+        "externalRequests": 0,
+        "uncaughtErrors": 0,
+        "unhandledRejections": 0,
+        "pageStayedVisible": true
+      },
+      "failureCodes": [],
+      "passed": true,
+      "evidenceScope": "Generated-WAV full React App import, hydration, local decode, Autopilot state/audio composition, and terminal cleanup; not music quality, codec breadth, physical speakers, process death, or endurance.",
+      "privacy": "Fixed enums, booleans, capped counters, and bounded 48 kHz audio-health aggregates only; no audio, names, paths, IDs, hashes, timestamps, raw error text, user agent, or device identifiers."
+    }
+  ],
+  "evidenceScope": "Two fresh-profile generated-WAV full React App journeys; not real music, physical speakers, codec breadth, process-death durability, or endurance.",
+  "privacy": "Aggregate fixed enums, booleans, capped counters, and bounded 48 kHz audio-health metrics only; no names, paths, IDs, hashes, timestamps, raw error text, user agent, or device identifiers. Temporary profiles and WAV files were deleted."
+}

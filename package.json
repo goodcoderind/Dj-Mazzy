@@ -9,6 +9,7 @@
     "build": "vite build",
     "build:enhanced": "MAZZY_INCLUDE_ENHANCED_TIMING=1 vite build",
     "build:diagnostics": "MAZZY_INCLUDE_DIAGNOSTICS=1 vite build",
+    "acceptance:party-app": "npm run build:diagnostics && node tools/runPartyAppJourneyBrowser.mjs",
     "preview:diagnostics": "MAZZY_INCLUDE_DIAGNOSTICS=1 vite preview",
     "preview": "vite preview",
     "test": "vitest run",

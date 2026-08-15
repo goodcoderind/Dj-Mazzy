@@ -670,6 +670,37 @@ Mazzy, or sent anywhere. This boundary covers React descendant render and
 lifecycle failures. It does not claim to catch arbitrary asynchronous event
 errors, browser/OS process failure, or to verify a physical speaker has stopped.
 
+The diagnostics-only D-079 gate now drives the real production App through two
+fresh Chromium profiles with three generated stereo WAVs per run. It uses the
+real folder input, atomic IndexedDB import, a hard reload and Blob hydration,
+Choose First, Play First Song, the readiness flow, the production 500 ms
+Autopilot coordinator, two Safe Fades, native final EOF, and checkpoint clear.
+Both committed `party-app-journey-report/v1` runs have exact 3/1/2/2
+import/start/scheduled/completed counts, terminal trace success, empty queue,
+inactive Decks, no open crossfade, no recovery UI, no uncaught error, no
+external page/worker request, exactly two native source completions observed
+while their crossfade owners were active, exactly two production native-EOF
+dispatches, no recovered or crossfade-sentinel dispatch, and healthy
+post-master output. Persistent CDP observers remain armed until report commit
+and drain in-flight worker setup/request acknowledgements before pass; observer
+failure or bounded-event-backlog overflow fails the run. That run exposed and
+fixed a real ordering race: a Safe Fade source may deliver native `onended`
+before the crossfade sentinel at the same audio-clock boundary; the exact
+transition source now settles through the already-owned transition completion
+lease while premature or target endings still fail closed. The aggregate
+report contains only fixed enums, booleans, counts, and bounded audio-health
+metrics. Temporary
+profiles and WAVs are deleted. This proves generated-WAV composition in the
+tested local Chromium build; it does not prove real-song musical quality,
+compressed-codec breadth, physical speakers, process-death durability, a
+two-hour party, or Firefox/Safari parity.
+
+The journey page owns one idempotent local teardown. Success, timeout, setup
+failure, and page exit unmount the real App, revoke its owners, latch the
+existing engine against new starts, stop Deck/crossfade/auxiliary audio, dispose
+health monitoring, and close or suspend the AudioContext. A BFCache restore
+reloads the page instead of resuming patched diagnostic authority.
+
 The production build also installs a versioned, same-origin offline app shell
 after one successful online load. It caches only the root UI, its exact hashed
 JavaScript/CSS modules, the basic analysis worker, and install icons. It does
@@ -780,7 +811,8 @@ feedback as current.
 ### Requirements
 
 - Node.js 20 or newer
-- A modern Chromium, Firefox, or Safari browser
+- A modern browser. The machine-run full-App acceptance target is currently
+  desktop Chromium; Firefox and Safari have not passed the same journey gate.
 
 ### Install and run
 
@@ -823,6 +855,7 @@ npm test
 npm run typecheck
 npm run benchmark:rhythm
 npm run benchmark:real-tracks
+npm run acceptance:party-app
 ```
 
 For the local audio-engine check, start the preview server and open
@@ -854,6 +887,16 @@ Confirm that the fixed alert receives focus, says sound is stopped, presents
 least 44 pixels high. This route exists only in the diagnostics build. It is a
 manual browser smoke, not evidence for arbitrary async errors, process crashes,
 physical speaker state, or the full Party journey.
+
+`npm run acceptance:party-app` builds diagnostics, finds a locally installed
+Chrome/Chromium executable, and runs the D-079 full-App journey twice with
+fresh temporary profiles. It uses Node built-ins rather than a browser-runner
+dependency, creates no committed audio fixture, deletes its temporary files,
+and writes the allowlisted aggregate
+`PARTY_APP_BROWSER_ACCEPTANCE_REPORT.json`. The route and observer are excluded
+from the standard and enhanced production builds. Passing this command is a
+Chromium generated-WAV acceptance result, not a browser-support or listening
+quality claim.
 
 The real-track command reads `~/Desktop/music small` by default and writes only
 to external private application storage outside the repository and Vite root. See
