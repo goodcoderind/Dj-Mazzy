@@ -3,8 +3,13 @@ import { ResettableSerialQueue } from "./resettableSerialQueue";
 import {
   allowEnhancedTimingModelAssetsAfterHostAction,
   currentEnhancedTimingModelAllowedAuthority,
+  enhancedTimingModelCacheHasEntries,
   enhancedTimingModelCacheHasEntriesForRemoval,
   enhancedTimingModelAssetsRevoked,
+  enhancedTimingModelPreparationIsVerified,
+  enhancedTimingModelStorageSupportsExclusiveLock,
+  invalidateEnhancedTimingModelPreparationProof,
+  markEnhancedTimingModelPreparationVerified,
   matchEnhancedTimingModelAsset,
   runIfEnhancedTimingModelAllowed,
   type EnhancedTimingModelAuthority,
@@ -24,7 +29,29 @@ const scheduleEnhancedInference = <T>(task: () => Promise<T>) => {
   return run;
 };
 
-export type EnhancedRhythmAssetState = "stored" | "stored-unavailable" | "removal-needed" | "downloadable" | "not-included" | "unavailable";
+export type EnhancedRhythmAssetState = "stored" | "stored-unavailable" | "partial" | "removal-needed" | "downloadable" | "not-included" | "unavailable" | "probe-error" | "coordination-unavailable";
+
+export const projectRevokedEmptyEnhancedRhythmAssetState = ({
+  included,
+  online
+}: {
+  included: boolean;
+  online: boolean;
+}): EnhancedRhythmAssetState => !included
+  ? "not-included"
+  : online
+    ? "downloadable"
+    : "unavailable";
+
+export const projectEnhancedTimingStorageCoordinationState = ({
+  included,
+  exclusiveLockAvailable
+}: {
+  included: boolean;
+  exclusiveLockAvailable: boolean;
+}): "coordination-unavailable" | null => included && !exclusiveLockAvailable
+  ? "coordination-unavailable"
+  : null;
 
 const packBaseUrl = `${import.meta.env.BASE_URL}models/beat-this-final0/v1/`;
 const packManifestUrl = `${packBaseUrl}config.json`;
@@ -40,40 +67,57 @@ const hasStoredPack = async (storageAuthority: EnhancedTimingModelAuthority) => 
   )).every(Boolean);
 };
 
-const originTimingRuntimeReachable = async () => {
+const originTimingRuntimeReachable = async (signal?: AbortSignal) => {
   if (!navigator.onLine) return false;
   try {
-    const response = await fetch(packManifestUrl, { method: "HEAD", cache: "no-store" });
+    const response = await fetch(packManifestUrl, { method: "HEAD", cache: "no-store", signal });
     return response.ok && response.headers.get("content-type")?.includes("application/json") === true;
   } catch {
     return false;
   }
 };
 
-export const getEnhancedRhythmAssetState = async (): Promise<EnhancedRhythmAssetState> => {
+export const getEnhancedRhythmAssetState = async (signal?: AbortSignal): Promise<EnhancedRhythmAssetState> => {
   try {
+    if (signal?.aborted) throw new Error("enhanced timing probe cancelled");
     if (await enhancedTimingModelAssetsRevoked()) {
       if (await enhancedTimingModelCacheHasEntriesForRemoval()) return "removal-needed";
-      return __MAZZY_ENHANCED_TIMING_INCLUDED__ && navigator.onLine ? "downloadable" : "not-included";
+      const coordinationState = projectEnhancedTimingStorageCoordinationState({
+        included: __MAZZY_ENHANCED_TIMING_INCLUDED__,
+        exclusiveLockAvailable: enhancedTimingModelStorageSupportsExclusiveLock()
+      });
+      if (coordinationState) return coordinationState;
+      return projectRevokedEmptyEnhancedRhythmAssetState({
+        included: __MAZZY_ENHANCED_TIMING_INCLUDED__,
+        online: navigator.onLine
+      });
     }
+    const coordinationState = projectEnhancedTimingStorageCoordinationState({
+      included: __MAZZY_ENHANCED_TIMING_INCLUDED__,
+      exclusiveLockAvailable: enhancedTimingModelStorageSupportsExclusiveLock()
+    });
+    if (coordinationState) return coordinationState;
     const storageAuthority = await currentEnhancedTimingModelAllowedAuthority();
     const finish = <T extends EnhancedRhythmAssetState>(state: T) =>
       runIfEnhancedTimingModelAllowed(storageAuthority, async () => state);
-    const stored = await hasStoredPack(storageAuthority);
-    if (stored && !(await originTimingRuntimeReachable())) return finish("stored-unavailable");
+    const stored = await hasStoredPack(storageAuthority) &&
+      await enhancedTimingModelPreparationIsVerified(storageAuthority);
+    if (stored && !(await originTimingRuntimeReachable(signal))) return finish("stored-unavailable");
     if (stored) {
       const result = await finish("stored");
       activeStorageAuthority = storageAuthority;
       return result;
     }
+    if (await enhancedTimingModelCacheHasEntries(storageAuthority)) return finish("partial");
     if (!__MAZZY_ENHANCED_TIMING_INCLUDED__) return finish("not-included");
     if (!navigator.onLine) return finish("unavailable");
-    const manifest = await fetch(packManifestUrl, { cache: "no-store" });
+    const manifest = await fetch(packManifestUrl, { cache: "no-store", signal });
     return finish(manifest.ok && manifest.headers.get("content-type")?.includes("application/json")
       ? "downloadable"
       : "not-included");
   } catch {
-    return "unavailable";
+    if (signal?.aborted) throw new Error("enhanced timing probe cancelled");
+    return "probe-error";
   }
 };
 
@@ -91,22 +135,48 @@ export const enhancedRhythmAssetAdmissionIsCurrent = async () => {
 
 export const prepareEnhancedRhythm = async (
   onProgress?: (stage: string) => void,
-  onAuthority?: (authority: EnhancedTimingModelAuthority) => void
+  onAuthority?: (authority: EnhancedTimingModelAuthority) => void,
+  ownsAuthority: () => boolean = () => true,
+  signal?: AbortSignal
 ) => {
-  const storageAuthority = await allowEnhancedTimingModelAssetsAfterHostAction();
-  onAuthority?.(storageAuthority);
-  const generation = clientGeneration;
-  const result = await scheduleEnhancedInference(() => {
-    if (generation !== clientGeneration) throw new Error("enhanced analysis cancelled");
-    if (!sharedClient) sharedClient = new BeatThisDiagnosticClient();
-    return sharedClient.diagnose({ onProgress, storageAuthority });
-  });
-  if (generation !== clientGeneration) throw new Error("enhanced analysis cancelled");
-  if (!(await hasStoredPack(storageAuthority))) throw new Error("Enhanced timing assets were not stored in the timing cache.");
-  await runIfEnhancedTimingModelAllowed(storageAuthority, async () => undefined);
-  activeStorageAuthority = storageAuthority;
-  return Object.freeze({ result, storageAuthority });
+  if (!ownsAuthority()) throw new Error("enhanced timing preparation cancelled");
+  if (!enhancedTimingModelStorageSupportsExclusiveLock()) {
+    throw new Error("enhanced timing model storage coordination is unavailable");
+  }
+  let storageAuthority: EnhancedTimingModelAuthority | null = null;
+  try {
+    storageAuthority = await allowEnhancedTimingModelAssetsAfterHostAction(
+      onAuthority,
+      ownsAuthority,
+      signal
+    );
+    if (!ownsAuthority()) throw new Error("enhanced timing preparation cancelled");
+    const generation = clientGeneration;
+    const result = await scheduleEnhancedInference(() => {
+      if (generation !== clientGeneration || !ownsAuthority()) throw new Error("enhanced analysis cancelled");
+      if (!sharedClient) sharedClient = new BeatThisDiagnosticClient();
+      return sharedClient.diagnose({ onProgress, storageAuthority: storageAuthority! });
+    });
+    if (generation !== clientGeneration || !ownsAuthority()) throw new Error("enhanced analysis cancelled");
+    if (!(await hasStoredPack(storageAuthority))) throw new Error("Enhanced timing assets were not stored in the timing cache.");
+    if (!ownsAuthority()) throw new Error("enhanced timing preparation cancelled");
+    await runIfEnhancedTimingModelAllowed(storageAuthority, async () => undefined);
+    if (!ownsAuthority()) throw new Error("enhanced timing preparation cancelled");
+    await markEnhancedTimingModelPreparationVerified(storageAuthority, ownsAuthority);
+    if (!ownsAuthority()) throw new Error("enhanced timing preparation cancelled");
+    activeStorageAuthority = storageAuthority;
+    return Object.freeze({ result, storageAuthority });
+  } catch (error) {
+    if (storageAuthority) {
+      try { await invalidateEnhancedTimingModelPreparationProof(storageAuthority); } catch { /* A successor authority remains untouched. */ }
+    }
+    throw error;
+  }
 };
+
+export const invalidateEnhancedRhythmPreparation = (
+  authority: EnhancedTimingModelAuthority
+) => invalidateEnhancedTimingModelPreparationProof(authority);
 
 export const removeEnhancedRhythmModel = async () => {
   clientGeneration += 1;

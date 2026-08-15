@@ -74,7 +74,13 @@ describe("standard-build enhanced timing boundary", () => {
   });
 
   it("does not create or advertise a model cache when none exists", async () => {
-    const open = vi.fn();
+    let control: unknown = null;
+    const open = vi.fn(async () => ({
+      match: async () => control ? new Response(JSON.stringify(control)) : undefined,
+      put: async (_key: string, response: Response) => { control = await response.json(); },
+      delete: async () => true,
+      keys: async () => []
+    }));
     vi.stubGlobal("caches", {
       has: vi.fn(async () => false),
       open,

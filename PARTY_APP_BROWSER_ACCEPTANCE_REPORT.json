@@ -51,13 +51,13 @@
         "supported": true,
         "renderedFrames": 1488000,
         "expectedActiveFrames": 1428736,
-        "silentFrames": 291,
+        "silentFrames": 35,
         "renderQuanta": 11625,
         "nonFiniteSamples": 0,
         "clippedSamples": 0,
         "processorErrors": 0,
-        "peak": 0.074425,
-        "longestUnexpectedSilentMs": 6,
+        "peak": 0.073883,
+        "longestUnexpectedSilentMs": 1,
         "reports": 31
       },
       "browser": {
@@ -117,13 +117,13 @@
       "audioHealth": {
         "supported": true,
         "renderedFrames": 1488000,
-        "expectedActiveFrames": 1428480,
-        "silentFrames": 291,
+        "expectedActiveFrames": 1428736,
+        "silentFrames": 292,
         "renderQuanta": 11625,
         "nonFiniteSamples": 0,
         "clippedSamples": 0,
         "processorErrors": 0,
-        "peak": 0.074074,
+        "peak": 0.073392,
         "longestUnexpectedSilentMs": 6,
         "reports": 31
       },

@@ -36,7 +36,7 @@ export class BeatThisDiagnosticClient {
       const request = this.pending.get(message.requestId);
       if (!request) return;
       if (message.type === "progress") {
-        request.onProgress?.(message.stage);
+        try { request.onProgress?.(message.stage); } catch { /* Progress is advisory. */ }
         return;
       }
       if (message.type === "result" || message.type === "track-result") {

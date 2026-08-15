@@ -3229,6 +3229,55 @@ These are the active backlog, not reasons to discard the prototype.
   hold/release, auxiliary-owner refusal, and ordinary error privacy. Rendered
   focus wiring remains part of production build/browser acceptance.
 
+- **D-086 — Bound optional timing-model discovery and preparation, with exact
+  cancellation and partial-file recovery:** `enhanced-timing-preparation/v1`
+  gives the mount-time CacheStorage/origin probe a 10-second absolute
+  `performance.now()` deadline and gives one explicit host preparation a
+  15-minute absolute deadline across storage admission, cache/network work,
+  worker startup, stored-pack verification, and the zero-window inference
+  check. Settlement rechecks the absolute deadline, so timer throttling cannot
+  promote a late result. Duplicate preparations are refused. Cancel, page hide,
+  unmount, a D-084 local or foreign removal gate, failure, and timeout revoke
+  the exact owner and enhanced-admission generation before disposing the shared
+  worker client; every progress, storage-authority, final observation, and
+  result publication rechecks that owner and the strict deadline. Fetch and
+  queued Web Lock acquisition receive the owner's AbortSignal. Cancel uses a
+  separate 10-second drain boundary: Retry is not admitted until the old task
+  drains, while an unconfirmed entered storage call exposes only origin-wide
+  Remove and Reload. Work that resumes after revocation may not create a new
+  worker, enable enhanced analysis, clear a successor status, or merge a result.
+
+  Discovery distinguishes a complete pack from an allowed cache containing
+  only some required files. Complete bytes are usable only with an exact
+  `enhanced-timing-model-preparation-proof/v1` CacheStorage record bound to the
+  current D-084 epoch/token. It is written only after worker startup, pack
+  verification, and zero-window inference complete on time. Cancel, failure,
+  timeout, or owner loss serializes exact proof invalidation; a stale
+  invalidator cannot delete a successor proof. Without the origin Web Lock,
+  Mazzy neither writes nor trusts the durable proof and enters a persistent
+  coordination-unavailable state with Download/Retry disabled and only
+  truthful cleanup/browser guidance. A slow probe focuses fixed **Check Again** and
+  **Remove Possible Model Files** actions. Cancelled, rejected, or timed-out
+  preparation conservatively reports that model files may remain and focuses
+  **Retry Download** plus **Remove Model Files**; it never says the model is
+  absent. The same incomplete state is reconstructed after reload. The explicit
+  Remove action remains origin-wide D-084 proof and can take over a live
+  preparation authority-first. Optional preparation never acquires the library
+  or playback-wide gate: current music, Safe Fade planning, Pause, and **Stop
+  All Sound** remain available. The live progress callback accepts only fixed
+  worker stage identifiers and is failure-contained.
+
+  Deterministic evidence covers strict-before/exact/throttled deadlines,
+  cancel/late settlement and successor ABA, partial-cache classification,
+  post-storage-admission owner loss before worker creation, and throwing
+  advisory progress callbacks. The runtime owner, operation, monotonic
+  deadline, fixed progress state, and raw browser/worker failures remain
+  tab-memory-only. The proof contains only the same non-user authority pair and
+  is never shown, logged, exported, sent, or copied to IndexedDB. It is the only
+  new CacheStorage contract. IndexedDB, stored analysis, transition,
+  checkpoint, Party trace, report, worker-message, and network schemas are
+  unchanged.
+
 ### Open questions
 
 - **Q-001:** Remain browser/PWA-first through launch, or package a desktop app

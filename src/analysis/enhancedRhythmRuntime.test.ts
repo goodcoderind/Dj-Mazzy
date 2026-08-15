@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 const worker = vi.hoisted(() => ({
   analyzePcm: vi.fn(),
+  diagnose: vi.fn(),
   dispose: vi.fn(),
   construct: vi.fn()
 }));
@@ -11,7 +12,7 @@ vi.mock("../experimental/BeatThisDiagnosticClient", () => ({
     constructor() { worker.construct(); }
     analyzePcm = worker.analyzePcm;
     dispose = worker.dispose;
-    diagnose = vi.fn();
+    diagnose = worker.diagnose;
   }
 }));
 
@@ -20,32 +21,59 @@ import {
   createEnhancedRhythmAnalysisSession,
   disposeEnhancedRhythmClient,
   getEnhancedRhythmAssetState,
+  invalidateEnhancedRhythmPreparation,
+  prepareEnhancedRhythm,
+  projectEnhancedTimingStorageCoordinationState,
+  projectRevokedEmptyEnhancedRhythmAssetState,
   removeEnhancedRhythmModel
 } from "./enhancedRhythmRuntime";
 import {
   ENHANCED_TIMING_MODEL_CACHE,
   ENHANCED_TIMING_MODEL_CONTROL_CACHE,
-  ENHANCED_TIMING_MODEL_CONTROL_VERSION
+  ENHANCED_TIMING_MODEL_CONTROL_VERSION,
+  ENHANCED_TIMING_MODEL_PREPARATION_PROOF_VERSION
 } from "./enhancedTimingModelStorage";
 
 afterEach(() => {
   disposeEnhancedRhythmClient();
   worker.analyzePcm.mockReset();
+  worker.diagnose.mockReset();
   worker.dispose.mockReset();
   worker.construct.mockReset();
   vi.unstubAllGlobals();
 });
 
 const stubStoredPack = () => {
-  let control: unknown = null;
+  const authority = {
+    epoch: 0,
+    token: "00000000-0000-0000-0000-000000000001"
+  };
+  let control: unknown = {
+    version: ENHANCED_TIMING_MODEL_CONTROL_VERSION,
+    ...authority,
+    revoked: false
+  };
+  let proof: unknown = {
+    version: ENHANCED_TIMING_MODEL_PREPARATION_PROOF_VERSION,
+    ...authority
+  };
   vi.stubGlobal("caches", {
     has: vi.fn(async (name: string) => name === ENHANCED_TIMING_MODEL_CACHE ||
       (name === ENHANCED_TIMING_MODEL_CONTROL_CACHE && control !== null)),
     open: vi.fn(async (name: string) => name === ENHANCED_TIMING_MODEL_CONTROL_CACHE
       ? {
-          match: async () => control ? new Response(JSON.stringify(control)) : undefined,
-          put: async (_key: string, response: Response) => { control = await response.json(); },
-          delete: async () => true,
+          match: async (key: string) => key.includes("preparation-proof")
+            ? proof ? new Response(JSON.stringify(proof)) : undefined
+            : control ? new Response(JSON.stringify(control)) : undefined,
+          put: async (key: string, response: Response) => {
+            if (key.includes("preparation-proof")) proof = await response.json();
+            else control = await response.json();
+          },
+          delete: async (key: string) => {
+            if (key.includes("preparation-proof")) proof = null;
+            else control = null;
+            return true;
+          },
           keys: async () => []
         }
       : {
@@ -55,7 +83,10 @@ const stubStoredPack = () => {
           keys: async () => ["model"]
         })
   });
-  vi.stubGlobal("navigator", { onLine: true });
+  vi.stubGlobal("navigator", {
+    onLine: true,
+    locks: { request: async (_name: string, _options: unknown, task: () => Promise<unknown>) => task() }
+  });
   vi.stubGlobal("location", { origin: "https://mazzy.invalid" });
   vi.stubGlobal("crypto", { randomUUID: () => "00000000-0000-0000-0000-000000000001" });
 };
@@ -110,6 +141,84 @@ describe("enhanced timing origin availability", () => {
     );
   });
 
+  it("reports an incomplete allowed cache instead of advertising a fresh download", async () => {
+    let control: unknown = null;
+    vi.stubGlobal("caches", {
+      has: vi.fn(async (name: string) => name === ENHANCED_TIMING_MODEL_CACHE ||
+        (name === ENHANCED_TIMING_MODEL_CONTROL_CACHE && control !== null)),
+      open: vi.fn(async (name: string) => name === ENHANCED_TIMING_MODEL_CONTROL_CACHE
+        ? {
+            match: async () => control ? new Response(JSON.stringify(control)) : undefined,
+            put: async (_key: string, response: Response) => { control = await response.json(); },
+            keys: async () => []
+          }
+        : {
+            match: async (url: string) => url.endsWith("config.json") ? new Response("cached") : undefined,
+            keys: async () => ["config.json"]
+          })
+    });
+    vi.stubGlobal("navigator", { onLine: true });
+    vi.stubGlobal("location", { origin: "https://mazzy.invalid" });
+    vi.stubGlobal("crypto", { randomUUID: () => "00000000-0000-0000-0000-000000000001" });
+    const fetch = vi.fn();
+    vi.stubGlobal("fetch", fetch);
+
+    await expect(getEnhancedRhythmAssetState()).resolves.toBe("partial");
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("does not report complete cached bytes as ready without exact preparation proof", async () => {
+    let control: unknown = null;
+    vi.stubGlobal("caches", {
+      has: vi.fn(async (name: string) => name === ENHANCED_TIMING_MODEL_CACHE ||
+        (name === ENHANCED_TIMING_MODEL_CONTROL_CACHE && control !== null)),
+      open: vi.fn(async (name: string) => name === ENHANCED_TIMING_MODEL_CONTROL_CACHE
+        ? {
+            match: async (key: string) => key.includes("preparation-proof")
+              ? undefined
+              : control ? new Response(JSON.stringify(control)) : undefined,
+            put: async (_key: string, response: Response) => { control = await response.json(); },
+            keys: async () => []
+          }
+        : {
+            match: async () => new Response("cached"),
+            keys: async () => ["config", "model", "mel"]
+          })
+    });
+    vi.stubGlobal("navigator", { onLine: true });
+    vi.stubGlobal("location", { origin: "https://mazzy.invalid" });
+    vi.stubGlobal("crypto", { randomUUID: () => "00000000-0000-0000-0000-000000000001" });
+
+    await expect(getEnhancedRhythmAssetState()).resolves.toBe("partial");
+  });
+
+  it("does not create a worker when preparation authority is lost after storage admission", async () => {
+    stubStoredPack();
+    let owned = true;
+    const preparation = prepareEnhancedRhythm(
+      undefined,
+      () => { owned = false; },
+      () => owned
+    );
+    await expect(preparation).rejects.toThrow("cancelled");
+    expect(worker.construct).not.toHaveBeenCalled();
+  });
+
+  it("invalidates complete cached bytes when outer preparation acceptance is refused", async () => {
+    stubStoredPack();
+    worker.diagnose.mockResolvedValueOnce({ experimentalOnly: true });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(null, {
+      status: 200,
+      headers: { "content-type": "application/json" }
+    })));
+    const prepared = await prepareEnhancedRhythm();
+    await expect(getEnhancedRhythmAssetState()).resolves.toBe("stored");
+    await expect(invalidateEnhancedRhythmPreparation(prepared.storageAuthority)).resolves.toEqual({
+      outcome: "confirmed-absent"
+    });
+    await expect(getEnhancedRhythmAssetState()).resolves.toBe("partial");
+  });
+
   it("keeps retry removal visible when revocation exists but model files remain", async () => {
     vi.stubGlobal("caches", {
       has: vi.fn(async (name: string) => [
@@ -132,8 +241,64 @@ describe("enhanced timing origin availability", () => {
     await expect(getEnhancedRhythmAssetState()).resolves.toBe("removal-needed");
   });
 
+  it("keeps an included build retryable after verified removal while offline", () => {
+    expect(projectRevokedEmptyEnhancedRhythmAssetState({
+      included: true,
+      online: false
+    })).toBe("unavailable");
+    expect(projectRevokedEmptyEnhancedRhythmAssetState({
+      included: true,
+      online: true
+    })).toBe("downloadable");
+    expect(projectRevokedEmptyEnhancedRhythmAssetState({
+      included: false,
+      online: false
+    })).toBe("not-included");
+  });
+
+  it("projects a clean included profile without Web Locks as coordination-unavailable", () => {
+    expect(projectEnhancedTimingStorageCoordinationState({
+      included: true,
+      exclusiveLockAvailable: false
+    })).toBe("coordination-unavailable");
+    expect(projectEnhancedTimingStorageCoordinationState({
+      included: true,
+      exclusiveLockAvailable: true
+    })).toBeNull();
+    expect(projectEnhancedTimingStorageCoordinationState({
+      included: false,
+      exclusiveLockAvailable: false
+    })).toBeNull();
+  });
+
+  it("refuses preparation before storage admission or worker creation without an origin lock", async () => {
+    let controlOpened = false;
+    vi.stubGlobal("caches", {
+      has: vi.fn(async () => false),
+      open: vi.fn(async () => {
+        controlOpened = true;
+        throw new Error("must not open");
+      })
+    });
+    vi.stubGlobal("navigator", { onLine: true });
+    vi.stubGlobal("location", { origin: "https://mazzy.invalid" });
+
+    await expect(prepareEnhancedRhythm()).rejects.toThrow("coordination is unavailable");
+    expect(controlOpened).toBe(false);
+    expect(worker.construct).not.toHaveBeenCalled();
+  });
+
   it("cannot publish stored availability from a probe superseded by removal", async () => {
-    let control: { version: string; epoch: number; revoked: boolean } | null = null;
+    const authority = { epoch: 1, token: "authority-token-000001" };
+    let control: unknown = {
+      version: ENHANCED_TIMING_MODEL_CONTROL_VERSION,
+      ...authority,
+      revoked: false
+    };
+    let proof: unknown = {
+      version: ENHANCED_TIMING_MODEL_PREPARATION_PROOF_VERSION,
+      ...authority
+    };
     let modelStored = true;
     let resolveHead!: (response: Response) => void;
     const head = new Promise<Response>((resolve) => { resolveHead = resolve; });
@@ -143,11 +308,18 @@ describe("enhanced timing origin availability", () => {
         : modelStored),
       open: vi.fn(async (name: string) => name === ENHANCED_TIMING_MODEL_CONTROL_CACHE
         ? {
-            match: async () => control ? new Response(JSON.stringify(control)) : undefined,
-            put: async (_key: string, response: Response) => {
-              control = await response.json() as { version: string; epoch: number; revoked: boolean };
+            match: async (key: string) => key.includes("preparation-proof")
+              ? proof ? new Response(JSON.stringify(proof)) : undefined
+              : control ? new Response(JSON.stringify(control)) : undefined,
+            put: async (key: string, response: Response) => {
+              if (key.includes("preparation-proof")) proof = await response.json();
+              else control = await response.json();
             },
-            delete: async (): Promise<boolean> => { control = null; return true; }
+            delete: async (key: string): Promise<boolean> => {
+              if (key.includes("preparation-proof")) proof = null;
+              else control = null;
+              return true;
+            }
           }
         : {
             match: async () => modelStored ? new Response("cached") : undefined,
@@ -172,7 +344,7 @@ describe("enhanced timing origin availability", () => {
     await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
     await expect(removeEnhancedRhythmModel()).resolves.toBe(true);
     resolveHead(new Response(null, { status: 200, headers: { "content-type": "application/json" } }));
-    await expect(probe).resolves.toBe("unavailable");
+    await expect(probe).resolves.toBe("probe-error");
   });
 
   it("rebases the real enhanced queue so a hung epoch cannot block its successor", async () => {

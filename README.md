@@ -656,15 +656,48 @@ Mazzy** alert remains. A later download requires a new explicit host action.
 Removing model files does not erase enhanced timing already saved in imported
 track records; that saved timing may continue to guide transitions until the
 track or whole local library is removed. Music, conservative Safe Fade, and
-**Stop All Sound** remain available throughout. Only that fixed, versioned
-control-state record is persisted in CacheStorage; its epoch/token pair is
+**Stop All Sound** remain available throughout. That fixed, versioned
+control-state record and a separate
+`enhanced-timing-model-preparation-proof/v1` record are persisted in the same
+CacheStorage control cache. The proof contains only the exact non-user
+epoch/token pair and exists only after worker startup, stored-pack verification,
+and the zero-window check finish under current authority. The authority pair is
 structured-cloned to the same-origin timing worker for exact admission checks.
-It is never sent over the network or placed in IndexedDB, UI, logs, or reports.
+Neither record is sent over the network or placed in IndexedDB, UI, logs, or
+reports.
 The advisory sender ID is never persisted.
 No user-derived removal state is shared or stored; no filename, track identity,
 model URL, raw error,
 deadline, or model bytes are added to UI, reports, logs, IndexedDB, or network
 requests.
+
+Timing-model discovery and the explicit download are also bounded. The initial
+browser-cache check uses a 10-second `enhanced-timing-preparation/v1` owner; if
+it does not finish, Mazzy shows fixed **Check Again** and **Remove Possible
+Model Files** actions instead of leaving the Library control busy forever. An
+explicit model preparation has one exact 15-minute monotonic owner across
+storage admission, download, worker startup, verification, and the zero-window
+check. Duplicate downloads are refused. **Cancel Download**, page hide,
+unmount, remote removal, failure, and timeout revoke App and worker publication
+before cleanup; a late browser or worker result cannot enable enhanced timing
+or replace a successor attempt. Music, Autopilot's conservative Safe Fade, and
+**Stop All Sound** remain available while this optional work runs. Cancel first
+waits at most 10 seconds for abortable fetch, queued-lock, and worker work to
+drain. A cancelled, failed, or timed-out attempt invalidates its exact proof and
+never claims that downloaded bytes disappeared. After verified drain the
+focused recovery state keeps **Retry Download** and **Remove Model Files**
+reachable. If an entered browser-storage call still cannot confirm drain,
+Retry stays closed and the fixed state offers **Remove Model Files** and
+**Reload Mazzy**. An allowed cache containing only part of the required pack—or
+all bytes without the exact proof—is incomplete on reload. Preparation owners,
+operations, deadlines, progress, and raw failures stay in tab memory. The proof
+record is the only new CacheStorage contract; no new IndexedDB, analysis,
+transition, checkpoint, trace, report, worker-message, or network schema is
+introduced. Mazzy neither writes nor trusts a durable ready proof when the
+browser cannot provide the origin-wide Web Lock. That path is a persistent,
+focused coordination-unavailable state: enhanced timing and Download/Retry stay
+off, Safe Fade remains ready, and only truthful cleanup/browser guidance is
+offered rather than making a cross-tab readiness claim.
 Mazzy uses a local system monospace font stack and makes no third-party font
 request when the app opens.
 

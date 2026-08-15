@@ -73,6 +73,35 @@ describe("Beat This diagnostic client", () => {
     expect(progress).toEqual(["loading-83mb-model"]);
   });
 
+  it("contains a throwing advisory progress callback without losing the request", async () => {
+    const worker = new FakeWorker();
+    const client = new BeatThisDiagnosticClient(worker as unknown as Worker);
+    const diagnosticResult = {
+      experimentVersion: BEAT_THIS_EXPERIMENT_VERSION,
+      backend: "wasm" as const,
+      webGpuAvailable: false,
+      modelBytes: 83_143_431,
+      sessionLoadMs: 10,
+      zeroWindowInferenceMs: 20,
+      beatOutputShape: [1, 1_500],
+      downbeatOutputShape: [1, 1_500],
+      finiteOutput: true,
+      experimentalOnly: true as const,
+      eligibilityConfidence: 0
+    };
+    const pending = client.diagnose({
+      storageAuthority: testAuthority,
+      onProgress: () => { throw new Error("private progress consumer"); }
+    });
+    expect(() => worker.onmessage?.({
+      data: { type: "progress", requestId: 1, stage: "loading-83mb-model" }
+    } as MessageEvent)).not.toThrow();
+    worker.onmessage?.({
+      data: { type: "result", requestId: 1, result: diagnosticResult }
+    } as MessageEvent);
+    await expect(pending).resolves.toEqual(diagnosticResult);
+  });
+
   it("rejects pending diagnostics when disposed", async () => {
     const worker = new FakeWorker();
     const client = new BeatThisDiagnosticClient(worker as unknown as Worker);

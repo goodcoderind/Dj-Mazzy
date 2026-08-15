@@ -38,6 +38,7 @@ import {
   disposeEnhancedRhythmClient,
   enhancedRhythmAssetAdmissionIsCurrent,
   getEnhancedRhythmAssetState,
+  invalidateEnhancedRhythmPreparation,
   prepareEnhancedRhythm,
   removeEnhancedRhythmModel
 } from "@mazzy/enhanced-rhythm";
@@ -65,6 +66,13 @@ import {
   startEnhancedTimingRemoval
 } from "./analysis/enhancedTimingRemovalRuntime";
 import {
+  claimEnhancedTimingPreparationReady,
+  normalizeEnhancedTimingPreparationStage,
+  ownsEnhancedTimingPreparation,
+  projectEnhancedTimingPreparationUiMode,
+  startEnhancedTimingPreparation
+} from "./analysis/enhancedTimingPreparationRuntime";
+import {
   advanceEnhancedTimingAdmission,
   createEnhancedTimingAdmission,
   enhancedTimingRemovalStatusAfterPrepare,
@@ -77,7 +85,10 @@ import {
   projectEnhancedTimingRevocationObservation,
   subscribeToEnhancedTimingRemoval
 } from "./analysis/enhancedTimingRemovalChannel";
-import { enhancedTimingModelControlObservation } from "./analysis/enhancedTimingModelStorage";
+import {
+  enhancedTimingModelControlObservation,
+  enhancedTimingModelStorageSupportsExclusiveLock
+} from "./analysis/enhancedTimingModelStorage";
 import { deriveRehearsalSourceCueSeconds, renderTransitionRehearsal } from "./diagnostics/transitionRehearsal";
 import {
   startTransitionRehearsalRuntime,
@@ -389,6 +400,8 @@ export default function App() {
   const [analyzingIds, setAnalyzingIds] = useState({});
   const [enhancedTimingAvailable, setEnhancedTimingAvailable] = useState(null);
   const [enhancedTimingState, setEnhancedTimingState] = useState("checking");
+  const [enhancedTimingProbeAttempt, setEnhancedTimingProbeAttempt] = useState(0);
+  const [enhancedTimingPreparationStatus, setEnhancedTimingPreparationStatus] = useState(null);
   const [enhancedTimingRemovalStatus, setEnhancedTimingRemovalStatus] = useState(null);
   const [enhancedFailureByTrack, setEnhancedFailureByTrack] = useState({});
   const [loadedByDeck, setLoadedByDeck] = useState({ a: null, b: null });
@@ -475,9 +488,16 @@ export default function App() {
   const enhancedTimingRemovalGateRef = useRef(false);
   const enhancedTimingRemovalCircuitRef = useRef(false);
   const enhancedTimingRemovalStatusRef = useRef(null);
+  const enhancedTimingPreparationStatusRef = useRef(null);
   const enhancedTimingAssetStateGenerationRef = useRef(0);
   const enhancedTimingAdmissionRef = useRef(createEnhancedTimingAdmission());
   const enhancedTimingRevocationBaselineRef = useRef(null);
+  const enhancedTimingPreparationOperationRef = useRef(0);
+  const enhancedTimingPreparationRuntimeRef = useRef(null);
+  const enhancedTimingPreparationUncertainRef = useRef(false);
+  const enhancedTimingProbeOperationRef = useRef(0);
+  const enhancedTimingProbeOwnerRef = useRef(null);
+  const enhancedTimingProbeRuntimeRef = useRef(null);
   const enhancedTimingPrepareOwnerRef = useRef(null);
   const removedTrackIdsRef = useRef(new Set());
   const autoPilotPreloadLeaseRef = useRef(null);
@@ -730,6 +750,7 @@ export default function App() {
     if (!autoPilotEnabled && !autoMixArming && !autoMixing && !rehearsalActive &&
       !rehearsalPreparing && !partyFirstSongOpening && !partyFirstSongStarting &&
       !libraryMembershipStatus && enhancedTimingRemovalStatus?.state !== "removing" &&
+      enhancedTimingPreparationStatus?.state !== "preparing" &&
       hostAudioRecoveryStatus?.state !== "working") return;
     const warnBeforeLeaving = (event) => {
       event.preventDefault();
@@ -737,7 +758,7 @@ export default function App() {
     };
     window.addEventListener("beforeunload", warnBeforeLeaving);
     return () => window.removeEventListener("beforeunload", warnBeforeLeaving);
-  }, [autoPilotEnabled, autoMixArming, autoMixing, rehearsalActive, rehearsalPreparing, partyFirstSongOpening, partyFirstSongStarting, libraryMembershipStatus, enhancedTimingRemovalStatus, hostAudioRecoveryStatus]);
+  }, [autoPilotEnabled, autoMixArming, autoMixing, rehearsalActive, rehearsalPreparing, partyFirstSongOpening, partyFirstSongStarting, libraryMembershipStatus, enhancedTimingPreparationStatus, enhancedTimingRemovalStatus, hostAudioRecoveryStatus]);
 
   useEffect(() => {
     const onBeforeUnload = (event) => {
@@ -1341,19 +1362,81 @@ export default function App() {
   useEffect(() => {
     let active = true;
     const assetStateGeneration = ++enhancedTimingAssetStateGenerationRef.current;
-    void getEnhancedRhythmAssetState().then(async (assetState) => {
-      if (!active || !mayPublishEnhancedTimingAssetState({
+    if (enhancedTimingRemovalGateRef.current) return () => { active = false; };
+    const runtime = startEnhancedTimingPreparation({
+      operation: ++enhancedTimingProbeOperationRef.current,
+      kind: "probe",
+      task: async (signal) => {
+        const assetState = await getEnhancedRhythmAssetState(signal);
+        const admissionCurrent = assetState === "stored"
+          ? await enhancedRhythmAssetAdmissionIsCurrent()
+          : false;
+        return Object.freeze({ assetState, admissionCurrent });
+      }
+    });
+    enhancedTimingProbeOwnerRef.current = runtime.owner;
+    enhancedTimingProbeRuntimeRef.current = runtime;
+    setEnhancedTimingState("checking");
+    setEnhancedTimingPreparationStatus(null);
+    const publishProbeFailure = () => {
+      if (!active || enhancedTimingProbeRuntimeRef.current !== runtime ||
+        enhancedTimingRemovalGateRef.current) return;
+      enhancedTimingProbeRuntimeRef.current = null;
+      enhancedTimingAdmissionRef.current = advanceEnhancedTimingAdmission(
+        enhancedTimingAdmissionRef.current,
+        false
+      );
+      setEnhancedTimingAvailable(false);
+      setEnhancedTimingState("check-error");
+      setEnhancedTimingPreparationStatus({
+        state: "check-failed",
+        message: "Mazzy could not finish checking the optional timing model. Safe Fade and music remain available. Check again, or remove any model files that may remain."
+      });
+      window.requestAnimationFrame(() => enhancedTimingPreparationStatusRef.current?.focus?.());
+    };
+    void runtime.settlement.then((settlement) => {
+      if (!active || !ownsEnhancedTimingPreparation(
+        enhancedTimingProbeOwnerRef.current,
+        runtime.owner
+      ) || !mayPublishEnhancedTimingAssetState({
         currentGeneration: enhancedTimingAssetStateGenerationRef.current,
         expectedGeneration: assetStateGeneration,
         removalGated: enhancedTimingRemovalGateRef.current
       })) return;
-      const stored = assetState === "stored";
-      if (stored && !(await enhancedRhythmAssetAdmissionIsCurrent())) return;
-      if (!active || !mayPublishEnhancedTimingAssetState({
-        currentGeneration: enhancedTimingAssetStateGenerationRef.current,
-        expectedGeneration: assetStateGeneration,
-        removalGated: enhancedTimingRemovalGateRef.current
-      })) return;
+      enhancedTimingProbeOwnerRef.current = null;
+      if (settlement.outcome !== "completed") {
+        setEnhancedTimingState("probe-cancelling");
+        setEnhancedTimingAvailable(false);
+        setEnhancedTimingPreparationStatus({
+          state: "probe-cancelling",
+          message: "Stopping the timing-model check. Reload Mazzy if browser storage does not respond; music, Safe Fade, and Stop All Sound remain available."
+        });
+        window.requestAnimationFrame(() => enhancedTimingPreparationStatusRef.current?.focus?.());
+        void runtime.waitForDrain().then((drain) => {
+          if (!active || enhancedTimingProbeRuntimeRef.current !== runtime ||
+            enhancedTimingRemovalGateRef.current) return;
+          if (drain.outcome === "timed-out") {
+            enhancedTimingProbeRuntimeRef.current = null;
+            enhancedTimingPreparationUncertainRef.current = true;
+            setEnhancedTimingState("preparation-unconfirmed");
+            setEnhancedTimingPreparationStatus({
+              state: "cancel-timeout",
+              message: "Browser storage did not confirm that the timing-model check stopped. Enhanced analysis stays off. Reload Mazzy, or remove possible model files; music, Safe Fade, and Stop All Sound remain available."
+            });
+            window.requestAnimationFrame(() => enhancedTimingPreparationStatusRef.current?.focus?.());
+            return;
+          }
+          publishProbeFailure();
+        });
+        return;
+      }
+      const { assetState, admissionCurrent } = settlement.value;
+      if (assetState === "probe-error") {
+        publishProbeFailure();
+        return;
+      }
+      enhancedTimingProbeRuntimeRef.current = null;
+      const stored = assetState === "stored" && admissionCurrent;
       enhancedTimingAdmissionRef.current = advanceEnhancedTimingAdmission(
         enhancedTimingAdmissionRef.current,
         stored
@@ -1361,41 +1444,83 @@ export default function App() {
       setEnhancedTimingAvailable(stored);
       setEnhancedTimingState(stored
         ? "stored"
-          : assetState === "stored-unavailable"
-            ? "stored-unavailable"
-          : assetState === "removal-needed"
-            ? "removal-needed"
-          : assetState === "downloadable"
-            ? "not-downloaded"
-            : assetState === "not-included"
-              ? "not-included"
-              : "offline");
-      if (assetState === "removal-needed") {
-        window.requestAnimationFrame(() => enhancedTimingRemovalStatusRef.current?.focus?.());
+        : assetState === "stored-unavailable"
+          ? "stored-unavailable"
+        : assetState === "partial"
+          ? "partial"
+        : assetState === "removal-needed"
+          ? "removal-needed"
+        : assetState === "downloadable"
+          ? "not-downloaded"
+        : assetState === "coordination-unavailable"
+          ? "coordination-unavailable"
+          : assetState === "not-included"
+            ? "not-included"
+            : "offline");
+      if (["partial", "removal-needed", "coordination-unavailable"].includes(assetState)) {
+        setEnhancedTimingPreparationStatus(assetState === "partial" ? {
+          state: "partial",
+          message: "Timing model files are incomplete. Enhanced analysis is off. Retry the download or remove the files; music and Safe Fade remain available."
+        } : assetState === "coordination-unavailable" ? {
+          state: "coordination-unavailable",
+          message: "This browser page cannot safely coordinate the optional timing-model files. Enhanced timing stays off. Use Mazzy from a modern browser on a secure or local page; you can still remove possible model files. Music and Safe Fade remain available."
+        } : null);
+        window.requestAnimationFrame(() => assetState === "removal-needed"
+          ? enhancedTimingRemovalStatusRef.current?.focus?.()
+          : enhancedTimingPreparationStatusRef.current?.focus?.());
       }
-    }).catch(() => {
-      if (!active || !mayPublishEnhancedTimingAssetState({
-        currentGeneration: enhancedTimingAssetStateGenerationRef.current,
-        expectedGeneration: assetStateGeneration,
-        removalGated: enhancedTimingRemovalGateRef.current
-      })) return;
-      enhancedTimingAdmissionRef.current = advanceEnhancedTimingAdmission(
-        enhancedTimingAdmissionRef.current,
-        false
-      );
-      setEnhancedTimingAvailable(false);
-      setEnhancedTimingState("offline");
     });
-    return () => { active = false; };
-  }, []);
+    return () => {
+      active = false;
+      if (ownsEnhancedTimingPreparation(enhancedTimingProbeOwnerRef.current, runtime.owner)) {
+        enhancedTimingProbeOwnerRef.current = null;
+        runtime.cancel();
+      }
+    };
+  }, [enhancedTimingProbeAttempt]);
 
   useEffect(() => {
     const onBeforeUnload = (event) => {
-      if (!enhancedTimingRemovalOwnerRef.current) return;
+      if (!enhancedTimingRemovalOwnerRef.current &&
+        !enhancedTimingPrepareOwnerRef.current) return;
       event.preventDefault();
       event.returnValue = "";
     };
     const onPageHide = () => {
+      if (enhancedTimingPrepareOwnerRef.current) {
+        cancelEnhancedTimingPreparation({ focus: false });
+      }
+      if (enhancedTimingProbeOwnerRef.current) {
+        const runtime = enhancedTimingProbeRuntimeRef.current;
+        enhancedTimingProbeOwnerRef.current = null;
+        enhancedTimingAssetStateGenerationRef.current += 1;
+        try { runtime?.cancel?.(); } catch { /* Probe authority is revoked. */ }
+        setEnhancedTimingAvailable(false);
+        setEnhancedTimingState("probe-cancelling");
+        setEnhancedTimingPreparationStatus({
+          state: "probe-cancelling",
+          message: "Stopping the timing-model check. Reload Mazzy if browser storage does not respond; music, Safe Fade, and Stop All Sound remain available."
+        });
+        void runtime?.waitForDrain?.().then((drain) => {
+          if (enhancedTimingProbeRuntimeRef.current !== runtime ||
+            enhancedTimingRemovalGateRef.current) return;
+          enhancedTimingProbeRuntimeRef.current = null;
+          if (drain.outcome === "timed-out") {
+            enhancedTimingPreparationUncertainRef.current = true;
+            setEnhancedTimingState("preparation-unconfirmed");
+            setEnhancedTimingPreparationStatus({
+              state: "cancel-timeout",
+              message: "Browser storage did not confirm that the timing-model check stopped. Enhanced analysis stays off. Reload Mazzy, or remove possible model files."
+            });
+            return;
+          }
+          setEnhancedTimingState("check-error");
+          setEnhancedTimingPreparationStatus({
+            state: "check-failed",
+            message: "The timing-model check stopped when this page was left. Check again, or remove any model files that may remain."
+          });
+        });
+      }
       if (!enhancedTimingRemovalOwnerRef.current) return;
       enhancedTimingRemovalOwnerRef.current = null;
       try { enhancedTimingRemovalRuntimeRef.current?.cancel?.(); } catch { /* Removal authority is revoked. */ }
@@ -1406,11 +1531,23 @@ export default function App() {
         focus: false
       });
     };
+    const onPageShow = (event) => {
+      if (!event.persisted) return;
+      window.requestAnimationFrame(() => enhancedTimingPreparationStatusRef.current?.focus?.());
+    };
     window.addEventListener("beforeunload", onBeforeUnload);
     window.addEventListener("pagehide", onPageHide);
+    window.addEventListener("pageshow", onPageShow);
     return () => {
       window.removeEventListener("beforeunload", onBeforeUnload);
       window.removeEventListener("pagehide", onPageHide);
+      window.removeEventListener("pageshow", onPageShow);
+      enhancedTimingPrepareOwnerRef.current = null;
+      try { enhancedTimingPreparationRuntimeRef.current?.cancel?.(); } catch { /* Host teardown continues. */ }
+      enhancedTimingPreparationRuntimeRef.current = null;
+      enhancedTimingProbeOwnerRef.current = null;
+      try { enhancedTimingProbeRuntimeRef.current?.cancel?.(); } catch { /* Host teardown continues. */ }
+      enhancedTimingProbeRuntimeRef.current = null;
       enhancedTimingRemovalOwnerRef.current = null;
       try { enhancedTimingRemovalRuntimeRef.current?.cancel?.(); } catch { /* Removal authority is revoked. */ }
       enhancedTimingRemovalRuntimeRef.current = null;
@@ -1480,59 +1617,207 @@ export default function App() {
     };
   }, []);
 
+  const retryEnhancedTimingProbe = () => {
+    if (enhancedTimingRemovalGateRef.current || enhancedTimingPreparationUncertainRef.current ||
+      enhancedTimingPrepareOwnerRef.current ||
+      enhancedTimingProbeOwnerRef.current || enhancedTimingPreparationRuntimeRef.current ||
+      enhancedTimingProbeRuntimeRef.current) return;
+    setEnhancedTimingPreparationStatus(null);
+    setEnhancedTimingState("checking");
+    setEnhancedTimingProbeAttempt((current) => current + 1);
+  };
+
+  const cancelEnhancedTimingPreparation = ({ focus = true, publish = true } = {}) => {
+    const prepareOwner = enhancedTimingPrepareOwnerRef.current;
+    if (!prepareOwner) return false;
+    const runtime = enhancedTimingPreparationRuntimeRef.current;
+    let cancelled = true;
+    try { cancelled = runtime?.cancel?.() ?? true; } catch { /* Preparation authority is revoked below. */ }
+    if (runtime && !cancelled) {
+      if (focus) window.requestAnimationFrame(() => enhancedTimingPreparationStatusRef.current?.focus?.());
+      return false;
+    }
+    enhancedTimingPrepareOwnerRef.current = null;
+    enhancedTimingAssetStateGenerationRef.current += 1;
+    enhancedTimingAdmissionRef.current = advanceEnhancedTimingAdmission(
+      enhancedTimingAdmissionRef.current,
+      false
+    );
+    try { disposeEnhancedRhythmClient(); } catch { /* Late worker publication remains revoked. */ }
+    if (publish) {
+      setEnhancedTimingAvailable(false);
+      setEnhancedTimingState("preparation-cancelling");
+      setEnhancedTimingPreparationStatus({
+        state: "cancelling",
+        message: "Stopping timing model preparation and waiting for browser storage work to settle. No new enhanced analysis can start. Reload Mazzy if this does not finish; music, Safe Fade, and Stop All Sound remain available."
+      });
+      if (focus) window.requestAnimationFrame(() => enhancedTimingPreparationStatusRef.current?.focus?.());
+    }
+    if (!runtime || !publish) {
+      enhancedTimingPreparationRuntimeRef.current = null;
+      return true;
+    }
+    void runtime.waitForDrain().then((drain) => {
+      if (enhancedTimingPreparationRuntimeRef.current !== runtime ||
+        enhancedTimingRemovalGateRef.current) return;
+      enhancedTimingPreparationRuntimeRef.current = null;
+      if (drain.outcome === "timed-out" ||
+        prepareOwner.invalidationDisposition === "unconfirmed") {
+        enhancedTimingPreparationUncertainRef.current = true;
+        setEnhancedTimingState("preparation-unconfirmed");
+        setEnhancedTimingPreparationStatus({
+          state: "cancel-timeout",
+          message: "Browser storage did not confirm that timing-model preparation stopped. Enhanced analysis stays off. Reload Mazzy, or remove the model files; music, Safe Fade, and Stop All Sound remain available."
+        });
+        if (focus) window.requestAnimationFrame(() => enhancedTimingPreparationStatusRef.current?.focus?.());
+        return;
+      }
+      enhancedTimingPreparationUncertainRef.current = false;
+      setEnhancedTimingState("partial");
+      setEnhancedTimingPreparationStatus({
+        state: "cancelled",
+        message: "Timing model preparation stopped. Model files may remain. Retry the download or remove them; music and Safe Fade remain available."
+      });
+      if (focus) window.requestAnimationFrame(() => enhancedTimingPreparationStatusRef.current?.focus?.());
+    });
+    return true;
+  };
+
   const prepareTimingModel = async () => {
     if (enhancedTimingRemovalGateRef.current) {
       window.requestAnimationFrame(() => enhancedTimingRemovalStatusRef.current?.focus?.());
       return;
     }
+    if (enhancedTimingPreparationUncertainRef.current ||
+      enhancedTimingPrepareOwnerRef.current || enhancedTimingProbeOwnerRef.current ||
+      enhancedTimingPreparationRuntimeRef.current || enhancedTimingProbeRuntimeRef.current) {
+      window.requestAnimationFrame(() => enhancedTimingPreparationStatusRef.current?.focus?.());
+      return;
+    }
+    if (!enhancedTimingModelStorageSupportsExclusiveLock()) {
+      setEnhancedTimingAvailable(false);
+      setEnhancedTimingState("coordination-unavailable");
+      setEnhancedTimingPreparationStatus({
+        state: "coordination-unavailable",
+        message: "This browser page cannot safely coordinate the optional timing-model files. Enhanced timing stays off. Use Mazzy from a modern browser on a secure or local page; you can still remove possible model files. Music and Safe Fade remain available."
+      });
+      window.requestAnimationFrame(() => enhancedTimingPreparationStatusRef.current?.focus?.());
+      return;
+    }
     setEnhancedTimingRemovalStatus(enhancedTimingRemovalStatusAfterPrepare);
+    enhancedTimingPreparationUncertainRef.current = false;
     const assetStateGeneration = ++enhancedTimingAssetStateGenerationRef.current;
-    const prepareOwner = { generation: assetStateGeneration, authority: null };
+    const runtime = startEnhancedTimingPreparation({
+      operation: ++enhancedTimingPreparationOperationRef.current,
+      kind: "prepare",
+      task: async (signal) => {
+        try {
+          await prepareEnhancedRhythm(
+            (stage) => {
+              if (enhancedTimingPrepareOwnerRef.current !== prepareOwner) return;
+              setEnhancedTimingState(normalizeEnhancedTimingPreparationStage(stage));
+            },
+            (authority) => {
+              if (enhancedTimingPrepareOwnerRef.current !== prepareOwner) return;
+              prepareOwner.authority = authority;
+              enhancedTimingRevocationBaselineRef.current = { authority, revoked: false };
+            },
+            () => enhancedTimingPrepareOwnerRef.current === prepareOwner &&
+              ownsEnhancedTimingPreparation(prepareOwner.runtimeOwner, runtime.owner) &&
+              runtime.snapshot().active &&
+              performance.now() < runtime.owner.deadlineMilliseconds,
+            signal
+          );
+          if (!prepareOwner.authority || enhancedTimingPrepareOwnerRef.current !== prepareOwner ||
+            !runtime.snapshot().active) throw new Error("enhanced timing preparation cancelled");
+          const observed = await enhancedTimingModelControlObservation();
+          const admissionCurrent = await enhancedRhythmAssetAdmissionIsCurrent();
+          if (!claimEnhancedTimingPreparationReady({
+            observed,
+            preparedAuthority: prepareOwner.authority,
+            admissionCurrent,
+            ownerCurrent: enhancedTimingPrepareOwnerRef.current === prepareOwner &&
+              runtime.snapshot().active,
+            claimCommit: () => runtime.claimCommit()
+          })) {
+            throw new Error("enhanced timing preparation superseded");
+          }
+          return Object.freeze({ result: "ready", observed });
+        } catch {
+          let invalidationDisposition = "confirmed-absent";
+          if (prepareOwner.authority) {
+            try {
+              invalidationDisposition = (await invalidateEnhancedRhythmPreparation(
+                prepareOwner.authority
+              )).outcome;
+            } catch {
+              invalidationDisposition = "unconfirmed";
+            }
+          }
+          prepareOwner.invalidationDisposition = invalidationDisposition;
+          try {
+            return Object.freeze({
+              result: "failed",
+              observed: await enhancedTimingModelControlObservation(),
+              invalidationDisposition
+            });
+          } catch {
+            return Object.freeze({ result: "failed", observed: null, invalidationDisposition });
+          }
+        }
+      }
+    });
+    const prepareOwner = {
+      runtimeOwner: runtime.owner,
+      authority: null,
+      invalidationDisposition: null
+    };
     enhancedTimingPrepareOwnerRef.current = prepareOwner;
-    let preparedAuthority = null;
+    enhancedTimingPreparationRuntimeRef.current = runtime;
     enhancedTimingAdmissionRef.current = advanceEnhancedTimingAdmission(
       enhancedTimingAdmissionRef.current,
       false
     );
     setEnhancedTimingState("downloading");
-    try {
-      await prepareEnhancedRhythm(
-        (stage) => setEnhancedTimingState(stage),
-        (authority) => {
-          if (enhancedTimingPrepareOwnerRef.current !== prepareOwner) return;
-          preparedAuthority = authority;
-          prepareOwner.authority = authority;
-          enhancedTimingRevocationBaselineRef.current = { authority, revoked: false };
-        }
-      );
-      if (assetStateGeneration !== enhancedTimingAssetStateGenerationRef.current ||
-        enhancedTimingRemovalGateRef.current ||
-        enhancedTimingPrepareOwnerRef.current !== prepareOwner || !preparedAuthority) return;
-      const observed = await enhancedTimingModelControlObservation();
-      if (observed.revoked || observed.authority.epoch !== preparedAuthority.epoch ||
-        observed.authority.token !== preparedAuthority.token ||
-        !(await enhancedRhythmAssetAdmissionIsCurrent())) {
-        throw new Error("enhanced timing preparation superseded");
-      }
-      if (assetStateGeneration !== enhancedTimingAssetStateGenerationRef.current ||
-        enhancedTimingRemovalGateRef.current ||
-        enhancedTimingPrepareOwnerRef.current !== prepareOwner) return;
+    setEnhancedTimingPreparationStatus({
+      state: "preparing",
+      message: "Preparing the optional timing model. Music and Safe Fade remain available. You can cancel or remove downloaded model files."
+    });
+    window.requestAnimationFrame(() => enhancedTimingPreparationStatusRef.current?.focus?.());
+    const settlement = await runtime.settlement;
+    if (assetStateGeneration !== enhancedTimingAssetStateGenerationRef.current ||
+      enhancedTimingRemovalGateRef.current ||
+      enhancedTimingPrepareOwnerRef.current !== prepareOwner ||
+      !ownsEnhancedTimingPreparation(prepareOwner.runtimeOwner, runtime.owner)) return;
+
+    if (settlement.outcome === "completed" && settlement.value.result === "ready") {
+      const observed = settlement.value.observed;
       enhancedTimingAdmissionRef.current = advanceEnhancedTimingAdmission(
         enhancedTimingAdmissionRef.current,
         true
       );
       enhancedTimingRevocationBaselineRef.current = observed;
+      enhancedTimingPrepareOwnerRef.current = null;
+      enhancedTimingPreparationRuntimeRef.current = null;
+      enhancedTimingPreparationUncertainRef.current = false;
       setEnhancedTimingAvailable(true);
       setEnhancedTimingState("ready");
-    } catch {
-      if (assetStateGeneration !== enhancedTimingAssetStateGenerationRef.current ||
-        enhancedTimingRemovalGateRef.current) return;
-      enhancedTimingAdmissionRef.current = advanceEnhancedTimingAdmission(
-        enhancedTimingAdmissionRef.current,
-        false
-      );
+      setEnhancedTimingPreparationStatus({
+        state: "ready",
+        message: "Timing model files are ready. Mazzy can use enhanced timing for new analysis; music and Safe Fade stayed available while preparation ran."
+      });
+      window.requestAnimationFrame(() => enhancedTimingPreparationStatusRef.current?.focus?.());
+      return;
+    }
+
+    enhancedTimingAdmissionRef.current = advanceEnhancedTimingAdmission(
+      enhancedTimingAdmissionRef.current,
+      false
+    );
+    try { disposeEnhancedRhythmClient(); } catch { /* Failed preparation remains denied. */ }
+    if (settlement.outcome === "completed" && settlement.value.observed) {
+      const observed = settlement.value.observed;
       try {
-        const observed = await enhancedTimingModelControlObservation();
         const projected = projectEnhancedTimingRevocationObservation({
           initialize: false,
           baseline: enhancedTimingRevocationBaselineRef.current,
@@ -1545,20 +1830,74 @@ export default function App() {
         });
         enhancedTimingRevocationBaselineRef.current = projected.nextBaseline;
         if (projected.applyRemote || observed.revoked) {
+          enhancedTimingPrepareOwnerRef.current = null;
+          enhancedTimingPreparationRuntimeRef.current = null;
           gateEnhancedTimingRemovalWork({
             state: "blocked",
             message: "Another Mazzy tab changed the timing model while this download was preparing. New enhanced analysis stays off here until Mazzy reloads; saved track timing may still guide transitions. Music, Safe Fade, and Stop All Sound remain available."
           });
           return;
         }
-      } catch { /* The fixed offline state below remains conservative. */ }
-      setEnhancedTimingAvailable(false);
-      setEnhancedTimingState("error");
-    } finally {
-      if (enhancedTimingPrepareOwnerRef.current === prepareOwner) {
-        enhancedTimingPrepareOwnerRef.current = null;
-      }
+      } catch { /* The fixed partial-file state below remains conservative. */ }
     }
+    if (settlement.outcome === "completed" &&
+      settlement.value.invalidationDisposition === "unconfirmed") {
+      enhancedTimingPrepareOwnerRef.current = null;
+      enhancedTimingPreparationRuntimeRef.current = null;
+      enhancedTimingPreparationUncertainRef.current = true;
+      setEnhancedTimingAvailable(false);
+      setEnhancedTimingState("preparation-unconfirmed");
+      setEnhancedTimingPreparationStatus({
+        state: "cancel-timeout",
+        message: "Mazzy could not confirm that the timing-model preparation proof was cleared. Enhanced analysis stays off. Reload Mazzy, or remove the model files; music, Safe Fade, and Stop All Sound remain available."
+      });
+      window.requestAnimationFrame(() => enhancedTimingPreparationStatusRef.current?.focus?.());
+      return;
+    }
+    enhancedTimingPrepareOwnerRef.current = null;
+    setEnhancedTimingAvailable(false);
+    if (["timed-out", "cancelled"].includes(settlement.outcome)) {
+      setEnhancedTimingState("preparation-cancelling");
+      setEnhancedTimingPreparationStatus({
+        state: "cancelling",
+        message: "Stopping timing model preparation and waiting briefly for browser storage work to settle. Reload Mazzy if this does not finish; music, Safe Fade, and Stop All Sound remain available."
+      });
+      window.requestAnimationFrame(() => enhancedTimingPreparationStatusRef.current?.focus?.());
+      void runtime.waitForDrain().then((drain) => {
+        if (enhancedTimingPreparationRuntimeRef.current !== runtime ||
+          enhancedTimingRemovalGateRef.current) return;
+        enhancedTimingPreparationRuntimeRef.current = null;
+        if (drain.outcome === "timed-out" ||
+          prepareOwner.invalidationDisposition === "unconfirmed") {
+          enhancedTimingPreparationUncertainRef.current = true;
+          setEnhancedTimingState("preparation-unconfirmed");
+          setEnhancedTimingPreparationStatus({
+            state: "cancel-timeout",
+            message: "Browser storage did not confirm that timing-model preparation stopped. Enhanced analysis stays off. Reload Mazzy, or remove the model files; music, Safe Fade, and Stop All Sound remain available."
+          });
+          window.requestAnimationFrame(() => enhancedTimingPreparationStatusRef.current?.focus?.());
+          return;
+        }
+        enhancedTimingPreparationUncertainRef.current = false;
+        setEnhancedTimingState("partial");
+        setEnhancedTimingPreparationStatus({
+          state: settlement.outcome === "timed-out" ? "timed-out" : "cancelled",
+          message: settlement.outcome === "timed-out"
+            ? "Timing model preparation exceeded its safety boundary and stopped. Model files may remain. Retry or remove them; music and Safe Fade remain available."
+            : "Timing model preparation stopped. Model files may remain. Retry or remove them; music and Safe Fade remain available."
+        });
+        window.requestAnimationFrame(() => enhancedTimingPreparationStatusRef.current?.focus?.());
+      });
+      return;
+    }
+    enhancedTimingPreparationRuntimeRef.current = null;
+    enhancedTimingPreparationUncertainRef.current = false;
+    setEnhancedTimingState("partial");
+    setEnhancedTimingPreparationStatus({
+      state: "failed",
+      message: "Mazzy could not finish preparing the timing model. Model files may remain. Retry or remove them; music and Safe Fade remain available."
+    });
+    window.requestAnimationFrame(() => enhancedTimingPreparationStatusRef.current?.focus?.());
   };
 
   const gateEnhancedTimingRemovalWork = ({ state, message, focus = true }) => {
@@ -1569,12 +1908,19 @@ export default function App() {
       queuedKeys: queuedAnalysisIdsRef.current,
       deferred: backgroundAnalysisDeferredRef.current
     });
+    cancelEnhancedTimingPreparation({ focus: false, publish: false });
     enhancedTimingPrepareOwnerRef.current = null;
+    try { enhancedTimingPreparationRuntimeRef.current?.cancel?.(); } catch { /* Removal owns model state. */ }
+    enhancedTimingPreparationRuntimeRef.current = null;
+    enhancedTimingProbeOwnerRef.current = null;
+    try { enhancedTimingProbeRuntimeRef.current?.cancel?.(); } catch { /* Removal owns model state. */ }
+    enhancedTimingProbeRuntimeRef.current = null;
     enhancedTimingAssetStateGenerationRef.current += 1;
     enhancedTimingAdmissionRef.current = gatePlan.admission;
     enhancedTimingRemovalGateRef.current = true;
     setEnhancedTimingAvailable(false);
     setEnhancedTimingState(state === "removing" ? "removing-model" : "removal-unconfirmed");
+    setEnhancedTimingPreparationStatus(null);
     setEnhancedTimingRemovalStatus({ state, message });
     if (state === "blocked") enhancedTimingRemovalCircuitRef.current = true;
 
@@ -1643,6 +1989,7 @@ export default function App() {
     enhancedTimingRemovalRuntimeRef.current = null;
     if (disposition === "verified-removed") {
       enhancedTimingRemovalGateRef.current = false;
+      enhancedTimingPreparationUncertainRef.current = false;
       setEnhancedTimingRemovalStatus({
         state: "removed",
         message: "Timing model files were removed. Previously saved timing for imported tracks remains until those tracks or the library are removed."
@@ -6558,6 +6905,12 @@ export default function App() {
       libraryRoutineWriteRuntimeRef.current?.halt?.();
       cancelActiveBackgroundAnalysis({ resetEnhanced: true, announceUnabortable: false });
       try { disposeAnalysisClient(); } catch { /* Host teardown continues. */ }
+      enhancedTimingPrepareOwnerRef.current = null;
+      try { enhancedTimingPreparationRuntimeRef.current?.cancel?.(); } catch { /* Host teardown continues. */ }
+      enhancedTimingPreparationRuntimeRef.current = null;
+      enhancedTimingProbeOwnerRef.current = null;
+      try { enhancedTimingProbeRuntimeRef.current?.cancel?.(); } catch { /* Host teardown continues. */ }
+      enhancedTimingProbeRuntimeRef.current = null;
       try { disposeEnhancedRhythmClient(); } catch { /* Host teardown continues. */ }
       partyFirstSongLoadRef.current = null;
       partyFirstSongStartOwnerRef.current = null;
@@ -7258,6 +7611,11 @@ export default function App() {
     : null;
   const checkpointNeedsAttention = partyCheckpointRecovery &&
     partyCheckpointRecovery.status !== "available";
+
+  const enhancedTimingPreparationUiMode = projectEnhancedTimingPreparationUiMode({
+    preparationState: enhancedTimingPreparationStatus?.state,
+    timingState: enhancedTimingState
+  });
 
   return (
     <main className="app">
@@ -8228,12 +8586,18 @@ export default function App() {
 
           <div
             hidden={enhancedTimingState === "removal-needed"}
-            ref={["removing", "removed"].includes(enhancedTimingRemovalStatus?.state) ? enhancedTimingRemovalStatusRef : null}
-            tabIndex={["removing", "removed"].includes(enhancedTimingRemovalStatus?.state) ? -1 : undefined}
-            role={["removing", "removed"].includes(enhancedTimingRemovalStatus?.state) ? "status" : undefined}
-            aria-live={["removing", "removed"].includes(enhancedTimingRemovalStatus?.state) ? "polite" : undefined}
-            aria-atomic={["removing", "removed"].includes(enhancedTimingRemovalStatus?.state) ? "true" : undefined}
-            aria-busy={enhancedTimingRemovalStatus?.state === "removing" ? "true" : undefined}
+            ref={enhancedTimingPreparationStatus
+              ? enhancedTimingPreparationStatusRef
+              : ["removing", "removed"].includes(enhancedTimingRemovalStatus?.state)
+                ? enhancedTimingRemovalStatusRef
+                : null}
+            tabIndex={enhancedTimingPreparationStatus || ["removing", "removed"].includes(enhancedTimingRemovalStatus?.state) ? -1 : undefined}
+            role={enhancedTimingPreparationStatus
+              ? ["preparing", "ready"].includes(enhancedTimingPreparationStatus.state) ? "status" : "alert"
+              : ["removing", "removed"].includes(enhancedTimingRemovalStatus?.state) ? "status" : undefined}
+            aria-live={enhancedTimingPreparationStatus || ["removing", "removed"].includes(enhancedTimingRemovalStatus?.state) ? "polite" : undefined}
+            aria-atomic={enhancedTimingPreparationStatus || ["removing", "removed"].includes(enhancedTimingRemovalStatus?.state) ? "true" : undefined}
+            aria-busy={enhancedTimingRemovalStatus?.state === "removing" || ["preparing", "cancelling", "probe-cancelling"].includes(enhancedTimingPreparationStatus?.state) ? "true" : undefined}
             className={`enhanced-timing-banner ${enhancedTimingAvailable ? "ready" : "basic"}`}>
             <span>
               {enhancedTimingRemovalStatus?.state === "removing"
@@ -8242,6 +8606,12 @@ export default function App() {
                   ? "TIMING MODEL FILES REMOVED · SAVED TRACK TIMING REMAINS UNTIL THOSE TRACKS OR THE LIBRARY ARE REMOVED"
                 : enhancedTimingRemovalStatus?.state === "blocked"
                   ? "NEW ENHANCED ANALYSIS IS OFF UNTIL MAZZY RELOADS · SAVED TRACK TIMING MAY STILL GUIDE TRANSITIONS"
+              : enhancedTimingPreparationStatus?.state === "preparing"
+                ? "PREPARING THE OPTIONAL TIMING MODEL… MUSIC AND SAFE FADE STAY AVAILABLE"
+              : enhancedTimingPreparationStatus?.state === "ready"
+                ? "TIMING MODEL FILES CHECKED · READY TO ANALYZE"
+              : enhancedTimingPreparationStatus
+                ? enhancedTimingPreparationStatus.message
               : enhancedTimingState === "checking"
                 ? "CHECKING AUTOMATIC TIMING TOOLS…"
                 : enhancedTimingAvailable
@@ -8256,6 +8626,12 @@ export default function App() {
                         : "A TIMING MODEL IS STORED FROM ANOTHER BUILD · THIS BUILD WILL NOT USE IT"
                     : enhancedTimingState === "removal-needed"
                       ? "TIMING MODEL FILES MAY REMAIN · ENHANCED ANALYSIS IS OFF · REMOVE AGAIN TO FINISH"
+                    : enhancedTimingState === "partial"
+                      ? "TIMING MODEL FILES MAY BE INCOMPLETE · RETRY OR REMOVE THEM · SAFE FADE IS READY"
+                    : enhancedTimingState === "check-error"
+                      ? "TIMING MODEL CHECK DID NOT FINISH · CHECK AGAIN OR REMOVE POSSIBLE FILES"
+                    : enhancedTimingState === "coordination-unavailable"
+                      ? "THIS BROWSER PAGE CANNOT SAFELY COORDINATE THE TIMING MODEL · SAFE FADE IS READY"
                     : enhancedTimingState === "not-included"
                       ? "THIS BUILD DOES NOT INCLUDE ENHANCED TIMING · SAFE FADE IS READY"
                     : enhancedTimingState === "error"
@@ -8268,6 +8644,28 @@ export default function App() {
               <button type="button" disabled>REMOVING TIMING MODEL…</button>
             ) : enhancedTimingRemovalStatus?.state === "blocked" ? (
               <button type="button" disabled>RELOAD TO CHECK REMOVAL</button>
+            ) : enhancedTimingPreparationUiMode === "preparing" ? (
+              <>
+                <button type="button" onClick={() => cancelEnhancedTimingPreparation()}>CANCEL DOWNLOAD</button>
+                <button type="button" onClick={() => void removeTimingModel()}>REMOVE TIMING MODEL</button>
+              </>
+            ) : enhancedTimingPreparationUiMode === "unconfirmed" ? (
+              <>
+                <button type="button" onClick={() => void removeTimingModel()}>REMOVE MODEL FILES</button>
+                <button type="button" onClick={() => window.location.reload()}>RELOAD MAZZY</button>
+              </>
+            ) : enhancedTimingPreparationUiMode === "probe-retry" ? (
+              <>
+                <button type="button" onClick={retryEnhancedTimingProbe}>CHECK AGAIN</button>
+                <button type="button" onClick={() => void removeTimingModel()}>REMOVE POSSIBLE MODEL FILES</button>
+              </>
+            ) : enhancedTimingPreparationUiMode === "coordination-unavailable" ? (
+              <button type="button" onClick={() => void removeTimingModel()}>REMOVE POSSIBLE MODEL FILES</button>
+            ) : enhancedTimingPreparationUiMode === "partial" ? (
+              <>
+                <button type="button" onClick={() => void prepareTimingModel()}>RETRY DOWNLOAD</button>
+                <button type="button" onClick={() => void removeTimingModel()}>REMOVE MODEL FILES</button>
+              </>
             ) : enhancedTimingAvailable || ["stored-unavailable", "removal-needed"].includes(enhancedTimingState) ? (
               <button type="button" onClick={() => void removeTimingModel()}>REMOVE TIMING MODEL</button>
             ) : (

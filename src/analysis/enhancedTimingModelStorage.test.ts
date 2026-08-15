@@ -41,6 +41,19 @@ const createSerialLocks = () => {
 };
 
 describe("enhanced timing model storage", () => {
+  it("refuses preparation before mutating control storage when the origin lock is unavailable", async () => {
+    const { entries, cacheStorage } = createCaches();
+    const storage = createEnhancedTimingModelStorage({
+      cacheStorage,
+      locks: null,
+      origin: "https://mazzy.invalid"
+    });
+
+    expect(storage.supportsExclusiveLock()).toBe(false);
+    await expect(storage.allowAfterHostAction()).rejects.toThrow("coordination is unavailable");
+    expect(entries.size).toBe(0);
+  });
+
   it("revokes before deletion and refuses every later cache write", async () => {
     const { entries, cacheStorage } = createCaches();
     const locks = { request: vi.fn(async (_name, _options, task) => task()) };
@@ -114,6 +127,115 @@ describe("enhanced timing model storage", () => {
     await expect(storage.match("https://mazzy.invalid/model", successorEpoch)).resolves.toBeInstanceOf(Response);
   });
 
+  it("restores revocation when preparation loses authority during the control write", async () => {
+    const { cacheStorage } = createCaches();
+    const locks = createSerialLocks();
+    let owned = true;
+    let controlPuts = 0;
+    const originalOpen = cacheStorage.open;
+    cacheStorage.open = vi.fn(async (name: string) => {
+      const cache = await originalOpen(name);
+      if (name !== "mazzy-timing-model-control-v1") return cache;
+      return {
+        ...cache,
+        put: async (key: string, value: Response) => {
+          controlPuts += 1;
+          await cache.put(key, value);
+          if (controlPuts === 2) owned = false;
+        }
+      };
+    });
+    const storage = createEnhancedTimingModelStorage({
+      cacheStorage,
+      locks,
+      origin: "https://mazzy.invalid",
+      createToken: (() => {
+        let token = 0;
+        return () => `authority-token-${String(++token).padStart(6, "0")}`;
+      })()
+    });
+
+    await expect(storage.allowAfterHostAction(undefined, () => owned)).rejects.toThrow("cancelled");
+    await expect(storage.controlObservation()).resolves.toMatchObject({ revoked: true });
+  });
+
+  it("persists verification only for the exact completed preparation authority", async () => {
+    const { cacheStorage } = createCaches();
+    const storage = createEnhancedTimingModelStorage({
+      cacheStorage,
+      locks: createSerialLocks(),
+      origin: "https://mazzy.invalid"
+    });
+    const first = await storage.allowAfterHostAction();
+    await expect(storage.preparationVerified(first)).resolves.toBe(false);
+    await expect(storage.markPreparationVerified(first)).resolves.toBe(true);
+    await expect(storage.preparationVerified(first)).resolves.toBe(true);
+
+    const successor = await storage.allowAfterHostAction();
+    await expect(storage.preparationVerified(successor)).resolves.toBe(false);
+    await expect(storage.markPreparationVerified(first)).rejects.toThrow("disabled");
+  });
+
+  it("removes a proof whose owner is cancelled during proof persistence", async () => {
+    const { cacheStorage } = createCaches();
+    const storage = createEnhancedTimingModelStorage({
+      cacheStorage,
+      locks: createSerialLocks(),
+      origin: "https://mazzy.invalid"
+    });
+    const authority = await storage.allowAfterHostAction();
+    let owned = true;
+    const originalOpen = cacheStorage.open;
+    cacheStorage.open = vi.fn(async (name: string) => {
+      const cache = await originalOpen(name);
+      if (name !== "mazzy-timing-model-control-v1") return cache;
+      return {
+        ...cache,
+        put: async (key: string, value: Response) => {
+          await cache.put(key, value);
+          if (key.includes("preparation-proof")) owned = false;
+        }
+      };
+    });
+
+    await expect(storage.markPreparationVerified(authority, () => owned)).rejects.toThrow("cancelled");
+    await expect(storage.preparationVerified(authority)).resolves.toBe(false);
+  });
+
+  it("distinguishes an unconfirmed proof delete from harmless successor ownership", async () => {
+    const { cacheStorage } = createCaches();
+    const storage = createEnhancedTimingModelStorage({
+      cacheStorage,
+      locks: createSerialLocks(),
+      origin: "https://mazzy.invalid"
+    });
+    const first = await storage.allowAfterHostAction();
+    await storage.markPreparationVerified(first);
+    const originalOpen = cacheStorage.open;
+    cacheStorage.open = vi.fn(async (name: string) => {
+      const cache = await originalOpen(name);
+      if (name !== "mazzy-timing-model-control-v1") return cache;
+      return {
+        ...cache,
+        delete: async (key: string) => {
+          if (key.includes("preparation-proof")) throw new Error("private cache failure");
+          return cache.delete(key);
+        }
+      };
+    });
+    await expect(storage.invalidatePreparationProof(first)).resolves.toEqual({
+      outcome: "unconfirmed"
+    });
+    await expect(storage.preparationVerified(first)).resolves.toBe(true);
+
+    cacheStorage.open = originalOpen;
+    const successor = await storage.allowAfterHostAction();
+    await expect(storage.invalidatePreparationProof(first)).resolves.toEqual({
+      outcome: "superseded"
+    });
+    await expect(storage.preparationVerified(successor)).resolves.toBe(false);
+  });
+
   it("rejects an old writer and result after removal plus a successor host action", async () => {
     const { cacheStorage } = createCaches();
     const locks = createSerialLocks();
@@ -164,5 +286,26 @@ describe("enhanced timing model storage", () => {
     const storage = createEnhancedTimingModelStorage({ cacheStorage, locks: null, origin: "https://mazzy.invalid" });
     await expect(storage.revokeAndRemove()).resolves.toBe(false);
     await expect(storage.put("https://mazzy.invalid/model", new Response("late"))).rejects.toThrow("disabled");
+  });
+
+  it("never writes or trusts a durable preparation proof without Web Lock support", async () => {
+    const { cacheStorage } = createCaches();
+    const coordinatedStorage = createEnhancedTimingModelStorage({
+      cacheStorage,
+      locks: createSerialLocks(),
+      origin: "https://mazzy.invalid"
+    });
+    const authority = await coordinatedStorage.allowAfterHostAction();
+    const storage = createEnhancedTimingModelStorage({
+      cacheStorage,
+      locks: null,
+      origin: "https://mazzy.invalid"
+    });
+    await expect(storage.allowAfterHostAction()).rejects.toThrow("coordination is unavailable");
+    await expect(storage.markPreparationVerified(authority)).rejects.toThrow("unavailable");
+    await expect(storage.preparationVerified(authority)).resolves.toBe(false);
+    await expect(storage.invalidatePreparationProof(authority)).resolves.toEqual({
+      outcome: "unconfirmed"
+    });
   });
 });
