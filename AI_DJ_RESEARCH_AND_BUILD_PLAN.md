@@ -1956,7 +1956,8 @@ These are the active backlog, not reasons to discard the prototype.
   and later analysis-save errors have separate UI ownership, and only a later
   successful analysis snapshot clears the latter.
 - **D-045 — Party Autopilot owns a bounded screen wake-lock request:** entering
-  Autopilot asks the browser for a `screen` wake lock; every state path that
+  Autopilot asks the browser for a `screen` wake lock; D-087 supplies the
+  explicit monotonic owner/deadline. Every state path that
   disables Autopilot converges on release through one state-owned effect, and
   unmount also releases. A hidden-tab release is reacquired only after the tab
   becomes visible while Autopilot is still enabled. Request failure never blocks
@@ -3277,6 +3278,36 @@ These are the active backlog, not reasons to discard the prototype.
   new CacheStorage contract. IndexedDB, stored analysis, transition,
   checkpoint, Party trace, report, worker-message, and network schemas are
   unchanged.
+
+- **D-087 — Bound screen-wake acquisition without blocking the party:**
+  `party-wake-lock/v2` owns at most one unresolved native
+  `navigator.wakeLock.request("screen")` and applies a 10-second absolute
+  `performance.now()` deadline. Both the timer and native settlement recheck
+  that deadline, so throttled delivery cannot promote a late sentinel. Timeout
+  settles Mazzy's public attempt as `unavailable`, leaves current music,
+  Autopilot, Pause, and **Stop All Sound** untouched, and changes the existing
+  polite status to the fixed instruction to keep the computer powered and
+  awake. Visibility or repeated Autopilot effects cannot fan out another
+  request while the old browser promise is unresolved.
+
+  Pause, final, Stop, page teardown, and fatal-host teardown revoke demand
+  before fallible release. Any sentinel delivered after timeout or revocation
+  is never published active and is released exactly; if release rejects, that
+  exact sentinel remains owned so later Stop/fatal teardown can retry it. A
+  browser-released current sentinel can start one fresh bounded request only
+  while the newest Party demand is still visible. Raw browser errors, owner and
+  sentinel identity, generations, deadlines, and exact timing remain tab memory
+  only and are never stored, logged, traced, exported, or sent. Only the literal
+  `screen` request is made; there is no device or permission enumeration. No
+  IndexedDB, analysis, transition, checkpoint, Party trace, report, worker,
+  network, or service-worker schema changes.
+
+  Deterministic evidence covers never-settling acquisition, exact and
+  throttled deadlines, strict pre-deadline success, repeated visibility/acquire
+  refusal, late release, retained failed cleanup with fatal retry, browser
+  release/reacquisition, successor-safe release ordering, and throwing status
+  callbacks. The contract does not claim to override OS sleep policy, keep a
+  closed laptop lid awake, or prove that a physical display stays on.
 
 ### Open questions
 

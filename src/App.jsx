@@ -199,7 +199,10 @@ import {
   shouldQueuePartyCheckpointCandidate,
   startBoundedPartyCheckpointOperation
 } from "./storage/partyCheckpointWriteRuntime";
-import { createPartyWakeLockController } from "./power/partyWakeLock";
+import {
+  createPartyWakeLockController,
+  partyWakeLockStatusMessage
+} from "./power/partyWakeLock";
 import { registerFatalHostWakeLockRelease } from "./audio/fatalHostAudioSafety";
 import { audioRecoveryMessage, needsHostAudioRecovery } from "./audio/audioContextRecovery";
 import {
@@ -8008,11 +8011,7 @@ export default function App() {
         </p>
         {autoPilotEnabled && (
           <p className="party-tab-note" role="status" aria-live="polite">
-            {partyWakeLockStatus === "active"
-              ? "Mazzy asked this screen to stay awake while Autopilot runs."
-              : partyWakeLockStatus === "unavailable"
-                ? "This browser could not keep the screen awake; keep the computer powered and awake."
-                : "Asking the browser to keep this screen awake…"}
+            {partyWakeLockStatusMessage(partyWakeLockStatus)}
           </p>
         )}
         {partyDiagnosticEnabled && partyDiagnosticEvaluation && (

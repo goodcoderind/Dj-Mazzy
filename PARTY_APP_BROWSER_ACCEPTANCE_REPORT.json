@@ -50,13 +50,13 @@
       "audioHealth": {
         "supported": true,
         "renderedFrames": 1488000,
-        "expectedActiveFrames": 1428736,
+        "expectedActiveFrames": 1428480,
         "silentFrames": 35,
         "renderQuanta": 11625,
         "nonFiniteSamples": 0,
         "clippedSamples": 0,
         "processorErrors": 0,
-        "peak": 0.073883,
+        "peak": 0.07321,
         "longestUnexpectedSilentMs": 1,
         "reports": 31
       },
@@ -123,7 +123,7 @@
         "nonFiniteSamples": 0,
         "clippedSamples": 0,
         "processorErrors": 0,
-        "peak": 0.073392,
+        "peak": 0.073391,
         "longestUnexpectedSilentMs": 6,
         "reports": 31
       },

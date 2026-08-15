@@ -1064,10 +1064,15 @@ decode failure is labelled **FILE COULDN’T BE READ · TRY ANOTHER FORMAT**; it
 not presented as transition-ready.
 
 While Party Autopilot is running, Mazzy requests the browser's screen wake lock
-and releases it when Autopilot pauses or the page closes. Browsers and operating
-systems may refuse or later release that request, so the UI reports the actual
-state and still tells the host to keep the computer powered and awake when the
-lock is unavailable. It cannot keep a closed laptop lid awake.
+and releases it when Autopilot pauses or the page closes. The request has one
+10-second monotonic owner and Mazzy never starts a second request while the
+browser still has the first one unresolved. A timeout does not pause music or
+Autopilot; the polite status changes to the fixed instruction to keep the
+computer powered and awake. A sentinel delivered after timeout or Pause is
+released without becoming active, and a failed exact release remains available
+to Stop/fatal teardown for retry. Browsers and operating systems may refuse or
+later release the request. Mazzy cannot override OS power policy or keep a
+closed laptop lid awake.
 
 If the browser suspends or the device interrupts its AudioContext, Mazzy pauses
 Autopilot authority and shows a host-operated **RESUME AUDIO** control. It does
