@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Mazzy Paused Recovery Transfer</title>
+    <style>
+      .checkpoint-transfer-evidence {
+        position: relative;
+        z-index: 10000;
+        padding: 16px;
+        border-bottom: 2px solid #7f8cff;
+        background: #10141b;
+        color: #fff;
+        font: 16px/1.45 system-ui, sans-serif;
+      }
+      .checkpoint-transfer-evidence button { min-height: 44px; padding: 8px 16px; }
+      .checkpoint-transfer-evidence pre { max-height: 320px; overflow: auto; white-space: pre-wrap; }
+    </style>
+  </head>
+  <body>
+    <section class="checkpoint-transfer-evidence" aria-labelledby="checkpoint-transfer-title">
+      <h1 id="checkpoint-transfer-title">Paused recovery double-reload gate</h1>
+      <p id="checkpoint-transfer-status" role="status" aria-live="polite">Checking the disposable browser profile…</p>
+      <button id="checkpoint-transfer-seed" type="button" disabled>CREATE PAUSED RECOVERY FIXTURE</button>
+      <pre id="checkpoint-transfer-report" aria-label="Aggregate recovery transfer report"></pre>
+    </section>
+    <div id="root"></div>
+    <script type="module" src="/src/diagnostics/partyCheckpointTransferDiagnosticPage.jsx"></script>
+  </body>
+</html>

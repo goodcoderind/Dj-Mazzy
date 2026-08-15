@@ -2736,7 +2736,7 @@ These are the active backlog, not reasons to discard the prototype.
   restore claim is bounded separately in D-075.
 
 - **D-075 — Bound the exact paused-plan restore claim before applying any
-  session state:** `party-checkpoint-claim-owner/v1` binds one runtime-only
+  session state:** `party-checkpoint-claim-owner/v2` binds one runtime-only
   operation to the saved session/revision, previous and next writer tokens, and
   current library epoch/revision. Restore claims this authority synchronously,
   exposes the existing global storage-busy lock/status, and runs the production
@@ -2972,6 +2972,61 @@ These are the active backlog, not reasons to discard the prototype.
   latches the existing audio engine, disposes observers/health monitoring, and
   closes or suspends the context. Persisted BFCache restoration reloads rather
   than reviving stale patched authority.
+
+- **D-080 — Transfer paused-plan ownership without consuming its only durable
+  payload, and prove a second refresh in Chromium:** The D-075 claim transaction
+  now performs an atomic CAS from one strict `available` checkpoint to another.
+  It compares the exact session, revision, previous writer, and library
+  epoch/revision, then changes only `revision + 1` and the next writer token.
+  Every queue/history/progress/setting field and array order remains identical.
+  The transaction commits before broadcasting and returns the full normalized
+  transferred record. App rejects any returned shape that is not an exact
+  ownership transfer, applies state only from that returned record, and retains
+  it as the current stored owner. No Deck is loaded, AudioContext resumed,
+  Autopilot or diagnostic started, or wake lock acquired.
+
+  The restored card truthfully says that the minimized recovery remains saved
+  across refresh until the host chooses **Remove Saved Recovery Copy**, starts
+  a New Party, or reaches terminal cleanup. A second refresh therefore exposes
+  the same paused plan again instead of losing it behind a payload-free
+  tombstone. Legacy `claimed` tombstones remain accepted for compatibility but
+  are no longer produced and cannot recover payload they never stored. A
+  foreign transfer still makes the previous writer stale and enters the D-076
+  ownership-loss path; old-writer saves and clears fail CAS, while the new exact
+  writer may update or clear. The restored-card removal command also requires a
+  healthy checkpoint runtime and an exact local session/writer match; it never
+  falls back to a revision-only clear after another tab takes ownership. If an
+  owned periodic save is already active, removal drains it, re-reads the same
+  exact owner, and clears its newest revision; a foreign owner cannot pass that
+  refresh. Track
+  deletion and Remove All retain their atomic
+  invalidation semantics. IndexedDB stays at v8 and
+  `party-session-checkpoint/v1` does not change because the existing minimized
+  `available` shape already carries this data.
+
+  `party-checkpoint-transfer-browser-runner/v1` runs the diagnostics-only full
+  App gate twice in fresh Chromium profiles. Each run imports four generated
+  WAVs through the real folder input, creates one valid minimized paused fixture,
+  reloads to the visible recovery card without stealing existing focus, restores through the real UI, reloads
+  again before any song choice or playback, restores a second time, and removes
+  the saved copy through the real App action. The strict
+  `party-checkpoint-transfer-browser-report/v1` requires two recovery cards,
+  two payload-preserving revision/writer transfers, two visible paused-state
+  projections with exact queue order and source guidance, unchanged library
+  counters, preserved startup focus plus exact restore/removal focus handoffs, zero Deck
+  starts, AudioContext resumes, wake requests, active Decks, Autopilot,
+  page/unhandled errors, or external requests, and a final `cleared` record whose
+  revision, session/writer owner, and unchanged library counters are verified.
+  The production-used paused-state projector is separately exhaustive-tested
+  for duration, exact active seconds, profile, energy shift, include-library,
+  played order, remaining order, and last stable source; the browser gate does
+  not overclaim hidden React state from coarse visible text.
+  The committed aggregate contains only fixed enums, booleans, and capped
+  counts; no names, paths, IDs, tokens, hashes, timestamps, raw errors, File,
+  audio, user-agent, or device data. Diagnostic code is absent from standard and
+  enhanced artifacts. This proves the double-reload generated-WAV path in the
+  tested Chromium environment, not process-crash durability, physical speaker
+  state, real-music quality, or Firefox/Safari support.
 
 ### Open questions
 

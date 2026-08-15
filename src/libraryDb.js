@@ -6,7 +6,8 @@ import {
   PARTY_SESSION_CHECKPOINT_KEY,
   createPartySessionCheckpoint,
   createPartySessionCheckpointTombstone,
-  normalizePartySessionCheckpointRecord
+  normalizePartySessionCheckpointRecord,
+  transferPartySessionCheckpointOwnership
 } from "./domain/partySessionCheckpoint";
 import { normalizeContentIdentity } from "./storage/contentIdentity";
 
@@ -680,19 +681,14 @@ export const claimPartySessionCheckpoint = async (
       await completed;
       return { status: "stale-checkpoint", revision: current?.revision ?? rawCheckpointRevision(rawCurrent), libraryState };
     }
-    const tombstone = createPartySessionCheckpointTombstone(
-      "claimed",
-      current.revision + 1,
-      sessionId,
-      nextWriterToken
-    );
-    sessionStore.put(tombstone);
+    const checkpoint = transferPartySessionCheckpointOwnership(current, nextWriterToken);
+    sessionStore.put(checkpoint);
     await completed;
-    broadcastCheckpoint("party-checkpoint-claimed", libraryState, tombstone.revision, {
+    broadcastCheckpoint("party-checkpoint-claimed", libraryState, checkpoint.revision, {
       sessionId,
       writerToken: nextWriterToken
     });
-    return { status: "claimed", revision: tombstone.revision, libraryState };
+    return { status: "transferred", revision: checkpoint.revision, checkpoint, libraryState };
   } finally {
     signal?.removeEventListener("abort", abortTransaction);
   }

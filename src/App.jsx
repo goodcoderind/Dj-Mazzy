@@ -104,10 +104,14 @@ import {
 } from "./planning/PartySessionClock";
 import {
   createPartySessionCheckpoint,
+  isPartySessionCheckpointOwnershipTransfer,
   normalizePartySessionCheckpointRecord,
   partySessionCheckpointFingerprint,
   projectPausedPartySessionCheckpoint,
-  reconcilePartySessionCheckpoint
+  projectRestoredPausedPartyState,
+  reconcilePartySessionCheckpoint,
+  refreshOwnedPartySessionCheckpointDiscardTarget,
+  resolvePartySessionCheckpointDiscardTarget
 } from "./domain/partySessionCheckpoint";
 import {
   createPartyAutopilotTraceRecorder,
@@ -1981,7 +1985,8 @@ export default function App() {
 
   const clearOwnedPartyCheckpoint = async (
     recordStatus = "cleared",
-    { terminalOnFailure = false, expectedCheckpoint = null } = {}
+    { terminalOnFailure = false, expectedCheckpoint = null,
+      refreshOwnedExpectedCheckpoint = false } = {}
   ) => {
     const membershipMode = libraryMutationModeRef.current;
     const membershipBlocked = Boolean(libraryMembershipOwnerRef.current) ||
@@ -2052,11 +2057,20 @@ export default function App() {
       }
       partyCheckpointWriteGenerationRef.current += 1;
       const stored = partyCheckpointStoredRecordRef.current;
-      const clearExpected = expectedCheckpoint ?? {
+      let clearExpected = expectedCheckpoint ?? {
         revision: partyCheckpointRevisionRef.current,
         sessionId: stored?.sessionId ?? null,
         writerToken: stored?.writerToken ?? null
       };
+      if (refreshOwnedExpectedCheckpoint) {
+        clearExpected = refreshOwnedPartySessionCheckpointDiscardTarget({
+          capturedTarget: clearExpected,
+          storedCheckpoint: stored,
+          localSessionId: clearOwner.sessionId,
+          localWriterToken: clearOwner.writerToken
+        });
+        if (!clearExpected) throw new Error("checkpoint discard owner changed");
+      }
       const expectedRevision = clearExpected.revision;
       const ownsClear = () => ownsPartyCheckpointClear(partyCheckpointClearOwnerRef.current, clearOwner) &&
         partyCheckpointSessionIdRef.current === clearOwner.sessionId &&
@@ -6282,8 +6296,12 @@ export default function App() {
         }
         return;
       }
-      if (settlement.outcome !== "completed" || settlement.value.status !== "claimed" ||
-          settlement.value.revision !== claimOwner.checkpointRevision + 1 ||
+      if (settlement.outcome !== "completed" || settlement.value.status !== "transferred" ||
+          !isPartySessionCheckpointOwnershipTransfer({
+            previous: checkpoint,
+            next: settlement.value.checkpoint,
+            nextWriterToken: claimOwner.nextWriterToken
+          }) ||
           settlement.value.libraryState.epoch !== claimOwner.libraryEpoch ||
           settlement.value.libraryState.revision !== claimOwner.libraryRevision) {
         getPartyCheckpointWriteRuntime().openCircuit();
@@ -6295,6 +6313,8 @@ export default function App() {
         return;
       }
       const result = settlement.value;
+      const transferredCheckpoint = result.checkpoint;
+      const restoredState = projectRestoredPausedPartyState(transferredCheckpoint);
       advancePartyAutopilotCoordinatorEpoch();
       autoPilotPreloadGenerationRef.current += 1;
       cancelCurrentTransitionArm();
@@ -6319,28 +6339,23 @@ export default function App() {
       consecutiveAutoPilotArmFailuresRef.current = 0;
       setUnavailableAutoPilotTrackIds([]);
       setTimedOutAutoPilotTrackIds([]);
-      const minutes = checkpoint.plannedDurationSeconds / 60;
+      const minutes = restoredState.plannedDurationSeconds / 60;
       partySessionClockRef.current = restorePausedPartySessionClock(
-        checkpoint.plannedDurationSeconds,
-        checkpoint.accumulatedActiveSeconds
+        restoredState.plannedDurationSeconds,
+        restoredState.accumulatedActiveSeconds
       );
       setPartyClockDisplay(partySessionClockSnapshot(partySessionClockRef.current, getAudioEngine().clock.now()));
       setPartyDurationMinutes(minutes);
-      setPartyEnergyProfile(checkpoint.energyProfile);
-      setPartyEnergyShift(checkpoint.energyShiftSteps / 10);
-      setAutoPilotUseLibrary(checkpoint.includeRestOfLibrary);
-      queueRef.current = [...checkpoint.remainingTrackIds];
-      playedTrackIdsRef.current = [...checkpoint.playedTrackIds];
-      setQueue([...checkpoint.remainingTrackIds]);
-      setPlayedTrackIds([...checkpoint.playedTrackIds]);
-      partyCheckpointSessionIdRef.current = checkpoint.sessionId;
-      partyCheckpointRevisionRef.current = result.revision;
-      partyCheckpointStoredRecordRef.current = {
-        recordStatus: "claimed",
-        revision: result.revision,
-        sessionId: checkpoint.sessionId,
-        writerToken: claimOwner.nextWriterToken
-      };
+      setPartyEnergyProfile(restoredState.energyProfile);
+      setPartyEnergyShift(restoredState.energyShift);
+      setAutoPilotUseLibrary(restoredState.includeRestOfLibrary);
+      queueRef.current = [...restoredState.remainingTrackIds];
+      playedTrackIdsRef.current = [...restoredState.playedTrackIds];
+      setQueue([...restoredState.remainingTrackIds]);
+      setPlayedTrackIds([...restoredState.playedTrackIds]);
+      partyCheckpointSessionIdRef.current = transferredCheckpoint.sessionId;
+      partyCheckpointRevisionRef.current = transferredCheckpoint.revision;
+      partyCheckpointStoredRecordRef.current = transferredCheckpoint;
       libraryStateRef.current = result.libraryState;
       partyCheckpointTerminalRef.current = false;
       partyCheckpointWriteRuntimeRef.current?.reset?.();
@@ -6350,7 +6365,7 @@ export default function App() {
       partyCheckpointLastFingerprintRef.current = "";
       partyCheckpointRecoveryRef.current = null;
       setPartyCheckpointRecovery(null);
-      setRestoredPartyPlan({ lastStableSourceTrackId: checkpoint.lastStableSourceTrackId });
+      setRestoredPartyPlan({ lastStableSourceTrackId: restoredState.lastStableSourceTrackId });
       setPartyCheckpointCardVisible(true);
       window.requestAnimationFrame(() => partyCheckpointCardRef.current?.focus?.());
     } catch {
@@ -6375,22 +6390,34 @@ export default function App() {
   const discardSavedPartyPlan = async () => {
     if (partyFirstSongLoadRef.current || libraryMutationBusyRef.current ||
         libraryMembershipOwnerRef.current) return;
-    setPartyCheckpointError("");
     const recovery = partyCheckpointRecoveryRef.current;
     const checkpoint = recovery?.status === "available" ? recovery.checkpoint : null;
+    const stored = partyCheckpointStoredRecordRef.current;
+    const checkpointRuntime = getPartyCheckpointWriteRuntime();
+    const expectedCheckpoint = resolvePartySessionCheckpointDiscardTarget({
+      recoveryCheckpoint: checkpoint,
+      storedCheckpoint: stored,
+      localSessionId: partyCheckpointSessionIdRef.current,
+      localWriterToken: partyCheckpointWriterTokenRef.current,
+      writerLost: partyCheckpointWriterLostRef.current,
+      runtimeMode: checkpointRuntime.snapshot().mode,
+      unownedFallbackRevision: partyCheckpointRevisionRef.current
+    });
+    if (!expectedCheckpoint) {
+      checkpointRuntime.openCircuit();
+      setPartyCheckpointWriteCircuitOpen(true);
+      setPartyCheckpointError("The saved party plan is owned by another tab or its storage state changed. Reload Mazzy to review the current recovery copy; nothing was deleted here.");
+      window.requestAnimationFrame(() => partyCheckpointAlertRef.current?.focus?.());
+      return;
+    }
+    setPartyCheckpointError("");
     const cleared = await clearOwnedPartyCheckpoint("cleared", {
       terminalOnFailure: true,
-      expectedCheckpoint: checkpoint ? {
-        revision: checkpoint.revision,
-        sessionId: checkpoint.sessionId,
-        writerToken: checkpoint.writerToken
-      } : {
-        revision: partyCheckpointRevisionRef.current,
-        sessionId: null,
-        writerToken: null
-      }
+      expectedCheckpoint,
+      refreshOwnedExpectedCheckpoint: Boolean(partyCheckpointSessionIdRef.current)
     });
     if (cleared) {
+      setRestoredPartyPlan(null);
       setPartyCheckpointCardVisible(false);
       window.requestAnimationFrame(() => partyModeTitleRef.current?.focus?.());
     }
@@ -6640,7 +6667,9 @@ export default function App() {
                 setPartyCheckpointCardVisible(false);
                 window.requestAnimationFrame(() => partyCheckpointShowButtonRef.current?.focus?.());
               }}>NOT NOW</button>
-              <button type="button" disabled={partyCheckpointBusy || libraryMutationBusy || !!libraryMembershipStatus || partyFirstSongOpening} onClick={() => void discardSavedPartyPlan()}>
+              <button type="button" disabled={partyCheckpointBusy || libraryMutationBusy || !!libraryMembershipStatus ||
+                partyFirstSongOpening || partyCheckpointWriteCircuitOpen || partyCheckpointWriterLost}
+                onClick={() => void discardSavedPartyPlan()}>
                 DELETE SAVED PLAN
               </button>
               {recoverablePartyCheckpoint && (
@@ -6677,6 +6706,9 @@ export default function App() {
             <p>
               Remaining order and active-party progress are back. Audio is stopped. Choose and play a song, then start Autopilot.
             </p>
+            <p>
+              The minimized paused recovery copy remains saved in this browser across refreshes until you remove it, start a New Party, or finish the party.
+            </p>
             {recoveredSourceName && <p>{`The last saved song was ${recoveredSourceName}.`}</p>}
             <div>
               <button type="button" onClick={() => {
@@ -6687,6 +6719,12 @@ export default function App() {
                 setRestoredPartyPlan(null);
                 window.requestAnimationFrame(() => partyModeTitleRef.current?.focus?.());
               }}>DISMISS</button>
+              <button
+                type="button"
+                disabled={partyCheckpointBusy || libraryMutationBusy || !!libraryMembershipStatus ||
+                  partyCheckpointWriteCircuitOpen || partyCheckpointWriterLost}
+                onClick={() => void discardSavedPartyPlan()}
+              >REMOVE SAVED RECOVERY COPY</button>
             </div>
           </section>
         )}

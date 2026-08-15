@@ -223,14 +223,19 @@ wait is announced in a polite visible status; direct Deck starts, loads, and
 Party start actions stay locked while Pause and **Stop All Sound** remain
 available. Storage failures focus their persistent Retry or Reload alert. This
 startup boundary does not grant restore authority by itself.
-Restoring a paused plan is a separate exact 30-second claim operation bound to
+Restoring a paused plan is a separate exact 30-second ownership-transfer operation bound to
 the saved session/revision/writers and current library epoch/revision. Its Web
 Lock wait, same-tab queue admission, and live IndexedDB transaction share one
-AbortSignal. Only an exact on-time claim applies the paused queue, progress, and
+AbortSignal. Only an exact on-time transfer applies the paused queue, progress, and
 settings; timeout, cancellation, library change, or stale settlement applies no
 plan and requires **Reload Recovery State**. Stop All Sound and browser/output
 recovery revoke the exact claim before their transient state can clear, so a
-late claim cannot resume after those actions. Restore never starts audio.
+late claim cannot resume after those actions. The transaction keeps the full
+minimized paused plan `available`, changes only its revision and writer token,
+and returns that exact record for App validation. Restore never starts audio.
+The recovery copy therefore survives another refresh before a song is chosen;
+the restored card offers **Remove Saved Recovery Copy**, and New Party or
+terminal cleanup still clears it.
 Cross-tab and return-to-tab reconciliation is bounded separately by
 `library-reconciliation-runtime/v1`. Mazzy keeps one exact browser-storage read
 and one newest pending trigger, rather than starting a read for every focus,
@@ -701,6 +706,27 @@ existing engine against new starts, stop Deck/crossfade/auxiliary audio, dispose
 health monitoring, and close or suspend the AudioContext. A BFCache restore
 reloads the page instead of resuming patched diagnostic authority.
 
+D-080 adds a separate diagnostics-only paused-recovery gate. Two fresh Chromium
+profiles each import four generated WAVs, install one minimized paused plan,
+show the real recovery card without stealing existing focus, perform an exact Restore, hard reload
+before choosing or playing a song, then repeat the Restore and remove the saved
+copy through the real App action. Both committed
+`party-checkpoint-transfer-browser-report/v1` runs prove two payload-preserving
+revision/writer transfers, two visible paused-state projections with exact queue
+order and source guidance, unchanged library counters, zero Deck starts,
+AudioContext resumes, wake-lock requests, Autopilot authority, uncaught errors,
+or external requests, and an exact final `cleared` owner/revision with unchanged
+library counters. A production-used pure projector separately exhausts the
+hidden paused-plan fields that coarse UI text cannot prove. This is generated-WAV evidence in the tested Chromium build,
+not process-crash durability, physical output, real-music quality, or
+cross-browser support.
+
+Removing a restored recovery copy is authority-checked too: if another Mazzy
+tab transfers the copy, this tab keeps the Reload guidance and cannot delete the
+new writer's plan by revision alone. If this tab is already finishing a recovery
+update, removal waits for it and clears only the newest revision belonging to
+the same exact session and writer.
+
 The production build also installs a versioned, same-origin offline app shell
 after one successful online load. It caches only the root UI, its exact hashed
 JavaScript/CSS modules, the basic analysis worker, and install icons. It does
@@ -898,6 +924,13 @@ from the standard and enhanced production builds. Passing this command is a
 Chromium generated-WAV acceptance result, not a browser-support or listening
 quality claim.
 
+`npm run acceptance:checkpoint-transfer` runs the D-080 double-reload paused
+recovery gate twice with fresh temporary profiles and writes the capped,
+metadata-free aggregate
+`PARTY_CHECKPOINT_TRANSFER_BROWSER_ACCEPTANCE_REPORT.json`. Its diagnostic page,
+fixture controller, and report code are excluded from standard and enhanced
+artifacts.
+
 The real-track command reads `~/Desktop/music small` by default and writes only
 to external private application storage outside the repository and Vite root. See
 [Private real-track evaluation](./PRIVATE_REAL_TRACK_EVALUATION.md) for the
@@ -981,8 +1014,11 @@ checkpoint: opaque local track IDs, remaining order, played history, coarse
 active-party seconds, and the selected duration/energy/continuation settings. It
 does not contain filenames, audio, content hashes, analysis, BPM/key data, exact
 positions, wall-clock or Web Audio timestamps, device information, or diagnostic
-traces. Restore or Delete consumes the visible recovery copy; New Party, terminal
-completion, track deletion, and Remove All clear or invalidate it.
+traces. Restore transfers that same minimized recovery copy to the current tab
+and keeps it available across another refresh. **Remove Saved Recovery Copy**,
+New Party, terminal completion, track deletion, and Remove All clear or
+invalidate it. Legacy `claimed` tombstones from older builds contain no paused
+payload and cannot be reconstructed.
 
 Clearing site data for the Mazzy origin will remove the saved local library and
 any paused party-plan checkpoint.

@@ -414,7 +414,7 @@ describe("library recovery storage", () => {
     expect([first.status, second.status].sort()).toEqual(["saved", "stale-checkpoint"]);
   });
 
-  it("claims one exact checkpoint and rejects a stale second restore", async () => {
+  it("atomically transfers one exact checkpoint with its full payload and rejects a stale second restore", async () => {
     const initial = (await loadLibraryRecoveryBundle()).libraryState;
     const imported = await saveImportedTracksToDb(
       [track("source", "a"), track("next", "b")],
@@ -428,13 +428,18 @@ describe("library recovery storage", () => {
       sessionId: null,
       writerToken: null
     });
-    const claimed = await claimPartySessionCheckpoint(sessionId, saved.checkpoint.revision, writerA, writerB);
-    const stale = await claimPartySessionCheckpoint(sessionId, saved.checkpoint.revision, writerA, crypto.randomUUID());
-    expect(claimed.status).toBe("claimed");
-    expect(stale.status).toBe("stale-checkpoint");
-    expect((await loadLibraryRecoveryBundle()).checkpointRecord).toMatchObject({
-      recordStatus: "claimed",
-      writerToken: writerB,
+    const results = await Promise.all([
+      claimPartySessionCheckpoint(sessionId, saved.checkpoint.revision, writerA, writerB),
+      claimPartySessionCheckpoint(sessionId, saved.checkpoint.revision, writerA, crypto.randomUUID())
+    ]);
+    expect(results.map((result) => result.status).sort()).toEqual(["stale-checkpoint", "transferred"]);
+    const claimed = results.find((result) => result.status === "transferred");
+    const stored = (await loadLibraryRecoveryBundle()).checkpointRecord;
+    expect(claimed.checkpoint).toEqual(stored);
+    expect(stored).toEqual({
+      ...saved.checkpoint,
+      recordStatus: "available",
+      writerToken: claimed.checkpoint.writerToken,
       revision: 2
     });
   });
@@ -469,6 +474,71 @@ describe("library recovery storage", () => {
     });
   });
 
+  it("rejects the previous writer after transfer and lets only the new writer clear", async () => {
+    const initial = (await loadLibraryRecoveryBundle()).libraryState;
+    const imported = await saveImportedTracksToDb(
+      [track("source", "a"), track("next", "b")],
+      [],
+      initial
+    );
+    const saved = await savePartySessionCheckpointToDb(draft(imported.libraryState), {
+      checkpointRevision: 0,
+      libraryEpoch: imported.libraryState.epoch,
+      libraryRevision: imported.libraryState.revision,
+      sessionId: null,
+      writerToken: null
+    });
+    const claimed = await claimPartySessionCheckpoint(
+      sessionId,
+      saved.checkpoint.revision,
+      writerA,
+      writerB
+    );
+    expect(claimed.status).toBe("transferred");
+
+    const oldWriterSave = await savePartySessionCheckpointToDb(
+      draft(imported.libraryState),
+      {
+        checkpointRevision: claimed.revision,
+        libraryEpoch: imported.libraryState.epoch,
+        libraryRevision: imported.libraryState.revision,
+        sessionId,
+        writerToken: writerA
+      }
+    );
+    expect(oldWriterSave.status).toBe("stale-checkpoint");
+    const oldWriterClear = await clearPartySessionCheckpoint({
+      expectedRevision: claimed.revision,
+      expectedSessionId: sessionId,
+      expectedWriterToken: writerA
+    });
+    expect(oldWriterClear.status).toBe("stale-checkpoint");
+    expect((await loadLibraryRecoveryBundle()).checkpointRecord).toEqual(claimed.checkpoint);
+
+    const writerC = crypto.randomUUID();
+    const transferredAgain = await claimPartySessionCheckpoint(
+      sessionId,
+      claimed.revision,
+      writerB,
+      writerC
+    );
+    expect(transferredAgain.status).toBe("transferred");
+    const reconciledOldWriterClear = await clearPartySessionCheckpoint({
+      expectedRevision: transferredAgain.revision,
+      expectedSessionId: sessionId,
+      expectedWriterToken: writerB
+    });
+    expect(reconciledOldWriterClear.status).toBe("stale-checkpoint");
+    expect((await loadLibraryRecoveryBundle()).checkpointRecord).toEqual(transferredAgain.checkpoint);
+
+    const cleared = await clearPartySessionCheckpoint({
+      expectedRevision: transferredAgain.revision,
+      expectedSessionId: sessionId,
+      expectedWriterToken: writerC
+    });
+    expect(cleared.status).toBe("cleared");
+  });
+
   it("rejects a claim when library membership changed before its transaction", async () => {
     const initial = (await loadLibraryRecoveryBundle()).libraryState;
     const imported = await saveImportedTracksToDb(
@@ -488,6 +558,7 @@ describe("library recovery storage", () => {
       [],
       imported.libraryState
     );
+    const checkpointBeforeClaim = (await loadLibraryRecoveryBundle()).checkpointRecord;
     const result = await claimPartySessionCheckpoint(
       sessionId,
       saved.checkpoint.revision,
@@ -496,10 +567,7 @@ describe("library recovery storage", () => {
       { expectedLibraryState: imported.libraryState }
     );
     expect(result).toMatchObject({ status: "stale-library", libraryState: changed.libraryState });
-    expect((await loadLibraryRecoveryBundle()).checkpointRecord).not.toMatchObject({
-      recordStatus: "claimed",
-      writerToken: writerB
-    });
+    expect((await loadLibraryRecoveryBundle()).checkpointRecord).toEqual(checkpointBeforeClaim);
   });
 
   it("invalidates recovery atomically when a track is deleted", async () => {

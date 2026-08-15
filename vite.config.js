@@ -19,6 +19,7 @@ const htmlInputs = {
         "key-lock-listening": path.join(workspaceRoot, "key-lock-listening.html"),
         "master-peak-guard-listening": path.join(workspaceRoot, "master-peak-guard-listening.html"),
         "party-app-journey-diagnostic": path.join(workspaceRoot, "party-app-journey-diagnostic.html"),
+        "party-checkpoint-transfer-diagnostic": path.join(workspaceRoot, "party-checkpoint-transfer-diagnostic.html"),
         "party-continuation-diagnostic": path.join(workspaceRoot, "party-continuation-diagnostic.html"),
         "party-level-listening": path.join(workspaceRoot, "party-level-listening.html"),
         "transition-rehearsal-diagnostic": path.join(workspaceRoot, "transition-rehearsal-diagnostic.html")

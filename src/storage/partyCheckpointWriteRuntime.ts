@@ -1,7 +1,7 @@
 export const PARTY_CHECKPOINT_WRITE_RUNTIME_VERSION = "party-checkpoint-write-runtime/v1" as const;
 export const PARTY_CHECKPOINT_WRITE_TIMEOUT_MS = 30_000;
 export const PARTY_CHECKPOINT_CLEAR_OWNER_VERSION = "party-checkpoint-clear-owner/v1" as const;
-export const PARTY_CHECKPOINT_CLAIM_OWNER_VERSION = "party-checkpoint-claim-owner/v1" as const;
+export const PARTY_CHECKPOINT_CLAIM_OWNER_VERSION = "party-checkpoint-claim-owner/v2" as const;
 
 export type PartyCheckpointWriteTicket = Readonly<{
   version: typeof PARTY_CHECKPOINT_WRITE_RUNTIME_VERSION;

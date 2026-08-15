@@ -1,0 +1,87 @@
+{
+  "schemaVersion": "party-checkpoint-transfer-browser-acceptance/v1",
+  "runnerContract": "party-checkpoint-transfer-browser-runner/v1",
+  "status": "passed",
+  "freshProfileRuns": 2,
+  "reportsMatched": true,
+  "reports": [
+    {
+      "schemaVersion": "party-checkpoint-transfer-browser-report/v1",
+      "scenario": "double-reload-paused-plan",
+      "passed": true,
+      "failureCodes": [],
+      "counts": {
+        "fixtureTracks": 4,
+        "hydratedTracks": 4,
+        "recoveryCardsObserved": 2,
+        "transfersCompleted": 2,
+        "payloadTransfersVerified": 2,
+        "visibleStateApplicationsVerified": 2
+      },
+      "safety": {
+        "libraryCounterDrifts": 0,
+        "deckStartAttempts": 0,
+        "contextResumeAttempts": 0,
+        "wakeLockRequests": 0,
+        "activeDecksAfter": 0,
+        "autoPilotActiveAfter": false
+      },
+      "focus": {
+        "recoveryCardsVisibleWithFocusPreserved": 2,
+        "restoredCardsVerified": 2,
+        "removalVerified": true
+      },
+      "cleanup": {
+        "checkpointStatusAfter": "cleared",
+        "exactOwnerRevisionAndLibraryVerified": true
+      },
+      "browser": {
+        "externalRequests": 0,
+        "uncaughtErrors": 0,
+        "unhandledRejections": 0
+      },
+      "interrupted": false,
+      "privacy": "Fixed enums, booleans, and capped counts only; no names, paths, IDs, tokens, hashes, timestamps, errors, Files, audio, or device metadata."
+    },
+    {
+      "schemaVersion": "party-checkpoint-transfer-browser-report/v1",
+      "scenario": "double-reload-paused-plan",
+      "passed": true,
+      "failureCodes": [],
+      "counts": {
+        "fixtureTracks": 4,
+        "hydratedTracks": 4,
+        "recoveryCardsObserved": 2,
+        "transfersCompleted": 2,
+        "payloadTransfersVerified": 2,
+        "visibleStateApplicationsVerified": 2
+      },
+      "safety": {
+        "libraryCounterDrifts": 0,
+        "deckStartAttempts": 0,
+        "contextResumeAttempts": 0,
+        "wakeLockRequests": 0,
+        "activeDecksAfter": 0,
+        "autoPilotActiveAfter": false
+      },
+      "focus": {
+        "recoveryCardsVisibleWithFocusPreserved": 2,
+        "restoredCardsVerified": 2,
+        "removalVerified": true
+      },
+      "cleanup": {
+        "checkpointStatusAfter": "cleared",
+        "exactOwnerRevisionAndLibraryVerified": true
+      },
+      "browser": {
+        "externalRequests": 0,
+        "uncaughtErrors": 0,
+        "unhandledRejections": 0
+      },
+      "interrupted": false,
+      "privacy": "Fixed enums, booleans, and capped counts only; no names, paths, IDs, tokens, hashes, timestamps, errors, Files, audio, or device metadata."
+    }
+  ],
+  "evidenceScope": "Two fresh-profile generated-WAV full App paused-plan writer transfers across two reloads; not crash durability, physical output, real-music quality, or cross-browser support.",
+  "privacy": "Fixed enums, booleans, and capped counts only; no names, paths, IDs, tokens, hashes, timestamps, raw errors, Files, audio, user agent, or device metadata. Temporary files and profiles were deleted."
+}

@@ -3,10 +3,15 @@ import {
   PARTY_SESSION_CHECKPOINT_SCHEMA_VERSION,
   createPartySessionCheckpoint,
   createPartySessionCheckpointTombstone,
+  isPartySessionCheckpointOwnershipTransfer,
   normalizePartySessionCheckpointRecord,
   partySessionCheckpointFingerprint,
+  projectRestoredPausedPartyState,
   projectPausedPartySessionCheckpoint,
-  reconcilePartySessionCheckpoint
+  reconcilePartySessionCheckpoint,
+  refreshOwnedPartySessionCheckpointDiscardTarget,
+  resolvePartySessionCheckpointDiscardTarget,
+  transferPartySessionCheckpointOwnership
 } from "./partySessionCheckpoint";
 
 const sessionId = "11111111-1111-4111-8111-111111111111";
@@ -132,6 +137,151 @@ describe("party session checkpoint", () => {
     expect(partySessionCheckpointFingerprint(first)).toBe(
       partySessionCheckpointFingerprint(second)
     );
+  });
+
+  it("transfers writer ownership without changing the recoverable paused-plan payload", () => {
+    const previous = available();
+    const nextWriterToken = "33333333-3333-4333-8333-333333333333";
+    const transferred = transferPartySessionCheckpointOwnership(previous, nextWriterToken);
+    expect(transferred).toEqual({
+      ...previous,
+      revision: previous.revision + 1,
+      writerToken: nextWriterToken
+    });
+    expect(isPartySessionCheckpointOwnershipTransfer({
+      previous,
+      next: transferred,
+      nextWriterToken
+    })).toBe(true);
+  });
+
+  it("rejects a transfer with reused ownership or any changed paused-plan payload", () => {
+    const previous = available();
+    const nextWriterToken = "33333333-3333-4333-8333-333333333333";
+    expect(() => transferPartySessionCheckpointOwnership(previous, previous.writerToken)).toThrow();
+    const transferred = transferPartySessionCheckpointOwnership(previous, nextWriterToken);
+    for (const changed of [
+      { remainingTrackIds: ["next"] },
+      { playedTrackIds: ["source"] },
+      { accumulatedActiveSeconds: transferred.accumulatedActiveSeconds + 1 },
+      { writerToken: "44444444-4444-4444-8444-444444444444" },
+      { revision: transferred.revision + 1 },
+      { recordStatus: "claimed" }
+    ]) {
+      expect(isPartySessionCheckpointOwnershipTransfer({
+        previous,
+        next: { ...transferred, ...changed },
+        nextWriterToken
+      })).toBe(false);
+    }
+  });
+
+  it("projects every paused-plan field used by App without reordering identities", () => {
+    expect(projectRestoredPausedPartyState(available())).toEqual({
+      plannedDurationSeconds: 10_800,
+      accumulatedActiveSeconds: 1_234,
+      energyProfile: "journey",
+      energyShift: -0.2,
+      includeRestOfLibrary: true,
+      playedTrackIds: ["source", "played"],
+      remainingTrackIds: ["next", "later"],
+      lastStableSourceTrackId: "source"
+    });
+    expect(() => projectRestoredPausedPartyState({
+      ...available(),
+      recordStatus: "claimed"
+    } as never)).toThrow();
+  });
+
+  it("resolves deletion only for the exact healthy recovery owner", () => {
+    const current = available();
+    expect(resolvePartySessionCheckpointDiscardTarget({
+      recoveryCheckpoint: null,
+      storedCheckpoint: current,
+      localSessionId: current.sessionId,
+      localWriterToken: current.writerToken,
+      writerLost: false,
+      runtimeMode: "running",
+      unownedFallbackRevision: 0
+    })).toEqual({
+      revision: current.revision,
+      sessionId: current.sessionId,
+      writerToken: current.writerToken
+    });
+    expect(resolvePartySessionCheckpointDiscardTarget({
+      recoveryCheckpoint: null,
+      storedCheckpoint: { ...current, writerToken: "33333333-3333-4333-8333-333333333333" },
+      localSessionId: current.sessionId,
+      localWriterToken: current.writerToken,
+      writerLost: false,
+      runtimeMode: "running",
+      unownedFallbackRevision: 0
+    })).toBeNull();
+    expect(resolvePartySessionCheckpointDiscardTarget({
+      recoveryCheckpoint: null,
+      storedCheckpoint: current,
+      localSessionId: current.sessionId,
+      localWriterToken: current.writerToken,
+      writerLost: true,
+      runtimeMode: "halted",
+      unownedFallbackRevision: 0
+    })).toBeNull();
+    expect(resolvePartySessionCheckpointDiscardTarget({
+      recoveryCheckpoint: current,
+      storedCheckpoint: null,
+      localSessionId: null,
+      localWriterToken: "33333333-3333-4333-8333-333333333333",
+      writerLost: false,
+      runtimeMode: "running",
+      unownedFallbackRevision: 0
+    })).toEqual({
+      revision: current.revision,
+      sessionId: current.sessionId,
+      writerToken: current.writerToken
+    });
+    expect(resolvePartySessionCheckpointDiscardTarget({
+      recoveryCheckpoint: current,
+      storedCheckpoint: null,
+      localSessionId: null,
+      localWriterToken: "33333333-3333-4333-8333-333333333333",
+      writerLost: false,
+      runtimeMode: "circuit-open",
+      unownedFallbackRevision: 0
+    })).toBeNull();
+    expect(resolvePartySessionCheckpointDiscardTarget({
+      recoveryCheckpoint: { malformed: true },
+      storedCheckpoint: null,
+      localSessionId: null,
+      localWriterToken: "33333333-3333-4333-8333-333333333333",
+      writerLost: false,
+      runtimeMode: "running",
+      unownedFallbackRevision: 7
+    })).toEqual({ revision: 7, sessionId: null, writerToken: null });
+  });
+
+  it("refreshes a drained local discard to the latest same owner but refuses a foreign transfer", () => {
+    const current = available();
+    const capturedTarget = {
+      revision: current.revision,
+      sessionId: current.sessionId,
+      writerToken: current.writerToken
+    };
+    expect(refreshOwnedPartySessionCheckpointDiscardTarget({
+      capturedTarget,
+      storedCheckpoint: { ...current, revision: current.revision + 1 },
+      localSessionId: current.sessionId,
+      localWriterToken: current.writerToken
+    })).toEqual({ ...capturedTarget, revision: current.revision + 1 });
+    expect(refreshOwnedPartySessionCheckpointDiscardTarget({
+      capturedTarget,
+      storedCheckpoint: {
+        ...current,
+        revision: current.revision + 1,
+        writerToken: "33333333-3333-4333-8333-333333333333"
+      },
+      localSessionId: current.sessionId,
+      localWriterToken: current.writerToken
+    })).toBeNull();
   });
 
   it("collapses a stable live view into a paused plan and reinserts the committed target once", () => {

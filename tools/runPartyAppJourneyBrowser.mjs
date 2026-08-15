@@ -619,4 +619,13 @@ const main = async () => {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) await main();
 
-export { PipeCdp };
+export {
+  PipeCdp,
+  evaluate,
+  findChrome,
+  makeStereoWav,
+  reservePort,
+  trustedClick,
+  waitFor,
+  waitForHttp
+};

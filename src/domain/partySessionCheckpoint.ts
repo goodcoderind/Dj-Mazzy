@@ -340,3 +340,158 @@ export const partySessionCheckpointFingerprint = (
   remainingTrackIds: checkpoint.remainingTrackIds,
   lastStableSourceTrackId: checkpoint.lastStableSourceTrackId
 });
+
+const partySessionCheckpointTransferPayloadFingerprint = (
+  checkpoint: PartySessionCheckpointAvailable
+) => JSON.stringify({
+  sessionId: checkpoint.sessionId,
+  libraryEpoch: checkpoint.libraryEpoch,
+  libraryRevision: checkpoint.libraryRevision,
+  restoreMode: checkpoint.restoreMode,
+  checkpointReason: checkpoint.checkpointReason,
+  plannedDurationSeconds: checkpoint.plannedDurationSeconds,
+  accumulatedActiveSeconds: checkpoint.accumulatedActiveSeconds,
+  energyProfile: checkpoint.energyProfile,
+  energyShiftSteps: checkpoint.energyShiftSteps,
+  includeRestOfLibrary: checkpoint.includeRestOfLibrary,
+  playedTrackIds: checkpoint.playedTrackIds,
+  remainingTrackIds: checkpoint.remainingTrackIds,
+  lastStableSourceTrackId: checkpoint.lastStableSourceTrackId
+});
+
+export const transferPartySessionCheckpointOwnership = (
+  checkpoint: PartySessionCheckpointAvailable,
+  nextWriterToken: string
+): PartySessionCheckpointAvailable => {
+  const normalized = normalizePartySessionCheckpointRecord(checkpoint);
+  if (!normalized || normalized.recordStatus !== "available" ||
+      normalized.revision >= Number.MAX_SAFE_INTEGER ||
+      nextWriterToken === normalized.writerToken) {
+    throw new TypeError("Party session checkpoint ownership transfer is invalid.");
+  }
+  return createPartySessionCheckpoint({
+    sessionId: normalized.sessionId,
+    writerToken: nextWriterToken,
+    libraryEpoch: normalized.libraryEpoch,
+    libraryRevision: normalized.libraryRevision,
+    checkpointReason: normalized.checkpointReason,
+    plannedDurationSeconds: normalized.plannedDurationSeconds,
+    accumulatedActiveSeconds: normalized.accumulatedActiveSeconds,
+    energyProfile: normalized.energyProfile,
+    energyShiftSteps: normalized.energyShiftSteps,
+    includeRestOfLibrary: normalized.includeRestOfLibrary,
+    playedTrackIds: normalized.playedTrackIds,
+    remainingTrackIds: normalized.remainingTrackIds,
+    lastStableSourceTrackId: normalized.lastStableSourceTrackId
+  }, normalized.revision + 1);
+};
+
+export const isPartySessionCheckpointOwnershipTransfer = ({
+  previous,
+  next,
+  nextWriterToken
+}: {
+  previous: PartySessionCheckpointAvailable;
+  next: unknown;
+  nextWriterToken: string;
+}) => {
+  const normalizedPrevious = normalizePartySessionCheckpointRecord(previous);
+  const normalizedNext = normalizePartySessionCheckpointRecord(next);
+  return Boolean(normalizedPrevious?.recordStatus === "available" &&
+    normalizedNext?.recordStatus === "available" &&
+    normalizedNext.revision === normalizedPrevious.revision + 1 &&
+    normalizedNext.writerToken === nextWriterToken &&
+    normalizedNext.writerToken !== normalizedPrevious.writerToken &&
+    partySessionCheckpointTransferPayloadFingerprint(normalizedNext) ===
+      partySessionCheckpointTransferPayloadFingerprint(normalizedPrevious));
+};
+
+export const projectRestoredPausedPartyState = (
+  checkpoint: PartySessionCheckpointAvailable
+) => {
+  const normalized = normalizePartySessionCheckpointRecord(checkpoint);
+  if (!normalized || normalized.recordStatus !== "available") {
+    throw new TypeError("Restored paused party state is invalid.");
+  }
+  return Object.freeze({
+    plannedDurationSeconds: normalized.plannedDurationSeconds,
+    accumulatedActiveSeconds: normalized.accumulatedActiveSeconds,
+    energyProfile: normalized.energyProfile,
+    energyShift: normalized.energyShiftSteps / 10,
+    includeRestOfLibrary: normalized.includeRestOfLibrary,
+    playedTrackIds: Object.freeze([...normalized.playedTrackIds]),
+    remainingTrackIds: Object.freeze([...normalized.remainingTrackIds]),
+    lastStableSourceTrackId: normalized.lastStableSourceTrackId
+  });
+};
+
+export const resolvePartySessionCheckpointDiscardTarget = ({
+  recoveryCheckpoint,
+  storedCheckpoint,
+  localSessionId,
+  localWriterToken,
+  writerLost,
+  runtimeMode,
+  unownedFallbackRevision
+}: {
+  recoveryCheckpoint: unknown;
+  storedCheckpoint: unknown;
+  localSessionId: string | null;
+  localWriterToken: string;
+  writerLost: boolean;
+  runtimeMode: string;
+  unownedFallbackRevision: number;
+}) => {
+  if (writerLost || runtimeMode !== "running") return null;
+  if (localSessionId) {
+    const stored = normalizePartySessionCheckpointRecord(storedCheckpoint);
+    if (!stored || !["available", "claimed"].includes(stored.recordStatus) ||
+        stored.sessionId !== localSessionId || stored.writerToken !== localWriterToken) return null;
+    return Object.freeze({
+      revision: stored.revision,
+      sessionId: stored.sessionId,
+      writerToken: stored.writerToken
+    });
+  }
+  const recovery = normalizePartySessionCheckpointRecord(recoveryCheckpoint);
+  const stored = normalizePartySessionCheckpointRecord(storedCheckpoint);
+  const exact = recovery?.recordStatus === "available"
+    ? recovery
+    : stored?.recordStatus === "available" ? stored : null;
+  if (exact) return Object.freeze({
+    revision: exact.revision,
+    sessionId: exact.sessionId,
+    writerToken: exact.writerToken
+  });
+  if (!Number.isSafeInteger(unownedFallbackRevision) || unownedFallbackRevision < 0) return null;
+  return Object.freeze({
+    revision: unownedFallbackRevision,
+    sessionId: null,
+    writerToken: null
+  });
+};
+
+export const refreshOwnedPartySessionCheckpointDiscardTarget = ({
+  capturedTarget,
+  storedCheckpoint,
+  localSessionId,
+  localWriterToken
+}: {
+  capturedTarget: Readonly<{ revision: number; sessionId: string | null; writerToken: string | null }>;
+  storedCheckpoint: unknown;
+  localSessionId: string;
+  localWriterToken: string;
+}) => {
+  if (!capturedTarget || capturedTarget.sessionId !== localSessionId ||
+      capturedTarget.writerToken !== localWriterToken ||
+      !Number.isSafeInteger(capturedTarget.revision) || capturedTarget.revision < 0) return null;
+  const stored = normalizePartySessionCheckpointRecord(storedCheckpoint);
+  if (!stored || !["available", "claimed"].includes(stored.recordStatus) ||
+      stored.sessionId !== localSessionId || stored.writerToken !== localWriterToken ||
+      stored.revision < capturedTarget.revision) return null;
+  return Object.freeze({
+    revision: stored.revision,
+    sessionId: stored.sessionId,
+    writerToken: stored.writerToken
+  });
+};
