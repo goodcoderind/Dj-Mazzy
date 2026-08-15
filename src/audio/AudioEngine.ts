@@ -83,6 +83,7 @@ export class AudioEngine {
 
   private readonly masterGain: GainNode;
   private readonly limiter: DynamicsCompressorNode;
+  private readonly hostRecoveryOutputGain: GainNode;
   private readonly masterMeter: AnalyserNode;
   private readonly deckGains: Record<DeckChannel, GainNode>;
   private readonly meterSamples: Float32Array<ArrayBuffer>;
@@ -106,6 +107,7 @@ export class AudioEngine {
   };
   private readonly audioContextStates: AudioContextState[] = [];
   private fatalHostLocked = false;
+  private hostAudioRecoveryOutputHeld = false;
   private readonly audibleAuxiliarySources = new Set<AudioScheduledSourceNode>();
   private nextAudioHealthResetToken = 1;
   private readonly audioHealthResetWaiters = new Map<number, (acknowledged: boolean) => void>();
@@ -130,8 +132,11 @@ export class AudioEngine {
     deckB.connect(this.masterGain);
     this.deckGains = { a: deckA, b: deckB };
 
+    this.hostRecoveryOutputGain = context.createGain();
+    this.hostRecoveryOutputGain.gain.value = 1;
     this.masterGain.connect(this.limiter);
-    this.limiter.connect(this.masterMeter);
+    this.limiter.connect(this.hostRecoveryOutputGain);
+    this.hostRecoveryOutputGain.connect(this.masterMeter);
     this.masterMeter.connect(context.destination);
     this.audioContextStates.push(context.state);
     context.addEventListener?.("statechange", () => {
@@ -577,6 +582,38 @@ export class AudioEngine {
     this.masterGain.gain.cancelScheduledValues(now);
     this.masterGain.gain.setValueAtTime(dbToGain(safeDb), now);
     return safeDb;
+  }
+
+  holdOutputForHostAudioRecovery() {
+    if (this.fatalHostLocked) return false;
+    const now = this.clock.now();
+    this.hostRecoveryOutputGain.gain.cancelScheduledValues(now);
+    this.hostRecoveryOutputGain.gain.setValueAtTime(0, now);
+    if (this.hostRecoveryOutputGain.gain.value !== 0) return false;
+    this.hostAudioRecoveryOutputHeld = true;
+    return true;
+  }
+
+  releaseOutputAfterHostAudioRecovery() {
+    if (this.fatalHostLocked || !this.hostAudioRecoveryOutputHeld || this.context.state !== "running" ||
+      !this.hostAudioRecoveryOutputReleaseIsSafe()) {
+      return false;
+    }
+    const now = this.clock.now();
+    this.hostRecoveryOutputGain.gain.cancelScheduledValues(now);
+    this.hostRecoveryOutputGain.gain.setValueAtTime(1, now);
+    if (this.hostRecoveryOutputGain.gain.value !== 1) return false;
+    this.hostAudioRecoveryOutputHeld = false;
+    return true;
+  }
+
+  isOutputHeldForHostAudioRecovery() {
+    return this.hostAudioRecoveryOutputHeld;
+  }
+
+  hostAudioRecoveryOutputReleaseIsSafe() {
+    return this.activeCrossfade === null && this.crossfadeCompletions.size === 0 &&
+      this.audibleAuxiliarySources.size === 0;
   }
 
   readMasterMeter(): MasterMeterReading {

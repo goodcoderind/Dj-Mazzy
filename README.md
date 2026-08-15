@@ -1039,15 +1039,21 @@ lock is unavailable. It cannot keep a closed laptop lid awake.
 If the browser suspends or the device interrupts its AudioContext, Mazzy pauses
 Autopilot authority and shows a host-operated **RESUME AUDIO** control. It does
 not silently arm against a stale audio clock or attempt an automatic restart
-without a user gesture. A permanently closed AudioContext asks the host to
-reload instead.
+without a user gesture. That recovery action is single-flight and bounded by a
+10-second monotonic deadline. While browser audio is interrupted, a protected
+post-limiter output hold keeps every Mazzy source silent; only the exact current
+host action may release it after observing a running AudioContext. A timeout or
+unconfirmed release keeps new playback locked and focuses fixed **Reload Mazzy**
+guidance, while **Stop All Sound** remains available. A permanently closed
+AudioContext asks the host to reload instead.
 
 After audio has started, a generic browser media-device-set change makes Mazzy
 conservatively pause Autopilot and ask the host to check the speakers before
 continuing. The event can also be caused by a microphone or camera change; it is
 not proof that output routing changed. Mazzy does not enumerate device
 names or IDs, request microphone permission, or claim that speaker output was
-verified.
+verified. Device confirmation uses the same bounded exact recovery owner, but a
+device-change notice alone does not mute an already-stable current song.
 
 Right-click a library row and choose **Remove from Library** to delete that
 track's stored browser copy, automatic analysis, and timing-review record. If it

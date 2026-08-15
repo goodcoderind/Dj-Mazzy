@@ -191,7 +191,8 @@ describe("AudioEngine", () => {
     expect(deckA.connections).toEqual([master]);
     expect(deckB.connections).toEqual([master]);
     expect(master.connections).toEqual([context.compressor]);
-    expect(context.compressor.connections).toEqual([context.analyser]);
+    expect(context.compressor.connections).toEqual([context.gains[3]]);
+    expect(context.gains[3].connections).toEqual([context.analyser]);
     expect(context.analyser.connections).toEqual([context.destination]);
     expect(20 * Math.log10(master.gain.value)).toBeCloseTo(DEFAULT_MASTER_HEADROOM_DB);
     expect(context.compressor.threshold.value).toBe(DEFAULT_LIMITER_THRESHOLD_DB);
@@ -207,16 +208,62 @@ describe("AudioEngine", () => {
     expect(engine.getDeckGain("a")).toBe(1);
   });
 
+  it("holds recovered output silent until an exact running-context release", async () => {
+    const { context, engine } = createEngine();
+    const master = context.gains[0];
+    const outputHold = context.gains[3];
+    engine.setMasterGainDb(-9);
+    expect(engine.holdOutputForHostAudioRecovery()).toBe(true);
+    expect(outputHold.gain.value).toBe(0);
+    expect(engine.isOutputHeldForHostAudioRecovery()).toBe(true);
+    engine.setMasterGainDb(-3);
+    expect(master.gain.value).toBeCloseTo(10 ** (-3 / 20));
+    expect(outputHold.gain.value).toBe(0);
+    expect(engine.releaseOutputAfterHostAudioRecovery()).toBe(false);
+    await engine.resume();
+    expect(engine.releaseOutputAfterHostAudioRecovery()).toBe(true);
+    expect(outputHold.gain.value).toBe(1);
+    expect(engine.isOutputHeldForHostAudioRecovery()).toBe(false);
+    expect(engine.releaseOutputAfterHostAudioRecovery()).toBe(false);
+  });
+
+  it("does not claim a host recovery hold when its output AudioParam fails", () => {
+    const { context, engine } = createEngine();
+    context.gains[3].gain.setValueAtTime = () => { throw new Error("private output failure"); };
+    expect(() => engine.holdOutputForHostAudioRecovery()).toThrow();
+    expect(engine.isOutputHeldForHostAudioRecovery()).toBe(false);
+  });
+
+  it("does not claim a host recovery hold without a zero-gain observation", () => {
+    const { context, engine } = createEngine();
+    context.gains[3].gain.setValueAtTime = () => undefined;
+    expect(engine.holdOutputForHostAudioRecovery()).toBe(false);
+    expect(engine.isOutputHeldForHostAudioRecovery()).toBe(false);
+  });
+
+  it("refuses to release recovered output while an auxiliary source is still owned", async () => {
+    const { context, engine } = createEngine();
+    await engine.resume();
+    expect(engine.holdOutputForHostAudioRecovery()).toBe(true);
+    const cancelClicks = engine.scheduleAuditionClicks([{ audioTime: 1, downbeat: false }]);
+    expect(engine.hostAudioRecoveryOutputReleaseIsSafe()).toBe(false);
+    expect(engine.releaseOutputAfterHostAudioRecovery()).toBe(false);
+    expect(engine.isOutputHeldForHostAudioRecovery()).toBe(true);
+    cancelClicks();
+    expect(engine.hostAudioRecoveryOutputReleaseIsSafe()).toBe(true);
+    expect(engine.releaseOutputAfterHostAudioRecovery()).toBe(true);
+  });
+
   it("keeps per-track level trim separate from crossfader gain", () => {
     const { context, engine } = createEngine();
     const deckA = engine.getDeck("a");
     expect(deckA.setTrackTrimDb(8)).toBe(3);
     expect(deckA.getTrackTrimDb()).toBe(3);
-    expect(context.gains[3].gain.value).toBeCloseTo(10 ** (3 / 20));
+    expect(context.gains[4].gain.value).toBeCloseTo(10 ** (3 / 20));
     expect(engine.getDeckGain("a")).toBe(0);
     deckA.beginPreparing("next-track");
     expect(deckA.getTrackTrimDb()).toBe(0);
-    expect(context.gains[3].gain.value).toBe(1);
+    expect(context.gains[4].gain.value).toBe(1);
   });
 
   it("schedules an immutable equal-power crossfade on the audio clock", () => {

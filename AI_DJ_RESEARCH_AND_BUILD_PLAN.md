@@ -3197,6 +3197,38 @@ These are the active backlog, not reasons to discard the prototype.
   logs, exports, or network. The new fixed CacheStorage control schema is
   `enhanced-timing-model-control/v1`; the advisory sender ID is never persisted.
 
+- **D-085 — Bound the required host audio-recovery gesture and hold recovered
+  output silent until exact confirmation:** `host-audio-recovery/v1` owns one
+  exact `context` or `device` action with captured audio/device generations and
+  a 10-second absolute `performance.now()` deadline. Duplicate clicks are
+  refused, delayed timer delivery cannot promote a late native `resume()`, and
+  Stop All Sound, page hide, unmount, a newer context/device event, or a newer
+  audio-start failure revokes the exact owner before cleanup. An accepted result
+  must still own both captured generations and observe `context.state ===
+  "running"`; late success/error cannot clear a successor recovery cause.
+
+  `host-audio-recovery-output-hold/v1` is a post-limiter, pre-meter gain latch in
+  the shared AudioEngine. Context suspension/interruption and audio-start failure
+  synchronously set it to silence, covering Decks, rehearsal previews, and
+  direct-limiter audition clicks. Only an exact on-time context recovery may
+  restore unity output. Timeout, cancellation, spontaneous late `running`,
+  unmount, or fatal-host lock cannot release it. A mere media-device-set change
+  retains D-047's existing policy: a stable current song may continue while
+  Autopilot pauses and the host checks output.
+
+  Working controls expose disabled **Resuming Audio…** / **Checking Audio…**
+  text with `aria-busy`; ordinary failure returns focus to Retry. Timeout or
+  unconfirmed output release keeps playback admission locked and focuses a
+  persistent fixed **Reload Mazzy** alert while **Stop All Sound** remains
+  available. The runtime owner, generations, deadline, intent, and raw browser
+  errors remain tab-memory-only and are not stored, traced, exported, logged, or
+  sent. IndexedDB, analysis, transition, checkpoint, Party trace, and report
+  schemas are unchanged. Deterministic evidence covers strict/throttled
+  deadlines, cancellation and late settlement, the production-used duplicate,
+  generation, cleanup, timeout, and pagehide projections, post-limiter
+  hold/release, auxiliary-owner refusal, and ordinary error privacy. Rendered
+  focus wiring remains part of production build/browser acceptance.
+
 ### Open questions
 
 - **Q-001:** Remain browser/PWA-first through launch, or package a desktop app

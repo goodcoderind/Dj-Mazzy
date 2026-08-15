@@ -418,6 +418,10 @@ body {
   line-height: 1.4;
 }
 
+.library-storage-error button {
+  min-height: 44px;
+}
+
 .library-data-controls {
   display: flex;
   align-items: center;

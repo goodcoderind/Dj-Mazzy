@@ -191,6 +191,13 @@ import {
 import { createPartyWakeLockController } from "./power/partyWakeLock";
 import { registerFatalHostWakeLockRelease } from "./audio/fatalHostAudioSafety";
 import { audioRecoveryMessage, needsHostAudioRecovery } from "./audio/audioContextRecovery";
+import {
+  hostAudioRecoveryMayStart,
+  hostAudioRecoveryPageHideDisposition,
+  ownsHostAudioRecovery,
+  planHostAudioRecoverySettlement,
+  startHostAudioRecovery
+} from "./audio/hostAudioRecoveryRuntime";
 import { OUTPUT_DEVICE_RECOVERY_MESSAGE, supportsOutputDeviceChangeMonitoring } from "./audio/outputDeviceRecovery";
 import { DECK_LOAD_OUTCOME, shouldQuarantineAutoPilotLoad } from "./audio/deckLoadOutcome";
 import {
@@ -373,6 +380,8 @@ export default function App() {
   const [partySoundStopLocked, setPartySoundStopLocked] = useState(false);
   const [audioRecoveryState, setAudioRecoveryState] = useState(null);
   const [outputDeviceChanged, setOutputDeviceChanged] = useState(false);
+  const [hostAudioRecoveryStatus, setHostAudioRecoveryStatus] = useState(null);
+  const [hostAudioRecoveryCircuitOpen, setHostAudioRecoveryCircuitOpen] = useState(false);
   const rehearsalPreparing = rehearsalStatus?.state === "rendering" || rehearsalStatus?.state === "cancelling";
   const [masterDeck, setMasterDeck] = useState("a");
   const [bpmByDeck, setBpmByDeck] = useState({ a: null, b: null });
@@ -567,6 +576,12 @@ export default function App() {
   const audioRecoveryGenerationRef = useRef(0);
   const audioRecoveryPendingRef = useRef(false);
   const outputDevicePendingRef = useRef(false);
+  const hostAudioRecoveryOperationRef = useRef(0);
+  const hostAudioRecoveryOwnerRef = useRef(null);
+  const hostAudioRecoveryRuntimeRef = useRef(null);
+  const hostAudioRecoveryCircuitOpenRef = useRef(false);
+  const hostAudioRecoveryAlertRef = useRef(null);
+  const hostAudioRecoveryButtonRef = useRef(null);
   const playbackRecoveryLockedRef = useRef(false);
   const deckPlaybackStartLockedRef = useRef(false);
   const rehearsalPlaybackLocked = () => transitionRehearsalBlocksPlayback({
@@ -578,6 +593,7 @@ export default function App() {
   const refreshPlaybackRecoveryLock = () => {
     playbackRecoveryLockedRef.current = audioRecoveryPendingRef.current ||
       outputDevicePendingRef.current ||
+      hostAudioRecoveryCircuitOpenRef.current ||
       partyCheckpointBusyRef.current ||
       partyCheckpointWriterLostRef.current ||
       partySoundStopInProgressRef.current ||
@@ -586,6 +602,32 @@ export default function App() {
       partyFirstSongStartCircuitOpenRef.current;
     deckPlaybackStartLockedRef.current = playbackRecoveryLockedRef.current || rehearsalPlaybackLocked();
   };
+  const revokeHostAudioRecoveryAttempt = ({ clearStatus = true } = {}) => {
+    hostAudioRecoveryOwnerRef.current = null;
+    try { hostAudioRecoveryRuntimeRef.current?.cancel?.(); } catch { /* Exact host recovery authority is revoked. */ }
+    hostAudioRecoveryRuntimeRef.current = null;
+    if (clearStatus) setHostAudioRecoveryStatus((current) => current?.state === "blocked" ? current : null);
+  };
+  const failHostAudioRecoveryClosed = (message) => {
+    revokeHostAudioRecoveryAttempt({ clearStatus: false });
+    hostAudioRecoveryCircuitOpenRef.current = true;
+    setHostAudioRecoveryCircuitOpen(true);
+    setHostAudioRecoveryStatus({ state: "blocked", intent: "context", message });
+    refreshPlaybackRecoveryLock();
+    window.requestAnimationFrame(() => hostAudioRecoveryAlertRef.current?.focus?.());
+  };
+  const hostAudioRecoveryCleanupIsSafe = () => !partySoundStopInProgressRef.current &&
+    !transitionCompletionUncertainRef.current &&
+    !activeTransitionScheduleRef.current &&
+    !transitionCompletionRuntimeRef.current &&
+    !transitionCompletionCancelRef.current &&
+    !transitionArmLeaseRef.current &&
+    !transitionArmRef.current &&
+    !rehearsalCancelRef.current &&
+    !rehearsalRenderRuntimeRef.current &&
+    !rehearsalPreparationOwnedRef.current &&
+    !partyFirstSongStartOwnerRef.current &&
+    !libraryMembershipDeckCleanupRef.current;
   const publishLibrary = (update, { routineDirty = false } = {}) => {
     const previous = libraryRef.current;
     const next = typeof update === "function" ? update(previous) : update;
@@ -631,9 +673,11 @@ export default function App() {
       if (!audioOutputWatchArmedRef.current) return;
       invalidatePartyCheckpointClaim("Audio output changed while the saved plan was being restored. Reload Mazzy to review recovery before continuing.");
       outputDeviceGenerationRef.current += 1;
+      revokeHostAudioRecoveryAttempt();
       outputDevicePendingRef.current = true;
       refreshPlaybackRecoveryLock();
       setOutputDeviceChanged(true);
+      window.requestAnimationFrame(() => hostAudioRecoveryAlertRef.current?.focus?.());
       cancelPartyFirstSongStart({ message: "Starting stopped because the audio output changed." });
       cancelPartyFirstSongLoad({ keepStatus: false });
       const transitionWasActive = Boolean(activeTransitionScheduleRef.current);
@@ -685,14 +729,15 @@ export default function App() {
   useEffect(() => {
     if (!autoPilotEnabled && !autoMixArming && !autoMixing && !rehearsalActive &&
       !rehearsalPreparing && !partyFirstSongOpening && !partyFirstSongStarting &&
-      !libraryMembershipStatus && enhancedTimingRemovalStatus?.state !== "removing") return;
+      !libraryMembershipStatus && enhancedTimingRemovalStatus?.state !== "removing" &&
+      hostAudioRecoveryStatus?.state !== "working") return;
     const warnBeforeLeaving = (event) => {
       event.preventDefault();
       event.returnValue = "";
     };
     window.addEventListener("beforeunload", warnBeforeLeaving);
     return () => window.removeEventListener("beforeunload", warnBeforeLeaving);
-  }, [autoPilotEnabled, autoMixArming, autoMixing, rehearsalActive, rehearsalPreparing, partyFirstSongOpening, partyFirstSongStarting, libraryMembershipStatus, enhancedTimingRemovalStatus]);
+  }, [autoPilotEnabled, autoMixArming, autoMixing, rehearsalActive, rehearsalPreparing, partyFirstSongOpening, partyFirstSongStarting, libraryMembershipStatus, enhancedTimingRemovalStatus, hostAudioRecoveryStatus]);
 
   useEffect(() => {
     const onBeforeUnload = (event) => {
@@ -702,6 +747,11 @@ export default function App() {
     };
     const onPageHide = () => {
       cancelPartyFirstSongStart();
+      if (hostAudioRecoveryPageHideDisposition(Boolean(hostAudioRecoveryOwnerRef.current)) === "block") {
+        failHostAudioRecoveryClosed("Browser audio recovery was interrupted when this page was left. No new playback can start until Mazzy reloads. Stop All Sound remains available.");
+      } else {
+        revokeHostAudioRecoveryAttempt({ clearStatus: false });
+      }
       const owner = libraryMembershipOwnerRef.current;
       if (!owner) return;
       if (libraryMembershipRevocationDisposition(libraryMembershipPhaseRef.current) === "cancelled") {
@@ -719,8 +769,17 @@ export default function App() {
       }
       failLibraryMembershipCommitClosed(owner);
     };
+    const onPageShow = (event) => {
+      if (event.persisted && hostAudioRecoveryCircuitOpenRef.current) {
+        window.requestAnimationFrame(() => hostAudioRecoveryAlertRef.current?.focus?.());
+      }
+    };
     window.addEventListener("pagehide", onPageHide);
-    return () => window.removeEventListener("pagehide", onPageHide);
+    window.addEventListener("pageshow", onPageShow);
+    return () => {
+      window.removeEventListener("pagehide", onPageHide);
+      window.removeEventListener("pageshow", onPageShow);
+    };
   }, []);
 
   useEffect(() => {
@@ -733,9 +792,21 @@ export default function App() {
       if (!needsHostAudioRecovery(state)) return;
       invalidatePartyCheckpointClaim("Browser audio changed while the saved plan was being restored. Reload Mazzy to review recovery before continuing.");
       audioRecoveryGenerationRef.current += 1;
+      revokeHostAudioRecoveryAttempt();
       audioRecoveryPendingRef.current = true;
       refreshPlaybackRecoveryLock();
       setAudioRecoveryState(state);
+      let outputHeld = false;
+      try {
+        outputHeld = engine.holdOutputForHostAudioRecovery() === true &&
+          engine.isOutputHeldForHostAudioRecovery() === true;
+      } catch { /* Fixed reload guidance owns an unverified hold. */ }
+      if (!outputHeld) {
+        failHostAudioRecoveryClosed("Mazzy could not confirm that browser audio is held silent. Use Stop All Sound or your device mute, then reload Mazzy.");
+      } else if (state === "closed") {
+        failHostAudioRecoveryClosed("The browser closed its audio engine. Reload Mazzy to continue; Stop All Sound remains available.");
+      }
+      window.requestAnimationFrame(() => hostAudioRecoveryAlertRef.current?.focus?.());
       cancelPartyFirstSongStart({ message: "Starting stopped because browser audio needs attention." });
       cancelPartyFirstSongLoad({ keepStatus: false });
       const transitionWasActive = Boolean(activeTransitionScheduleRef.current);
@@ -5780,6 +5851,7 @@ export default function App() {
 
   const stopAllSound = () => {
     invalidatePartyCheckpointClaim("Stop All Sound cancelled the saved-plan restore. Reload Mazzy to review recovery before continuing.");
+    revokeHostAudioRecoveryAttempt();
     cancelPartyFirstSongStart({ message: "Starting cancelled by Stop All Sound." });
     const membershipCleanupPendingAtStart = Boolean(libraryMembershipDeckCleanupRef.current);
     const engine = getAudioEngine();
@@ -6455,6 +6527,7 @@ export default function App() {
       const rehearsalCancel = rehearsalCancelRef.current;
       const rehearsalRenderRuntime = rehearsalRenderRuntimeRef.current;
       const firstSongStartRuntime = partyFirstSongStartRuntimeRef.current;
+      const hostAudioRecoveryRuntime = hostAudioRecoveryRuntimeRef.current;
       const runtime = transitionArmLeaseRef.current;
       analysisGenerationRef.current += 1;
       partyCheckpointClearOperationRef.current += 1;
@@ -6490,6 +6563,8 @@ export default function App() {
       partyFirstSongStartOwnerRef.current = null;
       partyFirstSongStartAuthorityKeyRef.current = null;
       partyFirstSongStartRuntimeRef.current = null;
+      hostAudioRecoveryOwnerRef.current = null;
+      hostAudioRecoveryRuntimeRef.current = null;
       try { if (partyFirstSongLoadTimerRef.current) window.clearTimeout(partyFirstSongLoadTimerRef.current.id); } catch { /* Host teardown continues. */ }
       partyFirstSongLoadTimerRef.current = null;
       transitionCompletionCancelRef.current = null;
@@ -6517,6 +6592,7 @@ export default function App() {
       try { rehearsalRenderRuntime?.revoke?.(); } catch { /* Late offline rendering is inert after unmount. */ }
       try { rehearsalCancel?.(); } catch { /* Exact rehearsal authority is already revoked. */ }
       try { firstSongStartRuntime?.revoke?.(); } catch { /* Late browser-audio settlement is inert. */ }
+      try { hostAudioRecoveryRuntime?.cancel?.(); } catch { /* Late browser resume settlement is inert. */ }
       try { if (runtime?.timeoutId) window.clearTimeout(runtime.timeoutId); } catch { /* Continue cleanup. */ }
       const deadlineCancel = runtime?.clockDeadlineCancel;
       if (runtime) runtime.clockDeadlineCancel = null;
@@ -7039,42 +7115,121 @@ export default function App() {
     window.requestAnimationFrame(() => partyFirstSongPlayButtonRef.current?.focus?.());
     if (!started && getAudioEngine().context.state !== "running") onAudioStartError(getAudioEngine().context.state);
   };
-  const resumeBrowserAudio = async () => {
-    const recoveryGeneration = audioRecoveryGenerationRef.current;
-    try {
-      await getAudioEngine().resume();
-      if (
-        getAudioEngine().context.state === "running"
-        && recoveryGeneration === audioRecoveryGenerationRef.current
-      ) {
-        contextReadyRef.current = true;
+  const runHostAudioRecovery = async (intent) => {
+    if (!hostAudioRecoveryMayStart({
+      ownerActive: Boolean(hostAudioRecoveryOwnerRef.current),
+      circuitOpen: hostAudioRecoveryCircuitOpenRef.current,
+      cleanupSafe: hostAudioRecoveryCleanupIsSafe()
+    })) {
+      window.requestAnimationFrame(() => hostAudioRecoveryAlertRef.current?.focus?.());
+      return;
+    }
+    const engine = getAudioEngine();
+    const runtime = startHostAudioRecovery({
+      operation: ++hostAudioRecoveryOperationRef.current,
+      intent,
+      audioGeneration: audioRecoveryGenerationRef.current,
+      deviceGeneration: outputDeviceGenerationRef.current,
+      task: async () => {
+        await engine.resume();
+        return engine.context.state === "running";
+      }
+    });
+    hostAudioRecoveryOwnerRef.current = runtime.owner;
+    hostAudioRecoveryRuntimeRef.current = runtime;
+    setHostAudioRecoveryStatus({
+      state: "working",
+      intent,
+      message: intent === "context" ? "Asking the browser to resume audio…" : "Checking browser audio after the output change…"
+    });
+
+    const settlement = await runtime.settlement;
+    if (!ownsHostAudioRecovery(hostAudioRecoveryOwnerRef.current, runtime.owner)) return;
+    const plan = planHostAudioRecoverySettlement({
+      currentOwner: hostAudioRecoveryOwnerRef.current,
+      expectedOwner: runtime.owner,
+      audioGeneration: audioRecoveryGenerationRef.current,
+      deviceGeneration: outputDeviceGenerationRef.current,
+      settlement,
+      cleanupSafe: hostAudioRecoveryCleanupIsSafe()
+    });
+    hostAudioRecoveryOwnerRef.current = null;
+    hostAudioRecoveryRuntimeRef.current = null;
+    if (plan === "stale" || plan === "cancelled") return;
+
+    if (plan === "release-context-output" || plan === "complete-device") {
+      contextReadyRef.current = true;
+      if (plan === "release-context-output") {
+        let released = false;
+        try { released = engine.releaseOutputAfterHostAudioRecovery(); } catch { /* Reload guidance owns uncertain output. */ }
+        if (!released) {
+          hostAudioRecoveryCircuitOpenRef.current = true;
+          setHostAudioRecoveryCircuitOpen(true);
+          setHostAudioRecoveryStatus({
+            state: "blocked",
+            intent,
+            message: "Mazzy could not confirm browser audio recovery. No new playback can start until Mazzy reloads. Stop All Sound remains available."
+          });
+          refreshPlaybackRecoveryLock();
+          window.requestAnimationFrame(() => hostAudioRecoveryAlertRef.current?.focus?.());
+          return;
+        }
         setAudioRecoveryState(null);
         audioRecoveryPendingRef.current = false;
-        refreshPlaybackRecoveryLock();
-      }
-    } catch {
-      setAudioRecoveryState(getAudioEngine().context.state);
-    }
-  };
-  const confirmOutputDeviceAndResume = async () => {
-    const checkedGeneration = outputDeviceGenerationRef.current;
-    try {
-      await getAudioEngine().resume();
-      if (getAudioEngine().context.state === "running" && checkedGeneration === outputDeviceGenerationRef.current) {
-        contextReadyRef.current = true;
+      } else {
         setOutputDeviceChanged(false);
         outputDevicePendingRef.current = false;
-        refreshPlaybackRecoveryLock();
       }
-    } catch {
-      setAudioRecoveryState(getAudioEngine().context.state);
+      setHostAudioRecoveryStatus(null);
+      refreshPlaybackRecoveryLock();
+      window.requestAnimationFrame(() => partyModeTitleRef.current?.focus?.());
+      return;
     }
+
+    if (plan === "block-timeout" || plan === "block-cleanup") {
+      hostAudioRecoveryCircuitOpenRef.current = true;
+      setHostAudioRecoveryCircuitOpen(true);
+      setHostAudioRecoveryStatus({
+        state: "blocked",
+        intent,
+        message: plan === "block-cleanup"
+          ? "Mazzy cannot safely restore browser audio because Stop All Sound or audio cleanup is still unresolved. Use your device mute and reload Mazzy."
+          : "The browser did not respond to the audio recovery action. No new playback can start until Mazzy reloads. Stop All Sound remains available."
+      });
+      refreshPlaybackRecoveryLock();
+      window.requestAnimationFrame(() => hostAudioRecoveryAlertRef.current?.focus?.());
+      return;
+    }
+    setHostAudioRecoveryStatus({
+      state: "error",
+      intent,
+      message: intent === "context"
+        ? "The browser did not resume audio. Try Resume Audio again."
+        : "Mazzy could not confirm browser audio after the output change. Check the output and try again."
+    });
+    window.requestAnimationFrame(() => hostAudioRecoveryButtonRef.current?.focus?.());
   };
+  const resumeBrowserAudio = () => runHostAudioRecovery("context");
+  const confirmOutputDeviceAndResume = () => runHostAudioRecovery("device");
   const onAudioStartError = (state) => {
     invalidatePartyCheckpointClaim("Browser audio changed while the saved plan was being restored. Reload Mazzy to review recovery before continuing.");
+    audioRecoveryGenerationRef.current += 1;
+    revokeHostAudioRecoveryAttempt();
     audioRecoveryPendingRef.current = true;
     refreshPlaybackRecoveryLock();
     setAudioRecoveryState(needsHostAudioRecovery(state) ? state : "suspended");
+    let outputHeld = false;
+    try {
+      const engine = getAudioEngine();
+      outputHeld = engine.holdOutputForHostAudioRecovery() === true &&
+        engine.isOutputHeldForHostAudioRecovery() === true;
+    } catch { /* Fixed reload guidance owns an unverified hold. */ }
+    if (!outputHeld) {
+      failHostAudioRecoveryClosed("Mazzy could not confirm that browser audio is held silent. Use Stop All Sound or your device mute, then reload Mazzy.");
+    } else if (getAudioEngine().context.state === "closed" || state === "closed") {
+      failHostAudioRecoveryClosed("The browser closed its audio engine. Reload Mazzy to continue; Stop All Sound remains available.");
+    }
+    window.requestAnimationFrame(() => hostAudioRecoveryAlertRef.current?.focus?.());
   };
   const partyModeStatus = partyEndingFinalTrack
     ? "Final song is playing. The session will finish when it ends."
@@ -7159,18 +7314,61 @@ export default function App() {
             <span>Mazzy will not start new audio while browser storage finishes. Audio already playing may continue; Stop All Sound stays available.</span>
           </div>
         )}
-        {audioRecoveryState && (
-          <div className="library-storage-error" role="alert">
-            <p>{audioRecoveryMessage(audioRecoveryState)}</p>
+        {hostAudioRecoveryStatus?.state === "blocked" && (
+          <div
+            ref={hostAudioRecoveryAlertRef}
+            tabIndex={-1}
+            className="library-storage-error"
+            role="alert"
+            aria-live="assertive"
+            aria-atomic="true"
+          >
+            <p>{hostAudioRecoveryStatus.message}</p>
+            <button type="button" onClick={() => window.location.reload()}>RELOAD MAZZY</button>
+          </div>
+        )}
+        {audioRecoveryState && !hostAudioRecoveryCircuitOpen && (
+          <div
+            ref={hostAudioRecoveryAlertRef}
+            tabIndex={-1}
+            className="library-storage-error"
+            role="alert"
+            aria-live="assertive"
+            aria-atomic="true"
+            aria-busy={hostAudioRecoveryStatus?.state === "working"}
+          >
+            <p>{hostAudioRecoveryStatus?.intent === "context" && hostAudioRecoveryStatus?.message
+              ? hostAudioRecoveryStatus.message
+              : audioRecoveryMessage(audioRecoveryState)}</p>
             {audioRecoveryState !== "closed" && (
-              <button type="button" onClick={() => void resumeBrowserAudio()}>RESUME AUDIO</button>
+              <button
+                ref={hostAudioRecoveryButtonRef}
+                type="button"
+                disabled={hostAudioRecoveryStatus?.state === "working" || partySoundStopLocked || transitionCompletionUncertain || autoMixing || autoMixArming || rehearsalActive || rehearsalPreparing || partyFirstSongStarting || Boolean(libraryMembershipStatus)}
+                onClick={() => void resumeBrowserAudio()}
+              >{hostAudioRecoveryStatus?.state === "working" ? "RESUMING AUDIO…" : "RESUME AUDIO"}</button>
             )}
           </div>
         )}
-        {outputDeviceChanged && !audioRecoveryState && (
-          <div className="library-storage-error" role="alert">
-            <p>{OUTPUT_DEVICE_RECOVERY_MESSAGE}</p>
-            <button type="button" onClick={() => void confirmOutputDeviceAndResume()}>I CHECKED · CONTINUE</button>
+        {outputDeviceChanged && !audioRecoveryState && !hostAudioRecoveryCircuitOpen && (
+          <div
+            ref={hostAudioRecoveryAlertRef}
+            tabIndex={-1}
+            className="library-storage-error"
+            role="alert"
+            aria-live="assertive"
+            aria-atomic="true"
+            aria-busy={hostAudioRecoveryStatus?.state === "working"}
+          >
+            <p>{hostAudioRecoveryStatus?.intent === "device" && hostAudioRecoveryStatus?.message
+              ? hostAudioRecoveryStatus.message
+              : OUTPUT_DEVICE_RECOVERY_MESSAGE}</p>
+            <button
+              ref={hostAudioRecoveryButtonRef}
+              type="button"
+              disabled={hostAudioRecoveryStatus?.state === "working" || partySoundStopLocked || transitionCompletionUncertain || autoMixing || autoMixArming || rehearsalActive || rehearsalPreparing || partyFirstSongStarting || Boolean(libraryMembershipStatus)}
+              onClick={() => void confirmOutputDeviceAndResume()}
+            >{hostAudioRecoveryStatus?.state === "working" ? "CHECKING AUDIO…" : "I CHECKED · CONTINUE"}</button>
           </div>
         )}
         {partyFirstSongLoadStatus && (
