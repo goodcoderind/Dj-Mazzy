@@ -1231,7 +1231,9 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    let active = true;
     void getEnhancedRhythmAssetState().then((assetState) => {
+      if (!active) return;
       const stored = assetState === "stored";
       setEnhancedTimingAvailable(stored);
       setEnhancedTimingState(stored
@@ -1243,7 +1245,12 @@ export default function App() {
             : assetState === "not-included"
               ? "not-included"
               : "offline");
+    }).catch(() => {
+      if (!active) return;
+      setEnhancedTimingAvailable(false);
+      setEnhancedTimingState("offline");
     });
+    return () => { active = false; };
   }, []);
 
   const prepareTimingModel = async () => {

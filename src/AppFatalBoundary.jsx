@@ -1,16 +1,22 @@
 import React from "react";
 import {
-  captureFatalHostFailure,
   fatalHostRecoveryView,
   stopExistingAudioForFatalHostError
 } from "./audio/fatalHostAudioSafety";
+import {
+  captureFatalHostEvent,
+  fatalHostEventSnapshot,
+  retryFatalHostEventStop,
+  subscribeFatalHostEvents
+} from "./audio/fatalHostEventBoundary";
 
 export default class AppFatalBoundary extends React.Component {
-  state = { failed: false, outcome: null };
+  state = fatalHostEventSnapshot();
   alertRef = React.createRef();
+  unsubscribeFatalHostEvents = null;
 
   static getDerivedStateFromError(error) {
-    return captureFatalHostFailure(error);
+    return captureFatalHostEvent(error);
   }
 
   componentDidCatch() {
@@ -18,11 +24,17 @@ export default class AppFatalBoundary extends React.Component {
   }
 
   componentDidMount() {
+    this.unsubscribeFatalHostEvents = subscribeFatalHostEvents((next) => {
+      this.setState(next, () => window.requestAnimationFrame(() => this.alertRef.current?.focus?.()));
+    });
     window.addEventListener("pagehide", this.onPageHide);
+    if (this.state.failed) window.requestAnimationFrame(() => this.alertRef.current?.focus?.());
   }
 
   componentWillUnmount() {
     window.removeEventListener("pagehide", this.onPageHide);
+    this.unsubscribeFatalHostEvents?.();
+    this.unsubscribeFatalHostEvents = null;
   }
 
   onPageHide = () => {
@@ -30,8 +42,7 @@ export default class AppFatalBoundary extends React.Component {
   };
 
   retryStop = () => {
-    const result = stopExistingAudioForFatalHostError();
-    this.setState({ outcome: result.outcome });
+    retryFatalHostEventStop();
   };
 
   reload = () => window.location.reload();

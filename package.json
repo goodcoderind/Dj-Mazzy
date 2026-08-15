@@ -11,6 +11,7 @@
     "build:diagnostics": "MAZZY_INCLUDE_DIAGNOSTICS=1 vite build",
     "acceptance:party-app": "npm run build:diagnostics && node tools/runPartyAppJourneyBrowser.mjs",
     "acceptance:checkpoint-transfer": "npm run build:diagnostics && node tools/runPartyCheckpointTransferBrowser.mjs",
+    "acceptance:fatal-host-async": "npm run build:diagnostics && node tools/runFatalHostAsyncBrowser.mjs",
     "preview:diagnostics": "MAZZY_INCLUDE_DIAGNOSTICS=1 vite preview",
     "preview": "vite preview",
     "test": "vitest run",

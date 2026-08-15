@@ -703,8 +703,26 @@ reloads, resumes, plays, deletes music, changes the library, or alters recovery
 data. Error objects, stacks, filenames, track identifiers, audio, and raw
 teardown details are discarded rather than shown, stored, exported, logged by
 Mazzy, or sent anywhere. This boundary covers React descendant render and
-lifecycle failures. It does not claim to catch arbitrary asynchronous event
-errors, browser/OS process failure, or to verify a physical speaker has stopped.
+lifecycle failures.
+
+`fatal-host-event-boundary/v1` now installs page-lifetime `error` and
+`unhandledrejection` listeners before offline-shell registration or React root
+mount. A genuinely uncaught page task first invokes the same independent audio
+latch and only then publishes a fixed `{failed, outcome}` recovery state to the
+root boundary. The original Error/rejection, message, stack, filename, path,
+track identity, and event are never retained, rendered, logged by Mazzy,
+persisted, exported, or sent over a network; the browser event default is
+prevented. Duplicate events remain idempotent, while another exact Stop attempt
+may improve an uncertain shutdown to confirmed. Expected enhanced-model cache
+inspection failure is contained locally as **offline** instead of tripping the
+fatal surface. This does not claim to catch errors already handled by third-
+party code, worker failures that are not forwarded to the page, or browser/OS
+process failure, and it cannot verify a physical speaker. The diagnostics-only
+fatal page accepts `?fault=async`; `npm run acceptance:fatal-host-async` builds
+that isolated route and runs a fresh-profile Chromium gate proving generated
+preview/click ownership was armed before the deliberate rejection, then checks
+focused fixed copy, 44-pixel Stop-before-Reload actions, hostile-payload absence,
+and an exact confirmed Stop retry.
 
 The diagnostics-only D-079 gate now drives the real production App through two
 fresh Chromium profiles with three generated stereo WAVs per run. It uses the

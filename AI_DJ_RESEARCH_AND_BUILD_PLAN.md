@@ -3099,8 +3099,44 @@ These are the active backlog, not reasons to discard the prototype.
   fresh Chromium profiles after the final exact-owner fix. Owner keys,
   track/load identity, deadline, and errors remain
   tab-memory-only; IndexedDB, analysis, transition, checkpoint, diagnostic,
-  export, network, and Party trace schemas are unchanged. A page-level async
-  host-failure boundary remains the next separate safety milestone.
+  export, network, and Party trace schemas are unchanged. The separate
+  page-level async host-failure boundary is D-083 below.
+
+- **D-083 — Route genuinely uncaught page tasks into the independent fatal
+  audio latch without retaining their payload:** `fatal-host-event-boundary/v1`
+  installs `error` and `unhandledrejection` listeners before offline-shell
+  registration and React root mount. Each event prevents the browser's default
+  projection, synchronously calls the existing `fatal-host-audio-safety/v1`
+  Stop authority, and only then publishes a monotonic fixed state containing
+  `failed`, the confirmed/uncertain outcome, and a revision. The original
+  Error, rejection reason, event, message, stack, filename/path, track identity,
+  audio, and clock are never stored in the controller, React state, DOM,
+  diagnostics, persistence, trace, export, logs owned by Mazzy, or network.
+
+  `AppFatalBoundary` consumes the same store, including a failure captured
+  before its mount, focuses its existing assertive Stop-before-Reload card, and
+  keeps the global pagehide retry. Duplicate events are idempotent; another
+  exact shutdown call may improve `uncertain` to `confirmed-stopped` but can
+  never downgrade confirmed proof. Listener/subscriber exceptions cannot bypass
+  shutdown. React descendant errors use the same state path, while React 19
+  caught/recoverable root handlers continue discarding their private arguments.
+  Expected enhanced-timing cache inspection rejection is now explicitly
+  contained and projected as offline so optional availability cannot falsely
+  stop a party.
+
+  Deterministic tests cover stop-before-notify ordering, both event types,
+  `preventDefault`, hostile-payload absence, pre-mount state, duplicate capture,
+  uncertain-to-confirmed retry, detached subscribers, and listener teardown.
+  The diagnostics-only generated-audio fatal page adds `?fault=async`, and
+  `npm run acceptance:fatal-host-async` runs it in a fresh Chromium profile. It
+  requires fixed proof that protected preview and audition owners were armed
+  before the deliberate rejection was dispatched, then verifies focused fixed
+  copy, hostile-payload absence, Stop-before-Reload order, 44-pixel controls,
+  and an exact confirmed Stop retry. This page boundary does not claim errors
+  already caught inside third-party code, worker failures not forwarded to the
+  page, browser/OS process death, physical speaker proof, or arbitrary recovery
+  without reload. Audio, storage, analysis, transition, checkpoint, Party trace,
+  and production report schemas remain unchanged.
 
 ### Open questions
 
