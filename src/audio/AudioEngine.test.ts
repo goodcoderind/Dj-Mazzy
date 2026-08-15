@@ -1233,4 +1233,64 @@ describe("DeckEngine", () => {
     ]);
     expect(deck.setFilterCutoff(30_000)).toBe(20_000);
   });
+
+  it("mutes first, stops both Deck owners, and permanently refuses new starts after a fatal host error", () => {
+    const { context, engine } = createEngine();
+    context.state = "running";
+    const deckA = engine.getDeck("a");
+    const deckB = engine.getDeck("b");
+    deckA.loadBuffer({ duration: 30 } as AudioBuffer, "a");
+    deckB.loadBuffer({ duration: 30 } as AudioBuffer, "b");
+    deckA.play(0, 10);
+    deckB.play(0, 12);
+    engine.scheduleCrossfade("a", "b", 12, 4);
+    engine.playProtectedPreview({
+      kind: "pre-master-stereo/v1",
+      requiredMasterVersion: MASTER_DSP_V1.version,
+      sampleRate: 48_000,
+      channels: [new Float32Array([0.1, 0.1]), new Float32Array([0.1, 0.1])]
+    });
+    const previewSource = context.sources.at(-1)!;
+    engine.scheduleAuditionClicks([{ audioTime: 12, downbeat: true }]);
+    const auditionSource = context.oscillators.at(-1)!;
+
+    expect(engine.shutdownForFatalHostError()).toEqual({
+      version: "fatal-host-audio-shutdown/v1",
+      outcome: "confirmed-stopped"
+    });
+    expect(context.gains[0].gain.value).toBe(0);
+    expect(engine.getActiveCrossfade()).toBeNull();
+    expect(previewSource.stopCalls.length).toBeGreaterThan(0);
+    expect(auditionSource.stopCalls.length).toBeGreaterThan(1);
+    expect(deckA.isActive()).toBe(false);
+    expect(deckB.isActive()).toBe(false);
+    expect(engine.isFatalHostLocked()).toBe(true);
+    expect(() => deckA.play()).toThrow("fatal host error");
+    expect(() => engine.scheduleCrossfade("a", "b", 20, 2)).toThrow("fatal host error");
+    expect(engine.setMasterGainDb(0)).toBe(-60);
+    expect(context.gains[0].gain.value).toBe(0);
+    expect(engine.setDeckGain("a", 1)).toBe(0);
+  });
+
+  it("reports uncertainty when the protected master mute cannot be proven", () => {
+    const { context, engine } = createEngine();
+    context.gains[0].gain.setValueAtTime = () => { throw new Error("private AudioParam failure"); };
+    expect(engine.shutdownForFatalHostError().outcome).toBe("uncertain");
+    expect(engine.isFatalHostLocked()).toBe(true);
+  });
+
+  it("reports uncertainty when an audible auxiliary owner cannot confirm cleanup", () => {
+    const { context, engine } = createEngine();
+    engine.scheduleAuditionClicks([{ audioTime: 12, downbeat: true }]);
+    const audition = context.oscillators.at(-1)!;
+    const originalStop = audition.stop.bind(audition);
+    const originalDisconnect = audition.disconnect.bind(audition);
+    audition.stop = () => { throw new Error("private stop failure"); };
+    audition.disconnect = () => { throw new Error("private disconnect failure"); };
+    expect(engine.shutdownForFatalHostError().outcome).toBe("uncertain");
+    expect(engine.shutdownForFatalHostError().outcome).toBe("uncertain");
+    audition.stop = originalStop;
+    audition.disconnect = originalDisconnect;
+    expect(engine.shutdownForFatalHostError().outcome).toBe("confirmed-stopped");
+  });
 });

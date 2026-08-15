@@ -42,6 +42,52 @@ describe("party wake lock", () => {
     expect(release).toHaveBeenCalledOnce();
   });
 
+  it("retains a rejected late acquisition so fatal Stop can retry it", async () => {
+    let resolveRequest!: (value: { release: () => Promise<void>; released?: boolean }) => void;
+    const release = vi.fn()
+      .mockRejectedValueOnce(new Error("temporary late release failure"))
+      .mockResolvedValueOnce(undefined);
+    const controller = createPartyWakeLockController({
+      request: () => new Promise((resolve) => { resolveRequest = resolve; }),
+      visibility: () => "visible"
+    });
+    const acquiring = controller.acquire();
+    await controller.releaseForHostTeardown();
+    resolveRequest({ release, released: false });
+    await acquiring;
+    await controller.releaseForHostTeardown();
+    expect(release).toHaveBeenCalledTimes(2);
+  });
+
+  it("releases for root teardown without updating the failed React subtree", async () => {
+    const release = vi.fn(async () => undefined);
+    const onStatus = vi.fn();
+    const controller = createPartyWakeLockController({
+      request: async () => ({ release }),
+      visibility: () => "visible",
+      onStatus
+    });
+    await controller.acquire();
+    onStatus.mockClear();
+    await controller.releaseForHostTeardown();
+    expect(release).toHaveBeenCalledOnce();
+    expect(onStatus).not.toHaveBeenCalled();
+  });
+
+  it("retains a rejected fatal release owner so Stop can retry it", async () => {
+    const release = vi.fn()
+      .mockRejectedValueOnce(new Error("temporary wake-lock release failure"))
+      .mockResolvedValueOnce(undefined);
+    const controller = createPartyWakeLockController({
+      request: async () => ({ release }),
+      visibility: () => "visible"
+    });
+    await controller.acquire();
+    await controller.releaseForHostTeardown();
+    await controller.releaseForHostTeardown();
+    expect(release).toHaveBeenCalledTimes(2);
+  });
+
   it("does not let an old release overwrite a newer active request", async () => {
     let finishOldRelease!: () => void;
     const statuses: string[] = [];

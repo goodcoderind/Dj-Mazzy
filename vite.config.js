@@ -14,6 +14,7 @@ const htmlInputs = {
   ...(process.env.MAZZY_INCLUDE_DIAGNOSTICS === "1"
     ? {
         "key-lock-benchmark": path.join(workspaceRoot, "key-lock-benchmark.html"),
+        "fatal-host-recovery-diagnostic": path.join(workspaceRoot, "fatal-host-recovery-diagnostic.html"),
         "key-lock-crossfade-diagnostic": path.join(workspaceRoot, "key-lock-crossfade-diagnostic.html"),
         "key-lock-listening": path.join(workspaceRoot, "key-lock-listening.html"),
         "master-peak-guard-listening": path.join(workspaceRoot, "master-peak-guard-listening.html"),

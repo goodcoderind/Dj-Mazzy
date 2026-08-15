@@ -297,6 +297,7 @@ export class DeckEngine {
     rate: number,
     when: number
   ) {
+    if (this.audioEngine.isFatalHostLocked()) return false;
     const prepared = this.preparedKeyLock;
     const state = this.keyLockState;
     const buffer = this.buffer;
@@ -421,6 +422,9 @@ export class DeckEngine {
   }
 
   play(offsetSeconds?: number, when = this.audioEngine.clock.now()) {
+    if (this.audioEngine.isFatalHostLocked()) {
+      throw new Error("audio starts are locked after a fatal host error");
+    }
     if (!this.buffer) {
       throw new Error("cannot play before a track is prepared");
     }

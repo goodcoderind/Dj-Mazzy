@@ -23,6 +23,11 @@ export type MasterMeterReading = {
   limiterReductionDb: number;
 };
 
+export type FatalHostAudioShutdown = Readonly<{
+  version: "fatal-host-audio-shutdown/v1";
+  outcome: "confirmed-stopped" | "uncertain";
+}>;
+
 export type AudioHealthSnapshot = Readonly<{
   schemaVersion: "audio-health/v2";
   supported: boolean;
@@ -100,6 +105,8 @@ export class AudioEngine {
     reports: 0
   };
   private readonly audioContextStates: AudioContextState[] = [];
+  private fatalHostLocked = false;
+  private readonly audibleAuxiliarySources = new Set<AudioScheduledSourceNode>();
   private nextAudioHealthResetToken = 1;
   private readonly audioHealthResetWaiters = new Map<number, (acknowledged: boolean) => void>();
 
@@ -139,6 +146,7 @@ export class AudioEngine {
   }
 
   async resume() {
+    if (this.fatalHostLocked) throw new Error("audio starts are locked after a fatal host error");
     if (this.context.state === "closed") {
       throw new Error("AudioContext is closed");
     }
@@ -276,6 +284,82 @@ export class AudioEngine {
     return this.decks[channel];
   }
 
+  isFatalHostLocked() {
+    return this.fatalHostLocked;
+  }
+
+  shutdownForFatalHostError(): FatalHostAudioShutdown {
+    this.fatalHostLocked = true;
+    this.audioHealthExpectedActive = false;
+    let masterMuted = false;
+    let completionCleanupConfirmed = true;
+    let auxiliaryCleanupConfirmed = true;
+    const now = Number.isFinite(this.context.currentTime) ? this.context.currentTime : 0;
+
+    // Output mute is the first operation and remains latched even if a later
+    // transport observer or teardown adapter throws.
+    try {
+      this.masterGain.gain.cancelScheduledValues(now);
+      this.masterGain.gain.value = 0;
+      this.masterGain.gain.setValueAtTime(0, now);
+      masterMuted = true;
+    } catch { /* Deck shutdown and the host warning remain independent. */ }
+
+    for (const channel of ["a", "b"] as const) {
+      try {
+        const gain = this.deckGains[channel].gain;
+        gain.cancelScheduledValues(now);
+        gain.value = 0;
+        gain.setValueAtTime(0, now);
+      } catch { /* The protected master mute remains authoritative. */ }
+    }
+
+    for (const [scheduleId, completion] of this.crossfadeCompletions) {
+      let cleaned = true;
+      try {
+        completion.source.onended = null;
+        try { completion.source.stop(); } catch { /* Already ended. */ }
+        completion.source.disconnect();
+      } catch {
+        cleaned = false;
+        completionCleanupConfirmed = false;
+      }
+      if (cleaned) this.crossfadeCompletions.delete(scheduleId);
+    }
+    // Both Deck automation owners were synchronously cancelled and zeroed
+    // above; the schedule itself no longer has output or callback authority.
+    this.activeCrossfade = null;
+
+    for (const source of this.audibleAuxiliarySources) {
+      let cleaned = true;
+      try {
+        source.onended = null;
+        try { source.stop(now); } catch { /* Already ended. */ }
+        source.disconnect();
+      } catch {
+        cleaned = false;
+        auxiliaryCleanupConfirmed = false;
+      }
+      if (cleaned) this.audibleAuxiliarySources.delete(source);
+    }
+
+    for (const channel of ["a", "b"] as const) {
+      try { this.decks[channel].shutdownForHostTeardown(); } catch { /* Verify below. */ }
+    }
+
+    let decksInactive = false;
+    try {
+      decksInactive = !this.decks.a.isActive() && !this.decks.b.isActive();
+    } catch { /* An unobservable Deck cannot prove silence. */ }
+    const confirmed = masterMuted && decksInactive && this.activeCrossfade === null &&
+      completionCleanupConfirmed && auxiliaryCleanupConfirmed &&
+      this.crossfadeCompletions.size === 0 && this.audibleAuxiliarySources.size === 0;
+    return Object.freeze({
+      version: "fatal-host-audio-shutdown/v1",
+      outcome: confirmed ? "confirmed-stopped" : "uncertain"
+    });
+  }
+
   getDeckGain(channel: DeckChannel) {
     return this.deckGains[channel].gain.value;
   }
@@ -286,6 +370,11 @@ export class AudioEngine {
     }
     const gain = this.deckGains[channel].gain;
     const now = this.clock.now();
+    if (this.fatalHostLocked) {
+      gain.cancelScheduledValues(now);
+      gain.setValueAtTime(0, now);
+      return 0;
+    }
     const safeValue = clamp01(value);
     gain.cancelScheduledValues(now);
     gain.setValueAtTime(safeValue, now);
@@ -299,6 +388,7 @@ export class AudioEngine {
     durationSeconds: number,
     authority?: () => boolean
   ) {
+    if (this.fatalHostLocked) throw new Error("audio starts are locked after a fatal host error");
     if (curve.length < 2) {
       throw new RangeError("gain curve requires at least two points");
     }
@@ -322,6 +412,7 @@ export class AudioEngine {
     curves = createEqualPowerCurves(),
     authority?: () => boolean
   ): CrossfadeSchedule {
+    if (this.fatalHostLocked) throw new Error("audio starts are locked after a fatal host error");
     if (source === target) {
       throw new RangeError("crossfade source and target must be different decks");
     }
@@ -478,6 +569,11 @@ export class AudioEngine {
     }
     const safeDb = Math.max(-60, Math.min(0, db));
     const now = this.clock.now();
+    if (this.fatalHostLocked) {
+      this.masterGain.gain.cancelScheduledValues(now);
+      this.masterGain.gain.setValueAtTime(0, now);
+      return -60;
+    }
     this.masterGain.gain.cancelScheduledValues(now);
     this.masterGain.gain.setValueAtTime(dbToGain(safeDb), now);
     return safeDb;
@@ -580,6 +676,7 @@ export class AudioEngine {
   }
 
   playProtectedPreview(preview: PreMasterStereoPreview, onEnded?: () => void) {
+    if (this.fatalHostLocked) throw new Error("audio starts are locked after a fatal host error");
     requirePositiveFinite(preview.sampleRate, "sampleRate");
     const [left, right] = preview.channels;
     if (preview.kind !== "pre-master-stereo/v1" || preview.requiredMasterVersion !== MASTER_DSP_V1.version ||
@@ -594,9 +691,11 @@ export class AudioEngine {
     source.buffer = buffer;
     source.connect(this.masterGain);
     let ended = false;
+    this.audibleAuxiliarySources.add(source);
     source.onended = () => {
       if (ended) return;
       ended = true;
+      this.audibleAuxiliarySources.delete(source);
       source.disconnect();
       onEnded?.();
     };
@@ -609,12 +708,14 @@ export class AudioEngine {
       }
       if (!ended) {
         ended = true;
+        this.audibleAuxiliarySources.delete(source);
         source.disconnect();
       }
     };
   }
 
   scheduleAuditionClicks(clicks: AuditionClick[]) {
+    if (this.fatalHostLocked) return () => undefined;
     const scheduled: Array<{ oscillator: OscillatorNode; gain: GainNode }> = [];
     for (const click of clicks) {
       if (!Number.isFinite(click.audioTime)) continue;
@@ -632,11 +733,13 @@ export class AudioEngine {
       oscillator.connect(gain);
       gain.connect(this.limiter);
       oscillator.onended = () => {
+        this.audibleAuxiliarySources.delete(oscillator);
         oscillator.disconnect();
         gain.disconnect();
       };
       oscillator.start(startTime);
       oscillator.stop(startTime + 0.065);
+      this.audibleAuxiliarySources.add(oscillator);
       scheduled.push({ oscillator, gain });
     }
     return () => {
@@ -648,6 +751,7 @@ export class AudioEngine {
           // The click may already have ended.
         }
         node.oscillator.disconnect();
+        this.audibleAuxiliarySources.delete(node.oscillator);
         node.gain.disconnect();
       }
     };

@@ -157,6 +157,7 @@ import {
   startBoundedPartyCheckpointOperation
 } from "./storage/partyCheckpointWriteRuntime";
 import { createPartyWakeLockController } from "./power/partyWakeLock";
+import { registerFatalHostWakeLockRelease } from "./audio/fatalHostAudioSafety";
 import { audioRecoveryMessage, needsHostAudioRecovery } from "./audio/audioContextRecovery";
 import { OUTPUT_DEVICE_RECOVERY_MESSAGE, supportsOutputDeviceChangeMonitoring } from "./audio/outputDeviceRecovery";
 import { DECK_LOAD_OUTCOME, shouldQuarantineAutoPilotLoad } from "./audio/deckLoadOutcome";
@@ -538,10 +539,12 @@ export default function App() {
   useEffect(() => {
     const controller = createPartyWakeLockController({ onStatus: setPartyWakeLockStatus });
     partyWakeLockRef.current = controller;
+    const unregisterFatalRelease = registerFatalHostWakeLockRelease(() => controller.releaseForHostTeardown());
     const onVisibility = () => controller.onVisibilityChange();
     document.addEventListener("visibilitychange", onVisibility);
     return () => {
       document.removeEventListener("visibilitychange", onVisibility);
+      unregisterFatalRelease();
       void controller.release();
       partyWakeLockRef.current = null;
     };

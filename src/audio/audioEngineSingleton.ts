@@ -1,8 +1,12 @@
 import { AudioEngine } from "./AudioEngine";
 
 let sharedAudioEngine: AudioEngine | null = null;
+let fatalHostLocked = false;
 
 export const getAudioEngine = () => {
+  if (fatalHostLocked) {
+    throw new Error("audio starts are locked after a fatal host error");
+  }
   if (!sharedAudioEngine) {
     const AudioContextConstructor =
       window.AudioContext ??
@@ -16,3 +20,10 @@ export const getAudioEngine = () => {
 };
 
 export const getAudioContext = () => getAudioEngine().context;
+
+export const peekAudioEngine = () => sharedAudioEngine;
+
+export const revokeAudioEngineForFatalHostError = () => {
+  fatalHostLocked = true;
+  return sharedAudioEngine;
+};

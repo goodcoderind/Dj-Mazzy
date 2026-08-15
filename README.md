@@ -654,6 +654,22 @@ manual timing overrides, and timing-review record; a later background save
 cannot roll those fields backward. Analysis-save failures stay visible until a
 subsequent analysis snapshot commits successfully.
 
+Mazzy's React root is wrapped by `fatal-host-audio-safety/v1`. If the rendered
+App fails unexpectedly, the boundary revokes new audio-engine access, mutes the
+already-existing protected master before fallible cleanup, independently stops
+both Deck owners, locally generated preview/audition sources, and scheduled crossfade callbacks, and requests release of the registered
+screen wake lock. A failed wake-lock release remains retryable. The replacement screen is a focused persistent alert with
+**Stop All Sound Again** followed by **Reload Mazzy**. It says sound is stopped
+only after the existing engine proves the master muted, both Decks inactive,
+audible auxiliary owners absent, and transition completion ownership cleared; otherwise it explicitly tells the
+host to use device or speaker mute. Retrying Stop is idempotent and never
+reloads, resumes, plays, deletes music, changes the library, or alters recovery
+data. Error objects, stacks, filenames, track identifiers, audio, and raw
+teardown details are discarded rather than shown, stored, exported, logged by
+Mazzy, or sent anywhere. This boundary covers React descendant render and
+lifecycle failures. It does not claim to catch arbitrary asynchronous event
+errors, browser/OS process failure, or to verify a physical speaker has stopped.
+
 The production build also installs a versioned, same-origin offline app shell
 after one successful online load. It caches only the root UI, its exact hashed
 JavaScript/CSS modules, the basic analysis worker, and install icons. It does
@@ -829,6 +845,15 @@ Open `/party-continuation-diagnostic.html` for the short audible synthetic
 native-EOF continuation check. It uses no music files and exposes an explicit
 Stop action; its report stays in the page and must not be treated as a full
 Party Autopilot or speaker-output test.
+
+Open `/fatal-host-recovery-diagnostic.html` to run the manual D-078 recovery
+smoke. One host click starts a two-second generated stereo preview plus a
+scheduled audition click, then deliberately fails the diagnostic React child.
+Confirm that the fixed alert receives focus, says sound is stopped, presents
+**Stop All Sound Again** before **Reload Mazzy**, and that both controls are at
+least 44 pixels high. This route exists only in the diagnostics build. It is a
+manual browser smoke, not evidence for arbitrary async errors, process crashes,
+physical speaker state, or the full Party journey.
 
 The real-track command reads `~/Desktop/music small` by default and writes only
 to external private application storage outside the repository and Vite root. See

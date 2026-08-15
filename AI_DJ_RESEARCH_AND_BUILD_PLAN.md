@@ -2872,6 +2872,43 @@ These are the active backlog, not reasons to discard the prototype.
   real browser process death during an IndexedDB commit remain external
   acceptance gates.
 
+- **D-078 — Keep an independent Stop/Reload recovery surface after a React host
+  failure:** `fatal-host-audio-safety/v1` wraps the full StrictMode App in a
+  root Error Boundary. A descendant render or lifecycle failure first revokes
+  creation/access authority for the shared audio-engine singleton, then acts
+  only on the already-existing engine. `fatal-host-audio-shutdown/v1` latches a
+  permanent start lock, mutes the protected master before fallible transport
+  work, zeros both Deck gain owners, stops registered preview/audition sources,
+  revokes crossfade completion callbacks, and independently shuts down Deck A
+  and Deck B. A registered wake-lock release is requested without depending on
+  the failed App subtree, and a rejected release retains its exact owner for a
+  later Stop retry. Late App, transport, or
+  completion callbacks cannot unmute or begin new playback through that engine.
+
+  The boundary replaces the failed tree with one persistent, focusable
+  assertive alert. It reports **Sound is stopped** only when the master mute,
+  both inactive Decks, and cleared transition completion ownership are all
+  observable. Any throw or missing proof produces fixed device/speaker-mute
+  guidance. **Stop All Sound Again** is idempotent and ordered before the
+  explicit **Reload Mazzy** action; neither action auto-plays, mutates library
+  membership, writes a checkpoint, or deletes analysis. A hostile Error object
+  is deliberately absent from boundary state and UI: error text, stack, local
+  filenames/paths, track IDs, clocks, audio, and raw teardown detail are not
+  persisted, exported, logged by Mazzy, or sent over a network.
+
+  Deterministic evidence covers revoke-before-shutdown ordering, exact confirmed
+  versus uncertain projection, independent retry after a thrown adapter,
+  protected-master failure, active/scheduled Deck and crossfade teardown,
+  permanent post-fatal start refusal, wake-lock release, and hostile-error
+  privacy projection. A manual local Chromium fault smoke performed for this
+  decision verified the focused fallback, action order, 44-pixel controls,
+  fixed copy, idempotent retry, and absence of the hostile sentinel from the
+  DOM; it is not an automated browser release gate. This boundary intentionally
+  covers React descendant render/lifecycle faults only; arbitrary async event
+  errors, browser/OS process death, physical speaker state, full-App Party
+  journey acceptance, a machine-run fault-browser report, and normal
+  multi-handoff audio composition remain separate gates.
+
 ### Open questions
 
 - **Q-001:** Remain browser/PWA-first through launch, or package a desktop app
