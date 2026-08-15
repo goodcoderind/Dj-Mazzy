@@ -1,5 +1,5 @@
-export const PARTY_AUTOPILOT_TRACE_SCHEMA_VERSION = "party-autopilot-trace/v11" as const;
-export const PARTY_AUTOPILOT_EVALUATION_SCHEMA_VERSION = "party-autopilot-evaluation/v11" as const;
+export const PARTY_AUTOPILOT_TRACE_SCHEMA_VERSION = "party-autopilot-trace/v12" as const;
+export const PARTY_AUTOPILOT_EVALUATION_SCHEMA_VERSION = "party-autopilot-evaluation/v12" as const;
 
 export type PartyDeck = "a" | "b";
 export type PartyTrackOrdinal = number;
@@ -30,6 +30,8 @@ export type PartyAutopilotEvent = EventBase & (
   | Readonly<{ type: "final-revoked" }>
   | Readonly<{ type: "deck-ended"; deck: PartyDeck; trackOrdinal: PartyTrackOrdinal; loadOrdinal: PartyLoadOrdinal; nativeOwnerOrdinal: number; settledBy: "source-onended" | "audio-clock" | "reconcile"; outcome: "on-time" | "recovered" | "late" }>
   | Readonly<{ type: "deck-completion-failed"; deck: PartyDeck; trackOrdinal: PartyTrackOrdinal; loadOrdinal: PartyLoadOrdinal; nativeOwnerOrdinal: number; settledBy: "source-onended"; reason: "premature"; pauseRequired: true }>
+  | Readonly<{ type: "fallback-started"; operation: number; sourceTrackOrdinal: PartyTrackOrdinal; sourceLoadOrdinal: PartyLoadOrdinal; targetTrackOrdinal: PartyTrackOrdinal; targetLoadOrdinal: PartyLoadOrdinal; cause: "natural-eof" }>
+  | Readonly<{ type: "fallback-settled"; operation: number; outcome: "scheduled" | "failed"; pauseRequired: boolean }>
   | Readonly<{ type: "session-ended"; reason: "final-track-ended" | "host-ended" }>
 );
 
@@ -72,6 +74,8 @@ export type PartyAutopilotFailureCode =
   | "deck-completion-not-paused"
   | "deck-completion-owner-mismatch"
   | "duplicate-deck-completion"
+  | "fallback-owner-mismatch"
+  | "fallback-not-settled"
   | "rescue-not-paused"
   | "stop-all-sound-not-paused"
   | "uncommitted-autopilot-target"
@@ -103,6 +107,8 @@ export type PartyAutopilotEvaluation = Readonly<{
     deckCompletionRecoveries: number;
     lateDeckCompletions: number;
     deckCompletionFailures: number;
+    fallbackStarts: number;
+    fallbackFailures: number;
     pauses: number;
   }>;
 }>;
@@ -198,6 +204,15 @@ const projectEvent = (event: PartyAutopilotEventInput, sequence: number): PartyA
         event.settledBy !== "source-onended" ||
         event.reason !== "premature" || event.pauseRequired !== true) return null;
       return Object.freeze({ ...base, type: event.type, deck: event.deck, trackOrdinal: event.trackOrdinal, loadOrdinal: event.loadOrdinal, nativeOwnerOrdinal: event.nativeOwnerOrdinal, settledBy: "source-onended", reason: "premature", pauseRequired: true });
+    case "fallback-started":
+      if (!isPositiveInteger(event.operation) || !isPositiveInteger(event.sourceTrackOrdinal) ||
+        !isPositiveInteger(event.sourceLoadOrdinal) || !isPositiveInteger(event.targetTrackOrdinal) ||
+        !isPositiveInteger(event.targetLoadOrdinal) || event.cause !== "natural-eof") return null;
+      return Object.freeze({ ...base, type: event.type, operation: event.operation, sourceTrackOrdinal: event.sourceTrackOrdinal, sourceLoadOrdinal: event.sourceLoadOrdinal, targetTrackOrdinal: event.targetTrackOrdinal, targetLoadOrdinal: event.targetLoadOrdinal, cause: "natural-eof" });
+    case "fallback-settled":
+      if (!isPositiveInteger(event.operation) || !["scheduled", "failed"].includes(event.outcome) ||
+        typeof event.pauseRequired !== "boolean" || event.pauseRequired !== (event.outcome === "failed")) return null;
+      return Object.freeze({ ...base, type: event.type, operation: event.operation, outcome: event.outcome, pauseRequired: event.pauseRequired });
     case "session-ended":
       if (!["final-track-ended", "host-ended"].includes(event.reason)) return null;
       return Object.freeze({ ...base, type: event.type, reason: event.reason });
@@ -277,6 +292,9 @@ export const evaluatePartyAutopilotTrace = (trace: PartyAutopilotTrace): PartyAu
   let coordinatorFailurePauseRequired = false;
   let deckCompletionPauseRequired = false;
   let unexpectedDeckEndPauseRequired = false;
+  let unexpectedDeckEndResolutionRequired: Extract<PartyAutopilotEvent, { type: "deck-ended" }> | null = null;
+  let activeFallback: Extract<PartyAutopilotEvent, { type: "fallback-started" }> | null = null;
+  let fallbackPauseRequired = false;
   let finalSessionEndRequired = false;
   const playedLoads = new Set<string>();
   const completedDeckLoads = new Set<string>();
@@ -304,6 +322,8 @@ export const evaluatePartyAutopilotTrace = (trace: PartyAutopilotTrace): PartyAu
   let deckCompletionRecoveries = 0;
   let lateDeckCompletions = 0;
   let deckCompletionFailures = 0;
+  let fallbackStarts = 0;
+  let fallbackFailures = 0;
   let pauses = 0;
 
   for (let index = 0; index < trace.events.length; index += 1) {
@@ -353,6 +373,21 @@ export const evaluatePartyAutopilotTrace = (trace: PartyAutopilotTrace): PartyAu
       failures.add("deck-completion-not-paused");
       unexpectedDeckEndPauseRequired = false;
     }
+    if (unexpectedDeckEndResolutionRequired &&
+      event?.type !== "fallback-started" &&
+      !(event?.type === "session-paused" && event.reason === "source-stopped")) {
+      failures.add("deck-completion-not-paused");
+      unexpectedDeckEndResolutionRequired = null;
+    }
+    if (activeFallback && event?.type !== "fallback-settled") {
+      failures.add("fallback-not-settled");
+      activeFallback = null;
+    }
+    if (fallbackPauseRequired &&
+      !(event?.type === "session-paused" && event.reason === "source-stopped")) {
+      failures.add("deck-completion-not-paused");
+      fallbackPauseRequired = false;
+    }
     if (finalSessionEndRequired &&
       !(event?.type === "session-ended" && event.reason === "final-track-ended")) {
       failures.add("session-ended-without-final");
@@ -377,6 +412,7 @@ export const evaluatePartyAutopilotTrace = (trace: PartyAutopilotTrace): PartyAu
       case "session-resumed":
         if (!started || running || ended || transitionCompletionRecoveryRequired) failures.add("invalid-session-lifecycle");
         if (activePreload) failures.add("preload-not-settled-before-pause");
+        if (activeFallback) failures.add("fallback-not-settled");
         running = true;
         consecutivePreloadTimeouts = 0;
         consecutiveArmFailures = 0;
@@ -412,6 +448,10 @@ export const evaluatePartyAutopilotTrace = (trace: PartyAutopilotTrace): PartyAu
         if (event.reason === "source-stopped" && unexpectedDeckEndPauseRequired) {
           unexpectedDeckEndPauseRequired = false;
         }
+        if (event.reason === "source-stopped") {
+          unexpectedDeckEndResolutionRequired = null;
+          fallbackPauseRequired = false;
+        }
         running = false;
         pauses += 1;
         break;
@@ -438,6 +478,8 @@ export const evaluatePartyAutopilotTrace = (trace: PartyAutopilotTrace): PartyAu
         playedTracks.add(event.trackOrdinal);
         playedLoads.add(key);
         currentPlayedOwner = { trackOrdinal: event.trackOrdinal, loadOrdinal: event.loadOrdinal };
+        if (event.cause === "host" && committedPreload?.trackOrdinal === event.trackOrdinal &&
+          committedPreload.loadOrdinal === event.loadOrdinal) committedPreload = null;
         break;
       }
       case "preload-started":
@@ -680,7 +722,7 @@ export const evaluatePartyAutopilotTrace = (trace: PartyAutopilotTrace): PartyAu
         else if (finalOwner) {
           matchingFinalEndObserved = true;
           finalSessionEndRequired = true;
-        } else unexpectedDeckEndPauseRequired = true;
+        } else unexpectedDeckEndResolutionRequired = event;
         break;
       case "deck-completion-failed":
         if (!started || !running || ended || !["a", "b"].includes(event.deck) ||
@@ -709,13 +751,56 @@ export const evaluatePartyAutopilotTrace = (trace: PartyAutopilotTrace): PartyAu
         deckCompletionPauseRequired = true;
         deckCompletionFailures += 1;
         break;
+      case "fallback-started":
+        if (!started || !running || ended || activeFallback || !unexpectedDeckEndResolutionRequired ||
+          event.cause !== "natural-eof" || !isPositiveInteger(event.operation) ||
+          !isPositiveInteger(event.sourceTrackOrdinal) || !isPositiveInteger(event.sourceLoadOrdinal) ||
+          !isPositiveInteger(event.targetTrackOrdinal) || !isPositiveInteger(event.targetLoadOrdinal)) {
+          failures.add("fallback-owner-mismatch");
+        }
+        if (!currentPlayedOwner || currentPlayedOwner.trackOrdinal !== event.sourceTrackOrdinal ||
+          currentPlayedOwner.loadOrdinal !== event.sourceLoadOrdinal || !committedPreload ||
+          committedPreload.trackOrdinal !== event.targetTrackOrdinal ||
+          committedPreload.loadOrdinal !== event.targetLoadOrdinal) {
+          failures.add("fallback-owner-mismatch");
+        }
+        if (!unexpectedDeckEndResolutionRequired || committedPreload?.deck === unexpectedDeckEndResolutionRequired.deck ||
+          event.sourceTrackOrdinal !== unexpectedDeckEndResolutionRequired.trackOrdinal ||
+          event.sourceLoadOrdinal !== unexpectedDeckEndResolutionRequired.loadOrdinal || activePreload || activeArm ||
+          scheduledArmOrigin || activeTransition || finalOwner || queuedCommittedTarget != null) {
+          failures.add("fallback-owner-mismatch");
+        }
+        unexpectedDeckEndResolutionRequired = null;
+        activeFallback = event;
+        fallbackStarts += 1;
+        break;
+      case "fallback-settled":
+        if (!started || !running || ended || !activeFallback || activeFallback.operation !== event.operation ||
+          !["scheduled", "failed"].includes(event.outcome) ||
+          event.pauseRequired !== (event.outcome === "failed")) {
+          failures.add("fallback-owner-mismatch");
+        } else if (event.outcome === "scheduled") {
+          if (playedTracks.has(activeFallback.targetTrackOrdinal)) failures.add("track-repeated");
+          playedTracks.add(activeFallback.targetTrackOrdinal);
+          playedLoads.add(loadKey(activeFallback.targetTrackOrdinal, activeFallback.targetLoadOrdinal));
+          currentPlayedOwner = {
+            trackOrdinal: activeFallback.targetTrackOrdinal,
+            loadOrdinal: activeFallback.targetLoadOrdinal
+          };
+          committedPreload = null;
+        } else {
+          fallbackPauseRequired = true;
+          fallbackFailures += 1;
+        }
+        activeFallback = null;
+        break;
       case "session-ended":
         if (!["final-track-ended", "host-ended"].includes(event.reason)) failures.add("malformed-event");
         if (!started || ended) failures.add("invalid-session-lifecycle");
         if (event.reason === "final-track-ended" && (!finalOwner || !matchingFinalEndObserved)) {
           failures.add("session-ended-without-final");
         }
-        if (activePreload || committedPreload || activeArm || scheduledArmOrigin || activeTransition) {
+        if (activePreload || committedPreload || activeArm || scheduledArmOrigin || activeTransition || activeFallback) {
           failures.add("session-ended-with-open-operation");
         }
         ended = true;
@@ -739,6 +824,8 @@ export const evaluatePartyAutopilotTrace = (trace: PartyAutopilotTrace): PartyAu
   if (finalSessionEndRequired) failures.add("session-ended-without-final");
   if (preloadTimeoutPauseRequired) failures.add("preload-timeout-not-paused");
   if (armFailurePauseRequired) failures.add("arm-failure-not-paused");
+  if (unexpectedDeckEndResolutionRequired || unexpectedDeckEndPauseRequired || fallbackPauseRequired) failures.add("deck-completion-not-paused");
+  if (activeFallback) failures.add("fallback-not-settled");
   const status = failures.size
     ? "invalid"
     : ended
@@ -765,6 +852,8 @@ export const evaluatePartyAutopilotTrace = (trace: PartyAutopilotTrace): PartyAu
       deckCompletionRecoveries,
       lateDeckCompletions,
       deckCompletionFailures,
+      fallbackStarts,
+      fallbackFailures,
       pauses
     })
   });

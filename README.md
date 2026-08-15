@@ -241,7 +241,7 @@ A deterministic three-hour Party Autopilot coordinator soak now drives the same
 `party-autopilot-decision/v4` function used by the live app. It therefore exercises the real
 queue-first two-song lookahead, library continuation, transition-plan arm
 windows, target cue offsets, no-repeat history, exact final-track ownership, and
-`party-autopilot-trace/v11` evaluator. A Rescue correctly ends the unattended observation
+`party-autopilot-trace/v12` evaluator. A Rescue correctly ends the unattended observation
 in a paused state. This is state/coordinator evidence only: it does not exercise
 browser decoding, Web Audio rendering, analysis workers, musical quality, or
 speaker output, and it does not replace the visible two-hour device check.
@@ -326,11 +326,11 @@ scheduled `stopAt` becomes paused and never masquerades as natural EOF. An exact
 source that ends materially early becomes a recoverable safety failure rather
 than being relabelled later as a valid end.
 
-`party-autopilot-trace/v11` records only session-local deck/load and rebased
+`party-autopilot-trace/v12` records only session-local deck/load and rebased
 native-owner ordinals plus the fixed
 `source-onended`, `audio-clock`, or `reconcile` provenance, distinguishes a
 source callback observed after the watchdog boundary, and requires a final
-deck end to be followed immediately by terminal session cleanup. The v10 soak
+deck end to be followed immediately by terminal session cleanup. The current v12 soak
 creates and inspects the same final-deck lease and models a missing source
 callback recovered by either the silent audio-clock sentinel or explicit
 audio-clock reconciliation. This is deterministic
@@ -342,17 +342,30 @@ Verified native completion now passes through a second, session-level
 The callback channel, native operation and load revision, natural-completion
 intent, settled Deck status, and current Party load must all match. A stale
 same-song callback from an earlier play or reload is ignored. An exact final
-owner still ends the Party once. Any exact non-final master ending revokes
-Autopilot immediately in the callback, settles pending preload/arm authority,
-pauses the Party clock, releases the screen-wake request, and presents a
-focused persistent recovery card. No new song is started automatically; the
-host chooses and plays a song before restarting Autopilot. A completion from
+owner still ends the Party once. Without an eligible exact committed target,
+any exact non-final master ending revokes Autopilot immediately in the callback,
+settles pending preload/arm authority, pauses the Party clock, releases the
+screen-wake request, and presents a focused persistent recovery card. No new
+song is then started automatically; the host chooses and plays one before
+restarting Autopilot. A completion from
 either deck of an active transition enters the existing Rescue/Stop safety lock
-instead of allowing that transition to commit a stopped deck. Trace v11 binds
+instead of allowing that transition to commit a stopped deck. Trace v12 binds
 the native ordinals and requires a non-final ending to be followed immediately
-by the source-stopped pause. Soak v11 includes the same pure ingestion decision.
-This closes session ownership, not audible continuity; an owned automatic
-fallback start remains separate work.
+by either the source-stopped pause or one exact committed-target fallback
+attempt.
+
+When the opposite deck is already the exact committed preload—decoded,
+level-checked, ready, idle, and bound to the current Party load ordinal—Mazzy
+now makes one bounded fallback start after verified non-final EOF. It starts
+from the beginning at 1×, applies a short target-only gain ramp, and does not
+select, decode, resume audio, infer a cue, or attempt beat matching in this
+path. The context must already be running and every preload, arm, transition,
+rehearsal, recovery, storage, and Stop authority must be clear. Any mismatch or
+unverified start falls back to the existing focused paused recovery; a target
+that may have started is stopped only when its exact load still owns the deck.
+This is a best-effort continuation and a short audible gap may occur—it is not
+seamless or gapless playback. Soak v12 covers both the ordinary pause and the
+exact committed-target continuation through the shared pure decisions.
 
 Tempo-changing phrase blends also remain fail-closed until pitch-preserving
 playback is ready on the exact loaded decks. A developer-only Signalsmith

@@ -277,6 +277,21 @@ const Deck = forwardRef(function Deck(
     return true;
   };
 
+  const playReadyAtIfRunning = (startTime, offset = 0, startAuthority = null) => {
+    if (playbackStartLocked || playbackStartLockRef?.current || getAudioEngine().context.state !== "running") return null;
+    const transportRevision = captureDeckTransportAuthority(transportAuthorityRef.current);
+    const before = deckEngine.getSnapshot();
+    if (!ownsDeckTransportAuthority(transportAuthorityRef.current, transportRevision) ||
+      (startAuthority && !startAuthority()) || before.status !== "ready" || !deckEngine.isReady()) return null;
+    const scheduledStart = deckEngine.play(offset, startTime);
+    if (!ownsDeckTransportAuthority(transportAuthorityRef.current, transportRevision) ||
+      playbackStartLockRef?.current || (startAuthority && !startAuthority())) {
+      deckEngine.pause();
+      return null;
+    }
+    return Object.freeze({ scheduledStart, snapshot: deckEngine.getSnapshot() });
+  };
+
   const pause = () => {
     invalidateDeckTransportAuthority(transportAuthorityRef.current);
     stopMetronomeAudition();
@@ -983,6 +998,8 @@ const Deck = forwardRef(function Deck(
       getCurrentBpm: () => (originalBpm ? Math.round(originalBpm * tempo * 10) / 10 : null),
       play: async () => play(),
       playAt: async (startTime, offset = 0, startAuthority = null) => play(offset, startTime, false, startAuthority),
+      playReadyAtIfRunning: (startTime, offset = 0, startAuthority = null) =>
+        playReadyAtIfRunning(startTime, offset, startAuthority),
       loadTrack: async (file, trackId = null, knownAnalysis = null, options = undefined) =>
         loadFileToDeck(file, trackId, knownAnalysis, options),
       getTrackId: () => deckEngine.getSnapshot().trackId,

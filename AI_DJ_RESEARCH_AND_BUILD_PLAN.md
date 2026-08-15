@@ -2439,6 +2439,39 @@ These are the active backlog, not reasons to discard the prototype.
   metadata, raw audio time, error text, network path, or promise of gapless
   automatic fallback playback.
 
+- **D-067 — Start only an exact committed target after verified non-final EOF:**
+  `party-committed-target-continuation/v1` is a second, deliberately narrow
+  decision boundary after D-066 accepts an exact current-master completion. It
+  permits one fallback start only when the opposite deck is the exact committed
+  preload: current Deck snapshot, Party track/load ordinal, and committed marker
+  all agree; the deck is ready and idle; the AudioContext is already running;
+  and no preload, arm, transition, rehearsal, recovery, Stop, library mutation,
+  checkpoint mutation, or writer-loss owner is open. Every other case takes the
+  existing immediate `source-stopped` pause.
+
+  The fallback path advances the coordinator epoch, installs an in-memory exact
+  operation owner, mutes the target, and uses a synchronous running-context-only
+  Deck start from offset zero at 1×. The target gain ramp checks the same owner
+  immediately before AudioParam mutation. Only an exact active postcondition
+  consumes the committed marker, promotes the target, and marks its exact load
+  played. Start or gain failure revokes authority first, pauses only the same
+  exact target load, and returns to D-066's focused paused recovery; uncertain
+  cleanup retains the Stop All playback lock. No song is selected, decoded,
+  analysed, resumed, or cue-inferred here, and no persisted checkpoint may
+  restore this start owner.
+
+  `party-autopilot-trace/v12` adds ordinal-only `fallback-started` and
+  `fallback-settled` events. An unexpected exact deck end must be followed
+  immediately by either the source-stopped pause or that exact fallback start;
+  a failed fallback must then pause, while a scheduled fallback consumes the
+  committed target once. Coordinator soak v12 runs both branches through the
+  shared decisions and continues to final ownership after a successful fixture.
+  This is deterministic state/ownership evidence, not browser callback,
+  speaker-output, or gapless-continuity evidence. Product copy explicitly
+  allows a short gap. No track ID/name, filename, raw native counter, audio-clock
+  time, error text, audio, device value, persistence field, export, or network
+  path was added.
+
 ### Open questions
 
 - **Q-001:** Remain browser/PWA-first through launch, or package a desktop app

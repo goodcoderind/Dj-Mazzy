@@ -58,8 +58,103 @@ describe("Party Autopilot trace", () => {
       deckCompletionRecoveries: 0,
       lateDeckCompletions: 0,
       deckCompletionFailures: 0,
+      fallbackStarts: 0,
+      fallbackFailures: 0,
       pauses: 0
     });
+  });
+
+  it("consumes an exact committed target after non-final EOF and requires failure to pause", () => {
+    const prefix: readonly PartyAutopilotEventInput[] = [
+      { type: "session-started", activeSecond: 0 },
+      { type: "queue-committed", activeSecond: 0, revision: 1, trackOrdinals: [2] },
+      { type: "track-played", activeSecond: 0, trackOrdinal: 1, loadOrdinal: 1, cause: "host" },
+      { type: "preload-started", activeSecond: 1, operation: 1, generation: 1, deck: "b", trackOrdinal: 2, loadOrdinal: 2, selectionSource: "queue" },
+      { type: "preload-settled", activeSecond: 1, operation: 1, outcome: "committed" },
+      { type: "queue-committed", activeSecond: 1, revision: 2, trackOrdinals: [] },
+      { type: "deck-ended", activeSecond: 2, deck: "a", trackOrdinal: 1, loadOrdinal: 1, nativeOwnerOrdinal: 1, settledBy: "source-onended", outcome: "on-time" },
+      { type: "fallback-started", activeSecond: 2, operation: 1, sourceTrackOrdinal: 1, sourceLoadOrdinal: 1, targetTrackOrdinal: 2, targetLoadOrdinal: 2, cause: "natural-eof" }
+    ];
+    const scheduled = evaluatePartyAutopilotTrace(record([
+      ...prefix,
+      { type: "fallback-settled", activeSecond: 2, operation: 1, outcome: "scheduled", pauseRequired: false }
+    ]));
+    expect(scheduled.status).toBe("valid-in-progress");
+    expect(scheduled.failureCodes).toEqual([]);
+    expect(scheduled.counters).toMatchObject({ playedTracks: 2, fallbackStarts: 1, fallbackFailures: 0 });
+
+    const failed = evaluatePartyAutopilotTrace(record([
+      ...prefix,
+      { type: "fallback-settled", activeSecond: 2, operation: 1, outcome: "failed", pauseRequired: true },
+      { type: "session-paused", activeSecond: 2, reason: "source-stopped" }
+    ]));
+    expect(failed.failureCodes).toEqual([]);
+    expect(failed.counters).toMatchObject({ fallbackStarts: 1, fallbackFailures: 1, pauses: 1 });
+
+    const missingPause = evaluatePartyAutopilotTrace(record([
+      ...prefix,
+      { type: "fallback-settled", activeSecond: 2, operation: 1, outcome: "failed", pauseRequired: true }
+    ]));
+    expect(missingPause.failureCodes).toContain("deck-completion-not-paused");
+  });
+
+  it("rejects fallback evidence with a same-deck target, open arm, or queued target", () => {
+    const fallbackTail: readonly PartyAutopilotEventInput[] = [
+      { type: "deck-ended", activeSecond: 2, deck: "a", trackOrdinal: 1, loadOrdinal: 1, nativeOwnerOrdinal: 1, settledBy: "source-onended", outcome: "on-time" },
+      { type: "fallback-started", activeSecond: 2, operation: 1, sourceTrackOrdinal: 1, sourceLoadOrdinal: 1, targetTrackOrdinal: 2, targetLoadOrdinal: 2, cause: "natural-eof" },
+      { type: "fallback-settled", activeSecond: 2, operation: 1, outcome: "scheduled", pauseRequired: false }
+    ];
+    const prefix = (deck: "a" | "b", consumeQueue: boolean): PartyAutopilotEventInput[] => [
+      { type: "session-started", activeSecond: 0 },
+      { type: "queue-committed", activeSecond: 0, revision: 1, trackOrdinals: [2] },
+      { type: "track-played", activeSecond: 0, trackOrdinal: 1, loadOrdinal: 1, cause: "host" },
+      { type: "preload-started", activeSecond: 1, operation: 1, generation: 1, deck, trackOrdinal: 2, loadOrdinal: 2, selectionSource: "queue" },
+      { type: "preload-settled", activeSecond: 1, operation: 1, outcome: "committed" },
+      ...(consumeQueue ? [{ type: "queue-committed", activeSecond: 1, revision: 2, trackOrdinals: [] } as const] : [])
+    ];
+    expect(evaluatePartyAutopilotTrace(record([...prefix("a", true), ...fallbackTail])).failureCodes)
+      .toContain("fallback-owner-mismatch");
+    expect(evaluatePartyAutopilotTrace(record([
+      ...prefix("b", true),
+      { type: "arm-started", activeSecond: 1, operation: 1, origin: "autopilot" },
+      ...fallbackTail
+    ])).failureCodes).toContain("fallback-owner-mismatch");
+    expect(evaluatePartyAutopilotTrace(record([...prefix("b", false), ...fallbackTail])).failureCodes)
+      .toContain("fallback-owner-mismatch");
+  });
+
+  it("consumes a preserved committed target only after an exact host recovery play", () => {
+    const failedPrefix: readonly PartyAutopilotEventInput[] = [
+      { type: "session-started", activeSecond: 0 },
+      { type: "queue-committed", activeSecond: 0, revision: 1, trackOrdinals: [2] },
+      { type: "track-played", activeSecond: 0, trackOrdinal: 1, loadOrdinal: 1, cause: "host" },
+      { type: "preload-started", activeSecond: 1, operation: 1, generation: 1, deck: "b", trackOrdinal: 2, loadOrdinal: 2, selectionSource: "queue" },
+      { type: "preload-settled", activeSecond: 1, operation: 1, outcome: "committed" },
+      { type: "queue-committed", activeSecond: 1, revision: 2, trackOrdinals: [] },
+      { type: "deck-ended", activeSecond: 2, deck: "a", trackOrdinal: 1, loadOrdinal: 1, nativeOwnerOrdinal: 1, settledBy: "source-onended", outcome: "on-time" },
+      { type: "fallback-started", activeSecond: 2, operation: 1, sourceTrackOrdinal: 1, sourceLoadOrdinal: 1, targetTrackOrdinal: 2, targetLoadOrdinal: 2, cause: "natural-eof" },
+      { type: "fallback-settled", activeSecond: 2, operation: 1, outcome: "failed", pauseRequired: true },
+      { type: "session-paused", activeSecond: 2, reason: "source-stopped" },
+      { type: "session-resumed", activeSecond: 2 }
+    ];
+    const exact = evaluatePartyAutopilotTrace(record([
+      ...failedPrefix,
+      { type: "track-played", activeSecond: 2, trackOrdinal: 2, loadOrdinal: 2, cause: "host" },
+      { type: "final-declared", activeSecond: 2, deck: "b", trackOrdinal: 2, loadOrdinal: 2 },
+      { type: "deck-ended", activeSecond: 3, deck: "b", trackOrdinal: 2, loadOrdinal: 2, nativeOwnerOrdinal: 2, settledBy: "source-onended", outcome: "on-time" },
+      { type: "session-ended", activeSecond: 3, reason: "final-track-ended" }
+    ]));
+    expect(exact.status).toBe("valid-terminal");
+    expect(exact.failureCodes).toEqual([]);
+
+    const replacement = evaluatePartyAutopilotTrace(record([
+      ...failedPrefix,
+      { type: "track-played", activeSecond: 2, trackOrdinal: 2, loadOrdinal: 3, cause: "host" },
+      { type: "final-declared", activeSecond: 2, deck: "b", trackOrdinal: 2, loadOrdinal: 3 },
+      { type: "deck-ended", activeSecond: 3, deck: "b", trackOrdinal: 2, loadOrdinal: 3, nativeOwnerOrdinal: 2, settledBy: "source-onended", outcome: "on-time" },
+      { type: "session-ended", activeSecond: 3, reason: "final-track-ended" }
+    ]));
+    expect(replacement.failureCodes).toContain("session-ended-with-open-operation");
   });
 
   it("requires invalidated preloads to settle without becoming transition targets", () => {

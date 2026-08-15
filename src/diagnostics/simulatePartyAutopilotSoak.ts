@@ -29,8 +29,9 @@ import {
   ownsAutoPilotPreloadLease
 } from "../planning/autoPilotPreloadOwnership";
 import { decidePartyDeckCompletion } from "../planning/partyDeckCompletionIngestion";
+import { decidePartyCommittedTargetContinuation } from "../planning/partyCommittedTargetContinuation";
 
-export const PARTY_AUTOPILOT_SOAK_SCHEMA_VERSION = "party-autopilot-coordinator-soak/v11" as const;
+export const PARTY_AUTOPILOT_SOAK_SCHEMA_VERSION = "party-autopilot-coordinator-soak/v12" as const;
 
 export type SimulatedPartyTrack = Readonly<{
   id: string;
@@ -84,6 +85,8 @@ export type PartyAutopilotSoakOptions = Readonly<{
   finalDeckCompletionSignal?: "source-onended" | "audio-clock" | "reconcile";
   /** Synthetic exact non-final native EOF delivered through the shared session-ingestion contract. */
   unexpectedSourceEndIteration?: number;
+  /** Continue from the exact already-committed target after the injected EOF. */
+  continueCommittedTargetOnUnexpectedEnd?: boolean;
 }>;
 
 export type SimulatedPartyRescueEvent = Readonly<{
@@ -340,6 +343,53 @@ export const simulatePartyAutopilotSoak = (options: PartyAutopilotSoakOptions): 
       if (completionDecision.kind !== "pause-unexpected-source") {
         errors.push(`unexpected source ending was not paused: ${completionDecision.kind}`);
         break;
+      }
+      if (options.continueCommittedTargetOnUnexpectedEnd && targetId && targetLoad != null && !preloadLease) {
+        const continuation = decidePartyCommittedTargetContinuation({
+          sourceDeck,
+          targetDeck,
+          autoPilotOwned: true,
+          contextState: "running",
+          playbackLocked: false,
+          conflictingOwner: false,
+          targetSnapshot: { channel: targetDeck, trackId: targetId, status: "ready", ready: true, playing: false, playbackRate: 1 },
+          targetPartyLoad: { trackId: targetId, trackOrdinal: ordinals.get(targetId)!, loadOrdinal: targetLoad },
+          committedTarget: { trackId: targetId, trackOrdinal: ordinals.get(targetId)!, loadOrdinal: targetLoad }
+        });
+        if (continuation.kind !== "start-committed-target") {
+          errors.push(`committed continuation was rejected: ${continuation.reason}`);
+          break;
+        }
+        append({
+          type: "deck-ended",
+          activeSecond: 0,
+          deck: sourceDeck,
+          trackOrdinal: ordinals.get(sourceId)!,
+          loadOrdinal: sourceLoad,
+          nativeOwnerOrdinal: nativeOperation,
+          settledBy: "source-onended",
+          outcome: "on-time"
+        });
+        append({
+          type: "fallback-started",
+          activeSecond: 0,
+          operation: nativeOperation,
+          sourceTrackOrdinal: ordinals.get(sourceId)!,
+          sourceLoadOrdinal: sourceLoad,
+          targetTrackOrdinal: ordinals.get(targetId)!,
+          targetLoadOrdinal: targetLoad,
+          cause: "natural-eof"
+        });
+        append({ type: "fallback-settled", activeSecond: 0, operation: nativeOperation, outcome: "scheduled", pauseRequired: false });
+        sourceDeck = targetDeck;
+        sourceId = targetId;
+        sourceLoad = targetLoad;
+        sourcePlaybackRate = 1;
+        sourcePosition = 0;
+        playedTrackIds.push(sourceId);
+        targetId = null;
+        targetLoad = null;
+        continue;
       }
       if (preloadLease) {
         append({ type: "preload-settled", activeSecond: 0, operation: preloadLease.operation, outcome: "superseded" });

@@ -27,6 +27,7 @@ import { planAutomaticTransition } from "./planning/TransitionPlanner";
 import { assessPartyReadiness } from "./planning/partyReadiness";
 import { decideRescueTransition } from "./planning/rescueTransition";
 import { decidePartyDeckCompletion } from "./planning/partyDeckCompletionIngestion";
+import { decidePartyCommittedTargetContinuation } from "./planning/partyCommittedTargetContinuation";
 import { isTimingReviewCurrent, normalizeTimingReview } from "./domain/timingReview";
 import {
   analyzeEnhancedRhythm,
@@ -341,6 +342,8 @@ export default function App() {
   const partyLoadOrdinalCounterRef = useRef(0);
   const partyNativeCompletionOrdinalsRef = useRef(new Map());
   const partyNativeCompletionOrdinalCounterRef = useRef(0);
+  const partyFallbackContinuationOperationRef = useRef(0);
+  const partyFallbackContinuationRef = useRef(null);
   const partyPreloadOperationRef = useRef(0);
   const partyAutopilotTickBoundaryRef = useRef(createPartyAutopilotTickBoundary());
   const partyAutopilotLastObservedNowRef = useRef(0);
@@ -988,6 +991,7 @@ export default function App() {
     partyCheckpointHydratedRef.current &&
     !partyCheckpointTerminalRef.current &&
     !partyCheckpointWriterLostRef.current &&
+    !partyFallbackContinuationRef.current &&
     !libraryMutationBusyRef.current &&
     !playbackRecoveryLockedRef.current &&
     !autoPilotPreloadLeaseRef.current &&
@@ -1711,6 +1715,14 @@ export default function App() {
           cause: "host"
         });
       }
+      const committed = partyCommittedPreloadByDeckRef.current[deck];
+      if (identity && committed?.trackId === identity.trackId &&
+        committed.trackOrdinal === identity.trackOrdinal && committed.loadOrdinal === identity.loadOrdinal) {
+        partyCommittedPreloadByDeckRef.current = {
+          ...partyCommittedPreloadByDeckRef.current,
+          [deck]: null
+        };
+      }
       setPlayedTrackIds((current) => current.includes(trackId) ? current : [...current, trackId]);
       setQueue((current) => current.filter((id) => id !== trackId));
     }
@@ -1838,11 +1850,153 @@ export default function App() {
       return;
     }
 
+    let endedEventRecorded = false;
+    let fallbackCleanupConfirmed = true;
+    if (decision.kind === "pause-unexpected-source") {
+      const targetDeck = deck === "a" ? "b" : "a";
+      const targetRef = targetDeck === "a" ? deckARef : deckBRef;
+      const committedTarget = partyCommittedPreloadByDeckRef.current[targetDeck];
+      const targetPartyLoad = partyLoadByDeckRef.current[targetDeck];
+      let targetSnapshot = null;
+      let targetPlaying = false;
+      let targetGainBeforeAttempt = null;
+      try {
+        targetSnapshot = targetRef.current?.getDeckSnapshot?.() ?? null;
+        targetPlaying = Boolean(targetRef.current?.isPlaying?.());
+        targetGainBeforeAttempt = getAudioEngine().getDeckGain(targetDeck);
+      } catch { /* Eligibility fails closed below. */ }
+      const engine = getAudioEngine();
+      const continuationDecision = decidePartyCommittedTargetContinuation({
+        sourceDeck: deck,
+        targetDeck,
+        autoPilotOwned: autoPilotEnabledRef.current,
+        contextState: engine.context.state,
+        playbackLocked: playbackRecoveryLockedRef.current || partySoundStopInProgressRef.current ||
+          partyCheckpointBusyRef.current || partyCheckpointWriterLostRef.current ||
+          !Number.isFinite(targetGainBeforeAttempt),
+        conflictingOwner: Boolean(autoPilotPreloadLeaseRef.current || transitionArmLeaseRef.current ||
+          activeTransition || rehearsalCancelRef.current || rehearsalActive || rehearsalPreparing ||
+          libraryMutationBusyRef.current),
+        targetSnapshot: targetSnapshot ? {
+          channel: targetDeck,
+          trackId: targetSnapshot.trackId ?? null,
+          status: targetSnapshot.status,
+          ready: Boolean(targetRef.current?.isReady?.()),
+          playing: targetPlaying,
+          playbackRate: targetSnapshot.playbackRate
+        } : null,
+        targetPartyLoad,
+        committedTarget
+      });
+      if (continuationDecision.kind === "start-committed-target") {
+        const operation = ++partyFallbackContinuationOperationRef.current;
+        const lease = Object.freeze({
+          operation,
+          sourceDeck: deck,
+          targetDeck,
+          sourceTrackId: endedIdentity.trackId,
+          sourceLoadOrdinal: endedIdentity.loadOrdinal,
+          targetTrackId: committedTarget.trackId,
+          targetLoadOrdinal: committedTarget.loadOrdinal,
+          targetGainBeforeAttempt
+        });
+        const ownsLease = () => {
+          const current = partyFallbackContinuationRef.current;
+          const currentTarget = partyLoadByDeckRef.current[targetDeck];
+          const currentCommitted = partyCommittedPreloadByDeckRef.current[targetDeck];
+          return current === lease && autoPilotEnabledRef.current &&
+            engine.context.state === "running" && !playbackRecoveryLockedRef.current &&
+            !partySoundStopInProgressRef.current && !partyCheckpointBusyRef.current &&
+            !partyCheckpointWriterLostRef.current && !autoPilotPreloadLeaseRef.current &&
+            !transitionArmLeaseRef.current && !activeTransitionScheduleRef.current &&
+            currentTarget?.trackId === lease.targetTrackId &&
+            currentTarget.loadOrdinal === lease.targetLoadOrdinal &&
+            currentCommitted?.trackId === lease.targetTrackId &&
+            currentCommitted.loadOrdinal === lease.targetLoadOrdinal;
+        };
+        partyFallbackContinuationRef.current = lease;
+        advancePartyAutopilotCoordinatorEpoch();
+        if (partyTraceRunningRef.current) {
+          recordPartyEvent({
+            type: "deck-ended",
+            deck,
+            trackOrdinal: endedIdentity.trackOrdinal,
+            loadOrdinal: endedIdentity.loadOrdinal,
+            nativeOwnerOrdinal: partyNativeCompletionOrdinal(deck, event.operation, event.loadRevision),
+            settledBy: event.settledBy,
+            outcome: event.outcome
+          });
+          recordPartyEvent({
+            type: "fallback-started",
+            operation,
+            sourceTrackOrdinal: endedIdentity.trackOrdinal,
+            sourceLoadOrdinal: endedIdentity.loadOrdinal,
+            targetTrackOrdinal: committedTarget.trackOrdinal,
+            targetLoadOrdinal: committedTarget.loadOrdinal,
+            cause: "natural-eof"
+          });
+          endedEventRecorded = true;
+        }
+        try {
+          if (!ownsLease()) throw new Error("fallback continuation authority expired");
+          targetRef.current?.setGain?.(0);
+          const startTime = engine.clock.now() + Math.max(0.03, 256 / engine.context.sampleRate);
+          const started = targetRef.current?.playReadyAtIfRunning?.(startTime, 0, ownsLease);
+          if (!started || !ownsLease()) throw new Error("committed target did not start");
+          engine.scheduleDeckGainCurve(targetDeck, new Float32Array([0, 1]), started.scheduledStart, 0.08, ownsLease);
+          const startedSnapshot = targetRef.current?.getDeckSnapshot?.();
+          if (!ownsLease() || startedSnapshot?.trackId !== lease.targetTrackId ||
+            !targetRef.current?.isPlaying?.()) throw new Error("committed target start was not verified");
+
+          partyFallbackContinuationRef.current = null;
+          partyPlayedLoadsRef.current.add(`${committedTarget.trackOrdinal}:${committedTarget.loadOrdinal}`);
+          recordPartyEvent({ type: "fallback-settled", operation, outcome: "scheduled", pauseRequired: false });
+          partyCommittedPreloadByDeckRef.current = {
+            ...partyCommittedPreloadByDeckRef.current,
+            [targetDeck]: null
+          };
+          partyLoadByDeckRef.current = { ...partyLoadByDeckRef.current, [deck]: null };
+          setLoadedByDeck((current) => ({ ...current, [deck]: null }));
+          setPlayedTrackIds((current) => current.includes(lease.targetTrackId)
+            ? current
+            : [...current, lease.targetTrackId]);
+          setMasterDeck(targetDeck);
+          setFade(targetDeck === "b" ? 1 : 0);
+          setAutoMixing(false);
+          setAutoMixBeats(0);
+          setAutoPilotChoice(null);
+          showToast("Ready next song started · a short gap may have occurred");
+          return;
+        } catch {
+          partyFallbackContinuationRef.current = null;
+          try {
+            const currentTarget = partyLoadByDeckRef.current[targetDeck];
+            const currentSnapshot = targetRef.current?.getDeckSnapshot?.();
+            const exactTarget = currentTarget?.trackId === lease.targetTrackId &&
+              currentTarget.loadOrdinal === lease.targetLoadOrdinal &&
+              currentSnapshot?.trackId === lease.targetTrackId;
+            if (exactTarget) {
+              targetRef.current?.pause?.();
+              targetRef.current?.setGain?.(lease.targetGainBeforeAttempt);
+              const restoredSnapshot = targetRef.current?.getDeckSnapshot?.();
+              if (targetRef.current?.isPlaying?.() || restoredSnapshot?.playbackRate !== 1 ||
+                Math.abs(engine.getDeckGain(targetDeck) - lease.targetGainBeforeAttempt) > 1e-6) {
+                fallbackCleanupConfirmed = false;
+              }
+            } else {
+              fallbackCleanupConfirmed = false;
+            }
+          } catch { fallbackCleanupConfirmed = false; }
+          recordPartyEvent({ type: "fallback-settled", operation, outcome: "failed", pauseRequired: true });
+        }
+      }
+    }
+
     const traceWasRunning = partyTraceRunningRef.current;
     advancePartyAutopilotCoordinatorEpoch();
     autoPilotEnabledRef.current = false;
     const preloadCleanup = settleAutoPilotPreloadForPause("superseded");
-    let cleanupConfirmed = preloadCleanup.cleanupConfirmed;
+    let cleanupConfirmed = preloadCleanup.cleanupConfirmed && fallbackCleanupConfirmed;
     try {
       if (transitionArmLeaseRef.current && !cancelCurrentTransitionArm()) cleanupConfirmed = false;
     } catch { cleanupConfirmed = false; }
@@ -1857,16 +2011,18 @@ export default function App() {
       finalTrackRef.current = null;
       if (traceWasRunning) recordPartyEvent({ type: "final-revoked" });
     }
-    if (decision.kind === "pause-unexpected-source" && traceWasRunning) {
-      recordPartyEvent({
-        type: "deck-ended",
-        deck,
-        trackOrdinal: endedIdentity.trackOrdinal,
-        loadOrdinal: endedIdentity.loadOrdinal,
-        nativeOwnerOrdinal: partyNativeCompletionOrdinal(deck, event.operation, event.loadRevision),
-        settledBy: event.settledBy,
-        outcome: event.outcome
-      });
+    if (decision.kind === "pause-unexpected-source") {
+      if (traceWasRunning && !endedEventRecorded) {
+        recordPartyEvent({
+          type: "deck-ended",
+          deck,
+          trackOrdinal: endedIdentity.trackOrdinal,
+          loadOrdinal: endedIdentity.loadOrdinal,
+          nativeOwnerOrdinal: partyNativeCompletionOrdinal(deck, event.operation, event.loadRevision),
+          settledBy: event.settledBy,
+          outcome: event.outcome
+        });
+      }
     } else if (partyTraceRecorderRef.current) {
       partyTraceRecorderRef.current.markInterrupted();
       updatePartyDiagnosticEvaluation();
@@ -3937,6 +4093,8 @@ export default function App() {
     partyLoadOrdinalCounterRef.current = 0;
     partyNativeCompletionOrdinalsRef.current = new Map();
     partyNativeCompletionOrdinalCounterRef.current = 0;
+    partyFallbackContinuationRef.current = null;
+    partyFallbackContinuationOperationRef.current = 0;
     partyPreloadOperationRef.current = 0;
     partyQueueRevisionRef.current = 0;
     partyPlayedLoadsRef.current = new Set();

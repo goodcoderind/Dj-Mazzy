@@ -296,13 +296,17 @@ export class AudioEngine {
     channel: DeckChannel,
     curve: Float32Array,
     startTime: number,
-    durationSeconds: number
+    durationSeconds: number,
+    authority?: () => boolean
   ) {
     if (curve.length < 2) {
       throw new RangeError("gain curve requires at least two points");
     }
     requirePositiveFinite(durationSeconds, "durationSeconds");
     const scheduledStart = this.clock.resolveScheduleTime(startTime);
+    if (authority && !authority()) {
+      throw new Error("deck gain scheduling authority expired");
+    }
     const immutableCurve = new Float32Array(curve);
     const gain = this.deckGains[channel].gain;
     gain.cancelScheduledValues(scheduledStart);

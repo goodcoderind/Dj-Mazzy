@@ -85,7 +85,7 @@ describe("shared Party Autopilot coordinator soak", () => {
         sessionDurationSeconds: 120,
         finalDeckCompletionSignal: signal
       });
-      expect(result.schemaVersion).toBe("party-autopilot-coordinator-soak/v11");
+      expect(result.schemaVersion).toBe("party-autopilot-coordinator-soak/v12");
       expect(result.stopReason).toBe("crate-exhausted");
       expect(result.evaluation.status).toBe("valid-terminal");
       expect(result.evaluation.counters.deckCompletionRecoveries).toBe(recoveries);
@@ -101,10 +101,27 @@ describe("shared Party Autopilot coordinator soak", () => {
       sessionDurationSeconds: 600,
       unexpectedSourceEndIteration: 2
     });
-    expect(result.schemaVersion).toBe("party-autopilot-coordinator-soak/v11");
+    expect(result.schemaVersion).toBe("party-autopilot-coordinator-soak/v12");
     expect(result.stopReason).toBe("unexpected-source-ended-paused");
     expect(result.evaluation.status).toBe("valid-in-progress");
     expect(result.evaluation.counters.pauses).toBe(1);
+    expect(result.errors).toEqual([]);
+  });
+
+  it("continues from the exact committed target after an injected non-final EOF", () => {
+    const result = simulatePartyAutopilotSoak({
+      tracks: library(4, 120),
+      queuedTrackIds: ["track-1", "track-2"],
+      includeRestOfLibrary: false,
+      sessionDurationSeconds: 600,
+      unexpectedSourceEndIteration: 2,
+      continueCommittedTargetOnUnexpectedEnd: true
+    });
+    expect(result.schemaVersion).toBe("party-autopilot-coordinator-soak/v12");
+    expect(result.stopReason).toBe("crate-exhausted");
+    expect(result.playedTrackIds).toEqual(["track-0", "track-1", "track-2"]);
+    expect(result.evaluation.status).toBe("valid-terminal");
+    expect(result.evaluation.counters).toMatchObject({ fallbackStarts: 1, fallbackFailures: 0 });
     expect(result.errors).toEqual([]);
   });
 
@@ -134,7 +151,7 @@ describe("shared Party Autopilot coordinator soak", () => {
       pauseDuringPreloadAttempt: 1
     });
 
-    expect(result.schemaVersion).toBe("party-autopilot-coordinator-soak/v11");
+    expect(result.schemaVersion).toBe("party-autopilot-coordinator-soak/v12");
     expect(result.preloadPauseSupersessions).toBe(1);
     expect(result.stalePausedPreloadSettlementsIgnored).toBe(1);
     expect(result.playedTrackIds).toEqual(["track-0", "track-1", "track-2"]);

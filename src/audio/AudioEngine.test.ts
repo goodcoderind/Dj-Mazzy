@@ -337,6 +337,15 @@ describe("AudioEngine", () => {
     cancel();
   });
 
+  it("rejects an expired deck-gain scheduling authority before automation mutation", () => {
+    const { context, engine } = createEngine();
+    const gain = context.gains[0].gain;
+    const events = gain.events.length;
+    expect(() => engine.scheduleDeckGainCurve("a", new Float32Array([0, 1]), 11, 0.08, () => false))
+      .toThrow("authority expired");
+    expect(gain.events).toHaveLength(events);
+  });
+
   it("rejects missing or duplicate crossfade completion observers", () => {
     const { engine } = createEngine();
     expect(() => engine.onCrossfadeComplete(99, () => undefined)).toThrow("not active");
