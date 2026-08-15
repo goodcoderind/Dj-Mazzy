@@ -200,6 +200,19 @@ resumes the AudioContext, enables Autopilot, or reconstructs exact playback
 position; the host must explicitly choose and play a song. Recent seconds may
 repeat, browser storage may be evicted, and a crash before a settled checkpoint
 is written remains unrecoverable.
+Checkpoint updates are single-flight and latest-only: Mazzy keeps at most one
+active browser-storage write and one newest pending stable plan. Each write has
+a conservative 30-second monotonic liveness boundary. If browser storage does
+not respond, Mazzy aborts that exact write where the platform permits, drops
+the pending plan, stops further recovery writes for the tab, and presents a
+persistent reload warning while music may continue. A terminal party never
+waits indefinitely for recovery cleanup: its exact clear is single-owner,
+AbortSignal-bound, and subject to the same 30-second monotonic limit after the
+active save drains. New Party stays unavailable until that clear is confirmed,
+and a late old clear cannot mutate a successor party. This bounds in-memory
+recovery work; it does not prove crash-time
+durability or guarantee that an already-committing browser transaction was
+rolled back.
 While Autopilot runs, **Energy Down** and **Energy Up** temporarily shift the
 next-song activity target by up to 30%. This remains a soft selection preference
 and cannot promote a weaker transition or bypass Safe Fade.

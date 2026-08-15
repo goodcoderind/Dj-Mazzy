@@ -24,11 +24,31 @@ const mutationOriginId = crypto.randomUUID();
 let mutationQueue = Promise.resolve();
 let databasePromise = null;
 
-const serializeMutation = (operation) => {
-  const result = mutationQueue.then(operation);
-  mutationQueue = result.catch(() => undefined);
-  return result;
+const checkpointAbortError = () => new DOMException("Party recovery write cancelled", "AbortError");
+
+export const createAbortableMutationQueue = () => {
+  let tail = Promise.resolve();
+  return Object.freeze({
+    run: (operation, { signal = null } = {}) => {
+      let removeAbortListener = () => undefined;
+      const turn = tail.then(() => {
+        if (signal?.aborted) throw checkpointAbortError();
+        return operation();
+      });
+      tail = turn.catch(() => undefined);
+      if (!signal) return turn;
+      const aborted = new Promise((_, reject) => {
+        const onAbort = () => reject(checkpointAbortError());
+        signal.addEventListener("abort", onAbort, { once: true });
+        removeAbortListener = () => signal.removeEventListener("abort", onAbort);
+      });
+      return Promise.race([turn, aborted]).finally(removeAbortListener);
+    }
+  });
 };
+
+const mutationSerializer = createAbortableMutationQueue();
+const serializeMutation = (operation, options) => mutationSerializer.run(operation, options);
 
 const safeCounter = (value) => Number.isSafeInteger(value) && value >= 0;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -279,10 +299,16 @@ const broadcastLibraryMutation = (message) => {
   channel.close();
 };
 
-const withCrossTabMutationLock = async (operation) => {
+const withCrossTabMutationLock = async (operation, { signal = null } = {}) => {
+  if (signal?.aborted) throw checkpointAbortError();
   if (globalThis.navigator?.locks?.request) {
-    return navigator.locks.request(LIBRARY_MUTATION_CHANNEL, { mode: "exclusive" }, operation);
+    return navigator.locks.request(
+      LIBRARY_MUTATION_CHANNEL,
+      signal ? { mode: "exclusive", signal } : { mode: "exclusive" },
+      operation
+    );
   }
+  if (signal?.aborted) throw checkpointAbortError();
   return operation();
 };
 
@@ -410,57 +436,71 @@ const broadcastCheckpoint = (type, libraryState, checkpointRevision, extra = {})
   });
 };
 
-export const savePartySessionCheckpointToDb = async (draft, expected) =>
+export const savePartySessionCheckpointToDb = async (draft, expected, { signal = null } = {}) =>
   withCrossTabMutationLock(() => serializeMutation(async () => {
+    if (signal?.aborted) throw checkpointAbortError();
     const db = await openDb();
+    if (signal?.aborted) throw checkpointAbortError();
     const tx = db.transaction([STORE_NAME, META_STORE_NAME, PARTY_SESSION_STORE_NAME], "readwrite");
     const completed = waitForTransaction(tx);
+    const abortTransaction = () => {
+      try { tx.abort(); } catch { /* The transaction already settled. */ }
+    };
+    signal?.addEventListener("abort", abortTransaction, { once: true });
     const trackStore = tx.objectStore(STORE_NAME);
     const metaStore = tx.objectStore(META_STORE_NAME);
     const sessionStore = tx.objectStore(PARTY_SESSION_STORE_NAME);
-    const [trackIds, libraryState, rawCurrent] = await Promise.all([
-      requestResult(trackStore.getAllKeys()),
-      readLibraryState(metaStore),
-      requestResult(sessionStore.get(PARTY_SESSION_CHECKPOINT_KEY))
-    ]);
-    const current = rawCurrent == null ? null : normalizePartySessionCheckpointRecord(rawCurrent);
-    if (rawCurrent != null && !current) {
+    try {
+      const [trackIds, libraryState, rawCurrent] = await Promise.all([
+        requestResult(trackStore.getAllKeys()),
+        readLibraryState(metaStore),
+        requestResult(sessionStore.get(PARTY_SESSION_CHECKPOINT_KEY))
+      ]);
+      if (signal?.aborted) {
+        abortTransaction();
+        throw checkpointAbortError();
+      }
+      const current = rawCurrent == null ? null : normalizePartySessionCheckpointRecord(rawCurrent);
+      if (rawCurrent != null && !current) {
+        await completed;
+        return { status: "invalid-checkpoint", checkpoint: null, libraryState };
+      }
+      const currentRevision = current?.revision ?? 0;
+      if (!sameLibraryState(libraryState, {
+        epoch: expected.libraryEpoch,
+        revision: expected.libraryRevision
+      })) {
+        await completed;
+        return { status: "stale-library", checkpoint: null, libraryState };
+      }
+      if (currentRevision !== expected.checkpointRevision ||
+          (expected.sessionId != null && current?.sessionId !== expected.sessionId) ||
+          (expected.writerToken != null && current?.writerToken !== expected.writerToken)) {
+        await completed;
+        return { status: "stale-checkpoint", checkpoint: null, libraryState };
+      }
+      const knownIds = new Set(trackIds);
+      const references = [draft.lastStableSourceTrackId, ...draft.playedTrackIds, ...draft.remainingTrackIds];
+      if (references.some((id) => !knownIds.has(id))) {
+        await completed;
+        return { status: "missing-track", checkpoint: null, libraryState };
+      }
+      const checkpoint = createPartySessionCheckpoint({
+        ...draft,
+        libraryEpoch: libraryState.epoch,
+        libraryRevision: libraryState.revision
+      }, currentRevision + 1);
+      sessionStore.put(checkpoint);
       await completed;
-      return { status: "invalid-checkpoint", checkpoint: null, libraryState };
+      broadcastCheckpoint("party-checkpoint-updated", libraryState, checkpoint.revision, {
+        sessionId: checkpoint.sessionId,
+        writerToken: checkpoint.writerToken
+      });
+      return { status: "saved", checkpoint, libraryState };
+    } finally {
+      signal?.removeEventListener("abort", abortTransaction);
     }
-    const currentRevision = current?.revision ?? 0;
-    if (!sameLibraryState(libraryState, {
-      epoch: expected.libraryEpoch,
-      revision: expected.libraryRevision
-    })) {
-      await completed;
-      return { status: "stale-library", checkpoint: null, libraryState };
-    }
-    if (currentRevision !== expected.checkpointRevision ||
-        (expected.sessionId != null && current?.sessionId !== expected.sessionId) ||
-        (expected.writerToken != null && current?.writerToken !== expected.writerToken)) {
-      await completed;
-      return { status: "stale-checkpoint", checkpoint: null, libraryState };
-    }
-    const knownIds = new Set(trackIds);
-    const references = [draft.lastStableSourceTrackId, ...draft.playedTrackIds, ...draft.remainingTrackIds];
-    if (references.some((id) => !knownIds.has(id))) {
-      await completed;
-      return { status: "missing-track", checkpoint: null, libraryState };
-    }
-    const checkpoint = createPartySessionCheckpoint({
-      ...draft,
-      libraryEpoch: libraryState.epoch,
-      libraryRevision: libraryState.revision
-    }, currentRevision + 1);
-    sessionStore.put(checkpoint);
-    await completed;
-    broadcastCheckpoint("party-checkpoint-updated", libraryState, checkpoint.revision, {
-      sessionId: checkpoint.sessionId,
-      writerToken: checkpoint.writerToken
-    });
-    return { status: "saved", checkpoint, libraryState };
-  }));
+  }, { signal }), { signal });
 
 export const claimPartySessionCheckpoint = async (
   sessionId,
@@ -503,38 +543,52 @@ export const clearPartySessionCheckpoint = async ({
   expectedSessionId = null,
   expectedWriterToken = null,
   recordStatus = "cleared"
-} = {}) => withCrossTabMutationLock(() => serializeMutation(async () => {
+} = {}, { signal = null } = {}) => withCrossTabMutationLock(() => serializeMutation(async () => {
+  if (signal?.aborted) throw checkpointAbortError();
   const db = await openDb();
+  if (signal?.aborted) throw checkpointAbortError();
   const tx = db.transaction([META_STORE_NAME, PARTY_SESSION_STORE_NAME], "readwrite");
   const completed = waitForTransaction(tx);
+  const abortTransaction = () => {
+    try { tx.abort(); } catch { /* The transaction already settled. */ }
+  };
+  signal?.addEventListener("abort", abortTransaction, { once: true });
   const metaStore = tx.objectStore(META_STORE_NAME);
   const sessionStore = tx.objectStore(PARTY_SESSION_STORE_NAME);
-  const [libraryState, rawCurrent] = await Promise.all([
-    readLibraryState(metaStore),
-    requestResult(sessionStore.get(PARTY_SESSION_CHECKPOINT_KEY))
-  ]);
-  const current = rawCurrent == null ? null : normalizePartySessionCheckpointRecord(rawCurrent);
-  const currentRevision = current?.revision ?? rawCheckpointRevision(rawCurrent);
-  if ((expectedRevision != null && currentRevision !== expectedRevision) ||
-      (expectedSessionId != null && current?.sessionId !== expectedSessionId) ||
-      (expectedWriterToken != null && current?.writerToken !== expectedWriterToken)) {
+  try {
+    const [libraryState, rawCurrent] = await Promise.all([
+      readLibraryState(metaStore),
+      requestResult(sessionStore.get(PARTY_SESSION_CHECKPOINT_KEY))
+    ]);
+    if (signal?.aborted) {
+      abortTransaction();
+      throw checkpointAbortError();
+    }
+    const current = rawCurrent == null ? null : normalizePartySessionCheckpointRecord(rawCurrent);
+    const currentRevision = current?.revision ?? rawCheckpointRevision(rawCurrent);
+    if ((expectedRevision != null && currentRevision !== expectedRevision) ||
+        (expectedSessionId != null && current?.sessionId !== expectedSessionId) ||
+        (expectedWriterToken != null && current?.writerToken !== expectedWriterToken)) {
+      await completed;
+      return { status: "stale-checkpoint", revision: currentRevision, libraryState };
+    }
+    const tombstone = createPartySessionCheckpointTombstone(
+      recordStatus,
+      currentRevision + 1,
+      current?.sessionId ?? expectedSessionId,
+      current?.writerToken ?? expectedWriterToken
+    );
+    sessionStore.put(tombstone);
     await completed;
-    return { status: "stale-checkpoint", revision: currentRevision, libraryState };
+    broadcastCheckpoint("party-checkpoint-cleared", libraryState, tombstone.revision, {
+      sessionId: tombstone.sessionId,
+      writerToken: tombstone.writerToken
+    });
+    return { status: "cleared", revision: tombstone.revision, libraryState };
+  } finally {
+    signal?.removeEventListener("abort", abortTransaction);
   }
-  const tombstone = createPartySessionCheckpointTombstone(
-    recordStatus,
-    currentRevision + 1,
-    current?.sessionId ?? expectedSessionId,
-    current?.writerToken ?? expectedWriterToken
-  );
-  sessionStore.put(tombstone);
-  await completed;
-  broadcastCheckpoint("party-checkpoint-cleared", libraryState, tombstone.revision, {
-    sessionId: tombstone.sessionId,
-    writerToken: tombstone.writerToken
-  });
-  return { status: "cleared", revision: tombstone.revision, libraryState };
-}));
+}, { signal }), { signal });
 
 export const deleteTrackFromDb = async (trackId) => withCrossTabMutationLock(() => serializeMutation(async () => {
   const db = await openDb();

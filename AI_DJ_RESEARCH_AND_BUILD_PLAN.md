@@ -2621,6 +2621,41 @@ These are the active backlog, not reasons to discard the prototype.
   long-file/model performance, analysis accuracy, and sustained physical-device
   behavior remain separate release gates.
 
+- **D-072 — Bound checkpoint writes and terminal cleanup behind exact storage ownership:**
+  `party-checkpoint-write-runtime/v1` replaces the unbounded promise chain with
+  one active write and at most one latest pending stable plan. Each write owns
+  an immutable epoch, operation, fingerprint, AbortSignal, monotonic start, and
+  30-second deadline. Repeated periodic/state triggers coalesce to the newest
+  fingerprint; returning to the active fingerprint removes a now-obsolete
+  pending draft. An on-time save advances checkpoint/library revisions and the
+  saved fingerprint once, then starts only that newest pending plan with the
+  updated CAS expectation.
+
+  The AbortSignal covers a queued Web Lock and the exact live IndexedDB
+  transaction. At or after the deadline, the runtime revokes authority before
+  abort, drops pending work, opens a tab-session recovery circuit, and ignores
+  every late resolve, rejection, or stale result. Music may continue, but a
+  persistent focused alert says recovery updates stopped and requires reload
+  before a new party can rely on recovery. An ordinary on-time
+  `stale-checkpoint` still executes the existing cross-tab writer-loss pause.
+
+  Clear/terminal operations synchronously claim one exact
+  `party-checkpoint-clear-owner/v1`, close all new-party admission, and wait only
+  for the active bounded writer. Duplicate clear callers are refused. The exact
+  IndexedDB/Web Lock clear then owns an AbortSignal and its own 30-second
+  monotonic deadline. It proceeds after an on-time writer settlement with the
+  current revision, or opens the visible reload-required circuit; final
+  audio/session state does not wait on that asynchronous cleanup. Only an
+  on-time exact clear restores admission. New Party, destructive library
+  revision, ownership loss, and unmount revoke old epochs and clear tickets, so
+  late operations cannot mutate React recovery state. The stored checkpoint,
+  library, Party trace, and report schemas do not change. Deterministic tests
+  cover one thousand coalesced triggers, exact deadline/late settlement,
+  newest-pending revision use, on-time ownership loss, duplicate clear refusal,
+  exact clear timeout/cancellation, abortable same-tab queue wait, and old-epoch
+  revocation. Real crash durability, browser suspension, storage
+  eviction, and physical-device behavior remain separate gates.
+
 ### Open questions
 
 - **Q-001:** Remain browser/PWA-first through launch, or package a desktop app

@@ -8,6 +8,7 @@ import {
   claimPartySessionCheckpoint,
   clearPartySessionCheckpoint,
   clearTracksFromDb,
+  createAbortableMutationQueue,
   deleteTrackFromDb,
   loadLibraryRecoveryBundle,
   mergeRoutineTrackUpdate,
@@ -163,6 +164,47 @@ describe("library recovery storage", () => {
     expect(bundle.tracks.map(({ id }) => id).sort()).toEqual(["next", "source"]);
     expect(bundle.checkpointRecord).toEqual(saved.checkpoint);
     expect(bundle.checkpointRevision).toBe(saved.checkpoint.revision);
+  });
+
+  it("rejects an already-aborted checkpoint write before opening storage ownership", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const state = (await loadLibraryRecoveryBundle()).libraryState;
+    await expect(savePartySessionCheckpointToDb(draft(state), {
+      checkpointRevision: 0,
+      libraryEpoch: state.epoch,
+      libraryRevision: state.revision,
+      sessionId: null,
+      writerToken: null
+    }, { signal: controller.signal })).rejects.toMatchObject({ name: "AbortError" });
+    expect((await loadLibraryRecoveryBundle()).checkpointRecord).toBeNull();
+  });
+
+  it("releases an aborted queue waiter without running it after the predecessor settles", async () => {
+    const queue = createAbortableMutationQueue();
+    let releaseFirst;
+    const first = queue.run(() => new Promise((resolve) => { releaseFirst = resolve; }));
+    const controller = new AbortController();
+    const secondTask = vi.fn();
+    const second = queue.run(secondTask, { signal: controller.signal });
+    controller.abort();
+    await expect(second).rejects.toMatchObject({ name: "AbortError" });
+    expect(secondTask).not.toHaveBeenCalled();
+    releaseFirst();
+    await first;
+    await Promise.resolve();
+    expect(secondTask).not.toHaveBeenCalled();
+  });
+
+  it("rejects an already-aborted checkpoint clear without changing the saved record", async () => {
+    const state = (await loadLibraryRecoveryBundle()).libraryState;
+    const controller = new AbortController();
+    controller.abort();
+    await expect(clearPartySessionCheckpoint({ expectedRevision: 0 }, {
+      signal: controller.signal
+    })).rejects.toMatchObject({ name: "AbortError" });
+    expect((await loadLibraryRecoveryBundle()).checkpointRecord).toBeNull();
+    expect((await loadLibraryRecoveryBundle()).libraryState).toEqual(state);
   });
 
   it("does not advance membership revision for a duplicate-only import", async () => {

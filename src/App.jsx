@@ -113,6 +113,13 @@ import {
 } from "./diagnostics/partyAutopilotTrace";
 import { assessImportCapacity, formatStorageSize } from "./storage/importCapacity";
 import { identifyLocalFile, normalizeContentIdentity } from "./storage/contentIdentity";
+import {
+  createPartyCheckpointClearOwner,
+  createPartyCheckpointWriteRuntime,
+  ownsPartyCheckpointClear,
+  shouldQueuePartyCheckpointCandidate,
+  startBoundedPartyCheckpointOperation
+} from "./storage/partyCheckpointWriteRuntime";
 import { createPartyWakeLockController } from "./power/partyWakeLock";
 import { audioRecoveryMessage, needsHostAudioRecovery } from "./audio/audioContextRecovery";
 import { OUTPUT_DEVICE_RECOVERY_MESSAGE, supportsOutputDeviceChangeMonitoring } from "./audio/outputDeviceRecovery";
@@ -271,6 +278,7 @@ export default function App() {
   const [partyCheckpointBusy, setPartyCheckpointBusy] = useState(false);
   const [partyCheckpointError, setPartyCheckpointError] = useState("");
   const [partyCheckpointWriterLost, setPartyCheckpointWriterLost] = useState(false);
+  const [partyCheckpointWriteCircuitOpen, setPartyCheckpointWriteCircuitOpen] = useState(false);
   const [restoredPartyPlan, setRestoredPartyPlan] = useState(null);
   const [unavailableAutoPilotTrackIds, setUnavailableAutoPilotTrackIds] = useState([]);
   const [timedOutAutoPilotTrackIds, setTimedOutAutoPilotTrackIds] = useState([]);
@@ -368,7 +376,10 @@ export default function App() {
   const partyCheckpointSessionIdRef = useRef(null);
   const partyCheckpointWriterTokenRef = useRef(null);
   const partyCheckpointWriteGenerationRef = useRef(0);
-  const partyCheckpointWriteQueueRef = useRef(Promise.resolve());
+  const partyCheckpointWriteRuntimeRef = useRef(null);
+  const partyCheckpointClearOperationRef = useRef(0);
+  const partyCheckpointClearOwnerRef = useRef(null);
+  const partyCheckpointClearCancelRef = useRef(null);
   const partyCheckpointLastFingerprintRef = useRef("");
   const partyCheckpointTerminalRef = useRef(true);
   const partyCheckpointPauseReasonRef = useRef("host-paused");
@@ -1092,11 +1103,66 @@ export default function App() {
     setPartyCheckpointWriterLost(true);
     refreshPlaybackRecoveryLock();
     partyCheckpointWriteGenerationRef.current += 1;
+    partyCheckpointWriteRuntimeRef.current?.halt?.();
     stopRemoteLibraryPlayback();
     deckARef.current?.pause?.();
     deckBRef.current?.pause?.();
     setPartyCheckpointError("Party recovery moved to another Mazzy tab. Autopilot and audio were paused here. Check the other tab before continuing.");
     window.requestAnimationFrame(() => partyCheckpointAlertRef.current?.focus?.());
+  };
+
+  const getPartyCheckpointWriteRuntime = () => {
+    if (partyCheckpointWriteRuntimeRef.current) return partyCheckpointWriteRuntimeRef.current;
+    partyCheckpointWriteRuntimeRef.current = createPartyCheckpointWriteRuntime({
+      write: async (candidate, signal) => {
+        if (candidate.generation !== partyCheckpointWriteGenerationRef.current ||
+          !checkpointSaveIsStable()) return { status: "skipped" };
+        const stored = partyCheckpointStoredRecordRef.current;
+        return savePartySessionCheckpointToDb(candidate.draft, {
+          checkpointRevision: partyCheckpointRevisionRef.current,
+          libraryEpoch: libraryStateRef.current.epoch,
+          libraryRevision: libraryStateRef.current.revision,
+          sessionId: stored?.recordStatus === "available" || stored?.recordStatus === "claimed"
+            ? stored.sessionId
+            : null,
+          writerToken: stored?.recordStatus === "available" || stored?.recordStatus === "claimed"
+            ? stored.writerToken
+            : null
+        }, { signal });
+      },
+      onResolved: (candidate, result) => {
+        if (candidate.generation !== partyCheckpointWriteGenerationRef.current || result.status === "skipped") {
+          return true;
+        }
+        if (result.status !== "saved") {
+          if (result.status === "stale-checkpoint") {
+            pauseForCheckpointOwnershipLoss();
+            return false;
+          }
+          setPartyCheckpointError("Party recovery could not be updated. Music can continue, but refreshing may lose recent party progress.");
+          return true;
+        }
+        partyCheckpointRevisionRef.current = result.checkpoint.revision;
+        partyCheckpointStoredRecordRef.current = result.checkpoint;
+        partyCheckpointLastFingerprintRef.current = candidate.fingerprint;
+        libraryStateRef.current = result.libraryState;
+        setPartyCheckpointError("");
+        return true;
+      },
+      onRejected: (candidate) => {
+        if (candidate.generation !== partyCheckpointWriteGenerationRef.current) return true;
+        setPartyCheckpointError("Party recovery could not be updated. Music can continue, but refreshing may lose recent party progress.");
+        return true;
+      },
+      onTimedOut: (candidate) => {
+        if (candidate.generation !== partyCheckpointWriteGenerationRef.current) return;
+        partyCheckpointWriteGenerationRef.current += 1;
+        setPartyCheckpointWriteCircuitOpen(true);
+        setPartyCheckpointError("Party recovery updates stopped because browser storage did not respond. Music can continue, but reload Mazzy before relying on saved recovery or starting a new party.");
+        window.requestAnimationFrame(() => partyCheckpointAlertRef.current?.focus?.());
+      }
+    });
+    return partyCheckpointWriteRuntimeRef.current;
   };
 
   const queuePartyCheckpointSave = (checkpointReason = null) => {
@@ -1139,87 +1205,124 @@ export default function App() {
     }
     const candidateForFingerprint = createPartySessionCheckpoint(draft, 1);
     const fingerprint = partySessionCheckpointFingerprint(candidateForFingerprint);
-    if (fingerprint === partyCheckpointLastFingerprintRef.current) return;
-    const generation = partyCheckpointWriteGenerationRef.current;
-    partyCheckpointWriteQueueRef.current = partyCheckpointWriteQueueRef.current
-      .catch(() => undefined)
-      .then(async () => {
-        if (generation !== partyCheckpointWriteGenerationRef.current || !checkpointSaveIsStable()) return;
-        const stored = partyCheckpointStoredRecordRef.current;
-        const result = await savePartySessionCheckpointToDb(draft, {
-          checkpointRevision: partyCheckpointRevisionRef.current,
-          libraryEpoch: libraryStateRef.current.epoch,
-          libraryRevision: libraryStateRef.current.revision,
-          sessionId: stored?.recordStatus === "available" || stored?.recordStatus === "claimed"
-            ? stored.sessionId
-            : null,
-          writerToken: stored?.recordStatus === "available" || stored?.recordStatus === "claimed"
-            ? stored.writerToken
-            : null
-        });
-        if (generation !== partyCheckpointWriteGenerationRef.current) return;
-        if (result.status !== "saved") {
-          if (result.status === "stale-checkpoint") pauseForCheckpointOwnershipLoss();
-          else setPartyCheckpointError("Party recovery could not be updated. Music can continue, but refreshing may lose recent party progress.");
-          return;
-        }
-        partyCheckpointRevisionRef.current = result.checkpoint.revision;
-        partyCheckpointStoredRecordRef.current = result.checkpoint;
-        partyCheckpointLastFingerprintRef.current = fingerprint;
-        libraryStateRef.current = result.libraryState;
-        setPartyCheckpointError("");
-      })
-      .catch(() => {
-        if (generation !== partyCheckpointWriteGenerationRef.current) return;
-        setPartyCheckpointError("Party recovery could not be updated. Music can continue, but refreshing may lose recent party progress.");
-      });
+    const writeRuntime = getPartyCheckpointWriteRuntime();
+    const writeSnapshot = writeRuntime.snapshot();
+    if (!shouldQueuePartyCheckpointCandidate({
+      fingerprint,
+      lastSavedFingerprint: partyCheckpointLastFingerprintRef.current,
+      runtime: writeSnapshot
+    })) return;
+    writeRuntime.enqueue({
+      fingerprint,
+      value: {
+        draft,
+        fingerprint,
+        generation: partyCheckpointWriteGenerationRef.current
+      }
+    });
   };
 
   const clearOwnedPartyCheckpoint = async (
     recordStatus = "cleared",
-    { terminalOnFailure = false } = {}
+    { terminalOnFailure = false, expectedCheckpoint = null } = {}
   ) => {
-    partyCheckpointWriteGenerationRef.current += 1;
+    if (partyCheckpointBusyRef.current || partyCheckpointClearOwnerRef.current) return false;
     const previousTerminal = partyCheckpointTerminalRef.current;
     partyCheckpointTerminalRef.current = true;
-    const stored = partyCheckpointStoredRecordRef.current;
-    let result;
-    try {
-      result = await clearPartySessionCheckpoint({
-        expectedRevision: partyCheckpointRevisionRef.current,
-        expectedSessionId: stored?.sessionId ?? null,
-        expectedWriterToken: stored?.writerToken ?? null,
-        recordStatus
-      });
-    } catch {
-      if (!terminalOnFailure) partyCheckpointTerminalRef.current = previousTerminal;
-      setPartyCheckpointError("The saved party plan could not be deleted from browser storage. Reload Mazzy and try again before relying on recovery.");
-      window.requestAnimationFrame(() => partyCheckpointAlertRef.current?.focus?.());
-      return false;
-    }
-    if (result.status !== "cleared") {
-      if (!terminalOnFailure) partyCheckpointTerminalRef.current = previousTerminal;
-      setPartyCheckpointError("The saved party plan changed in another tab and was not deleted here. Review the other Mazzy tab before continuing.");
-      window.requestAnimationFrame(() => partyCheckpointAlertRef.current?.focus?.());
-      return false;
-    }
-    partyCheckpointRevisionRef.current = result.revision;
-    partyCheckpointStoredRecordRef.current = {
-      recordStatus,
-      revision: result.revision,
-      sessionId: stored?.sessionId ?? null,
-      writerToken: stored?.writerToken ?? null
-    };
-    partyCheckpointLastFingerprintRef.current = "";
-    partyCheckpointSessionIdRef.current = null;
-    partyCheckpointWriterLostRef.current = false;
-    setPartyCheckpointWriterLost(false);
+    partyCheckpointBusyRef.current = true;
+    setPartyCheckpointBusy(true);
     refreshPlaybackRecoveryLock();
-    partyCheckpointRecoveryRef.current = null;
-    setPartyCheckpointRecovery(null);
-    setRestoredPartyPlan(null);
-    setPartyCheckpointError("");
-    return true;
+    const clearOwner = createPartyCheckpointClearOwner({
+      operation: ++partyCheckpointClearOperationRef.current,
+      sessionId: partyCheckpointSessionIdRef.current,
+      writerToken: partyCheckpointWriterTokenRef.current
+    });
+    partyCheckpointClearOwnerRef.current = clearOwner;
+    const writeRuntime = getPartyCheckpointWriteRuntime();
+    try {
+      if (!await writeRuntime.prepareExclusive() ||
+        !ownsPartyCheckpointClear(partyCheckpointClearOwnerRef.current, clearOwner)) {
+        throw new Error("checkpoint clear ownership unavailable");
+      }
+      partyCheckpointWriteGenerationRef.current += 1;
+      const stored = partyCheckpointStoredRecordRef.current;
+      const clearExpected = expectedCheckpoint ?? {
+        revision: partyCheckpointRevisionRef.current,
+        sessionId: stored?.sessionId ?? null,
+        writerToken: stored?.writerToken ?? null
+      };
+      const expectedRevision = clearExpected.revision;
+      const ownsClear = () => ownsPartyCheckpointClear(partyCheckpointClearOwnerRef.current, clearOwner) &&
+        partyCheckpointSessionIdRef.current === clearOwner.sessionId &&
+        partyCheckpointWriterTokenRef.current === clearOwner.writerToken &&
+        writeRuntime.snapshot().mode === "exclusive";
+      const boundedClear = startBoundedPartyCheckpointOperation({
+        ownsAuthority: ownsClear,
+        task: (signal) => clearPartySessionCheckpoint({
+          expectedRevision,
+          expectedSessionId: clearExpected.sessionId ?? null,
+          expectedWriterToken: clearExpected.writerToken ?? null,
+          recordStatus
+        }, { signal })
+      });
+      partyCheckpointClearCancelRef.current = boundedClear.cancel;
+      const settlement = await boundedClear.promise;
+      if (!ownsClear()) return false;
+      if (settlement.outcome !== "completed" || settlement.value.status !== "cleared") {
+        writeRuntime.openCircuit();
+        setPartyCheckpointWriteCircuitOpen(true);
+        setPartyCheckpointError(settlement.outcome === "timed-out"
+          ? "The saved party plan could not be cleared because browser storage did not respond. Reload Mazzy before starting another party."
+          : settlement.outcome === "completed"
+            ? "The saved party plan changed in another tab and was not deleted here. Reload Mazzy to review recovery before continuing."
+            : "The saved party plan could not be deleted from browser storage. Reload Mazzy before starting another party.");
+        window.requestAnimationFrame(() => partyCheckpointAlertRef.current?.focus?.());
+        return false;
+      }
+      const result = settlement.value;
+      partyCheckpointRevisionRef.current = result.revision;
+      partyCheckpointStoredRecordRef.current = {
+        recordStatus,
+        revision: result.revision,
+        sessionId: clearExpected.sessionId ?? null,
+        writerToken: clearExpected.writerToken ?? null
+      };
+      partyCheckpointLastFingerprintRef.current = "";
+      partyCheckpointSessionIdRef.current = null;
+      partyCheckpointWriterLostRef.current = false;
+      setPartyCheckpointWriterLost(false);
+      partyCheckpointRecoveryRef.current = null;
+      setPartyCheckpointRecovery(null);
+      setRestoredPartyPlan(null);
+      setPartyCheckpointError("");
+      setPartyCheckpointWriteCircuitOpen(false);
+      if (!writeRuntime.completeExclusive()) {
+        writeRuntime.openCircuit();
+        setPartyCheckpointWriteCircuitOpen(true);
+        setPartyCheckpointError("Party recovery cleanup could not be confirmed. Reload Mazzy before starting another party.");
+        return false;
+      }
+      return true;
+    } catch {
+      if (ownsPartyCheckpointClear(partyCheckpointClearOwnerRef.current, clearOwner)) {
+        writeRuntime.openCircuit();
+        setPartyCheckpointWriteCircuitOpen(true);
+        setPartyCheckpointError("Party recovery cleanup could not be confirmed. Reload Mazzy before starting another party.");
+        window.requestAnimationFrame(() => partyCheckpointAlertRef.current?.focus?.());
+      }
+      return false;
+    } finally {
+      if (ownsPartyCheckpointClear(partyCheckpointClearOwnerRef.current, clearOwner)) {
+        partyCheckpointClearCancelRef.current = null;
+        partyCheckpointClearOwnerRef.current = null;
+        partyCheckpointBusyRef.current = false;
+        setPartyCheckpointBusy(false);
+        refreshPlaybackRecoveryLock();
+        if (!terminalOnFailure && writeRuntime.snapshot().mode !== "running") {
+          partyCheckpointTerminalRef.current = previousTerminal;
+        }
+      }
+    }
   };
 
   const partyTrackOrdinal = (trackId) => {
@@ -2666,6 +2769,7 @@ export default function App() {
       writerToken: partyCheckpointWriterTokenRef.current
     };
     partyCheckpointWriteGenerationRef.current += 1;
+    partyCheckpointWriteRuntimeRef.current?.reset?.();
     partyCheckpointLastFingerprintRef.current = "";
     partyCheckpointRecoveryRef.current = null;
     setPartyCheckpointRecovery(null);
@@ -2739,6 +2843,7 @@ export default function App() {
       writerToken: partyCheckpointWriterTokenRef.current
     };
     partyCheckpointWriteGenerationRef.current += 1;
+    partyCheckpointWriteRuntimeRef.current?.reset?.();
     partyCheckpointTerminalRef.current = true;
     partyCheckpointSessionIdRef.current = null;
     partyCheckpointRecoveryRef.current = null;
@@ -4690,6 +4795,11 @@ export default function App() {
       const rehearsalCancel = rehearsalCancelRef.current;
       const runtime = transitionArmLeaseRef.current;
       analysisGenerationRef.current += 1;
+      partyCheckpointClearOperationRef.current += 1;
+      partyCheckpointClearOwnerRef.current = null;
+      try { partyCheckpointClearCancelRef.current?.(); } catch { /* Storage owner is already revoked. */ }
+      partyCheckpointClearCancelRef.current = null;
+      partyCheckpointWriteRuntimeRef.current?.halt?.();
       cancelActiveBackgroundAnalysis({ resetEnhanced: true, announceUnabortable: false });
       try { disposeAnalysisClient(); } catch { /* Host teardown continues. */ }
       try { disposeEnhancedRhythmClient(); } catch { /* Host teardown continues. */ }
@@ -4788,6 +4898,14 @@ export default function App() {
     }
     advancePartyAutopilotCoordinatorEpoch();
     if (partyCheckpointTerminalRef.current || !partyCheckpointSessionIdRef.current) {
+      const checkpointRuntime = partyCheckpointWriteRuntimeRef.current;
+      const checkpointMode = checkpointRuntime?.snapshot?.().mode ?? "running";
+      if (checkpointMode !== "running" || checkpointRuntime?.reset?.() === false) {
+        if (checkpointMode === "circuit-open") setPartyCheckpointWriteCircuitOpen(true);
+        setPartyCheckpointError("Party recovery updates are stopped in this tab. Reload Mazzy before starting a new party.");
+        window.requestAnimationFrame(() => partyCheckpointAlertRef.current?.focus?.());
+        return;
+      }
       partyCheckpointSessionIdRef.current = crypto.randomUUID();
       partyCheckpointTerminalRef.current = false;
       partyCheckpointPauseReasonRef.current = "active-periodic";
@@ -4803,8 +4921,16 @@ export default function App() {
     setShowPartyReadiness(false);
   };
   const resetPartyAutopilot = async () => {
+    if (partyCheckpointBusyRef.current) return;
     if (partyCheckpointWriterLostRef.current) {
       setPartyCheckpointError("Reload this tab to review the current saved party plan before starting a new party here.");
+      window.requestAnimationFrame(() => partyCheckpointAlertRef.current?.focus?.());
+      return;
+    }
+    const checkpointMode = partyCheckpointWriteRuntimeRef.current?.snapshot?.().mode ?? "running";
+    if (checkpointMode !== "running") {
+      if (checkpointMode === "circuit-open") setPartyCheckpointWriteCircuitOpen(true);
+      setPartyCheckpointError("Party recovery updates are stopped in this tab. Reload Mazzy before starting a new party.");
       window.requestAnimationFrame(() => partyCheckpointAlertRef.current?.focus?.());
       return;
     }
@@ -4921,6 +5047,7 @@ export default function App() {
       };
       libraryStateRef.current = result.libraryState;
       partyCheckpointTerminalRef.current = false;
+      partyCheckpointWriteRuntimeRef.current?.reset?.();
       partyCheckpointWriterLostRef.current = false;
       setPartyCheckpointWriterLost(false);
       partyCheckpointPauseReasonRef.current = "host-paused";
@@ -4942,48 +5069,24 @@ export default function App() {
 
   const discardSavedPartyPlan = async () => {
     if (partyFirstSongLoadRef.current) return;
-    if (partyCheckpointBusyRef.current) return;
-    partyCheckpointBusyRef.current = true;
-    refreshPlaybackRecoveryLock();
-    setPartyCheckpointBusy(true);
     setPartyCheckpointError("");
     const recovery = partyCheckpointRecoveryRef.current;
     const checkpoint = recovery?.status === "available" ? recovery.checkpoint : null;
-    try {
-      const result = await clearPartySessionCheckpoint(checkpoint ? {
-        expectedRevision: checkpoint.revision,
-        expectedSessionId: checkpoint.sessionId,
-        expectedWriterToken: checkpoint.writerToken,
-        recordStatus: "cleared"
+    const cleared = await clearOwnedPartyCheckpoint("cleared", {
+      terminalOnFailure: true,
+      expectedCheckpoint: checkpoint ? {
+        revision: checkpoint.revision,
+        sessionId: checkpoint.sessionId,
+        writerToken: checkpoint.writerToken
       } : {
-        expectedRevision: partyCheckpointRevisionRef.current,
-        recordStatus: "cleared"
-      });
-      if (result.status !== "cleared") throw new Error("stale checkpoint");
-      partyCheckpointWriteGenerationRef.current += 1;
-      partyCheckpointRevisionRef.current = result.revision;
-      partyCheckpointStoredRecordRef.current = {
-        recordStatus: "cleared",
-        revision: result.revision,
-        sessionId: checkpoint?.sessionId ?? null,
-        writerToken: checkpoint?.writerToken ?? null
-      };
-      partyCheckpointTerminalRef.current = true;
-      partyCheckpointSessionIdRef.current = null;
-      partyCheckpointWriterLostRef.current = false;
-      setPartyCheckpointWriterLost(false);
-      partyCheckpointRecoveryRef.current = null;
-      setPartyCheckpointRecovery(null);
+        revision: partyCheckpointRevisionRef.current,
+        sessionId: null,
+        writerToken: null
+      }
+    });
+    if (cleared) {
       setPartyCheckpointCardVisible(false);
-      setPartyCheckpointError("");
       window.requestAnimationFrame(() => partyModeTitleRef.current?.focus?.());
-    } catch {
-      setPartyCheckpointError("The saved party plan was not deleted. Reload Mazzy and try again.");
-      window.requestAnimationFrame(() => partyCheckpointAlertRef.current?.focus?.());
-    } finally {
-      partyCheckpointBusyRef.current = false;
-      refreshPlaybackRecoveryLock();
-      setPartyCheckpointBusy(false);
     }
   };
   const startCurrentSong = async () => {
@@ -5084,6 +5187,12 @@ export default function App() {
           </button>
         </div>
         <p className="party-mode-status" role="status">{partyModeStatus}</p>
+        {partyCheckpointBusy && (
+          <div className="party-mode-readiness" role="status" aria-live="polite" aria-atomic="true">
+            <strong>UPDATING SAVED PARTY RECOVERY</strong>
+            <span>Mazzy will not start new audio while browser storage finishes. Audio already playing may continue; Stop All Sound stays available.</span>
+          </div>
+        )}
         {audioRecoveryState && (
           <div className="library-storage-error" role="alert">
             <p>{audioRecoveryMessage(audioRecoveryState)}</p>
@@ -5146,7 +5255,7 @@ export default function App() {
         {partyCheckpointError && (
           <div ref={partyCheckpointAlertRef} tabIndex={-1} className="library-storage-error" role="alert">
             <p>{partyCheckpointError}</p>
-            {partyCheckpointWriterLost && (
+            {(partyCheckpointWriterLost || partyCheckpointWriteCircuitOpen) && (
               <button type="button" onClick={() => window.location.reload()}>RELOAD RECOVERY STATE</button>
             )}
           </div>
@@ -5604,6 +5713,7 @@ export default function App() {
                 {!autoPilotEnabled && (
                   <button
                     type="button"
+                    disabled={partyCheckpointBusy || partyCheckpointWriteCircuitOpen || partyCheckpointWriterLost}
                     onClick={() => {
                       void resetPartyAutopilot();
                     }}
