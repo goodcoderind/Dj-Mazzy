@@ -21,7 +21,7 @@ backend and your music is not uploaded to a server.
 - One-click BPM synchronization
 - High, mid, and low EQ with kill switches
 - Equal-power crossfader
-- Folder-based library importing
+- Audio-file importing
 - Persistent local library powered by IndexedDB
 - Reorderable playback queue and “Play Next” controls
 - Automatic transitions with beat alignment, tempo matching, crossfading, and bass swapping
@@ -62,7 +62,7 @@ actual playback, EQ, gain automation, synchronization, and transitions.
 
 ### Requirements
 
-- Node.js 20 or newer
+- Node.js `^20.19.0 || >=22.12.0` (required by the locked Vite version)
 - A modern Chromium, Firefox, or Safari browser
 
 ### Install and run
@@ -86,7 +86,7 @@ npm run preview
 
 ## Using Mazzy
 
-1. Select **IMPORT** and choose a folder containing audio files.
+1. Select **IMPORT** and choose one or more audio files.
 2. Select a library track to load it into an available deck.
 3. Use the context menu to explicitly load a track into Deck A or Deck B.
 4. Press **Play**, adjust tempo and EQ, or use **SYNC** to match the other deck.
